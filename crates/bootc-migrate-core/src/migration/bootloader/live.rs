@@ -172,14 +172,42 @@ pub fn install_systemd_boot_binary(esp_path: &Path, from_image: Option<&str>) ->
     if host_src.exists() {
         fs::copy(host_src, &sd_dst).context("installing systemd-bootx64.efi")?;
     } else if let Some(image) = from_image {
-        crate::registry::extract_files_via_registry(
-            image,
-            &[(
-                Path::new("usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
-                sd_dst.as_path(),
-            )],
-        )
-        .with_context(|| format!("fetching systemd-bootx64.efi from {image}"))?;
+        // Early-boot E2E runs have raced the guest's own network coming up
+        // (the same race build_cross_base_plan already retries around —
+        // bootc switch's own pull moments later succeeds against the exact
+        // same registry). A handful of retries absorbs that instead of
+        // failing migrate-bootloader over a transient startup race.
+        const FETCH_ATTEMPTS: u32 = 5;
+        const FETCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+        let mut last_err = None;
+        let mut fetched = false;
+        for attempt in 1..=FETCH_ATTEMPTS {
+            match crate::registry::extract_files_via_registry(
+                image,
+                &[(
+                    Path::new("usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
+                    sd_dst.as_path(),
+                )],
+            ) {
+                Ok(()) => {
+                    fetched = true;
+                    break;
+                }
+                Err(e) => {
+                    if attempt < FETCH_ATTEMPTS {
+                        std::thread::sleep(FETCH_RETRY_DELAY);
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        if !fetched {
+            return Err(last_err
+                .expect("fetched is false only after at least one failed attempt")
+                .context(format!(
+                    "fetching systemd-bootx64.efi from {image} after {FETCH_ATTEMPTS} attempt(s)"
+                )));
+        }
     } else {
         bail!(
             "host does not ship systemd-bootx64.efi at {} and no --from-image was given — \
