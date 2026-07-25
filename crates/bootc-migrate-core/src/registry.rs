@@ -428,6 +428,7 @@ impl RegistryEndpoint {
             &["https", "http"]
         };
 
+        let mut last_err = None;
         for scheme in candidates {
             let base = format!("{}://{}", scheme, host);
             match probe_v2(&base, &repo) {
@@ -439,13 +440,16 @@ impl RegistryEndpoint {
                         bearer,
                     });
                 }
-                Err(_) => continue,
+                Err(e) => last_err = Some(format!("{scheme}: {e}")),
             }
         }
         Err(anyhow!(
-            "could not reach registry {} (tried {:?})",
+            "could not reach registry {} (tried {:?}){}",
             host,
-            candidates
+            candidates,
+            last_err
+                .map(|e| format!(" — last error: {e}"))
+                .unwrap_or_default()
         ))
     }
 

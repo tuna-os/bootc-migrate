@@ -1014,25 +1014,24 @@ PRECHECK
     # come up before their first registry pull). Wait for it explicitly
     # here instead of relying on that same incidental buffer, which
     # migrate-bootloader's shorter path doesn't have.
-    step "=== migrate-bootloader: waiting for guest network to reach the registry ==="
-    NET_WAIT_START=$SECONDS
-    NET_READY=0
-    LAST_NET_PROBE=""
-    for _ in $(seq 1 30); do
-        LAST_NET_PROBE=$(ssh $SSH_OPTS root@localhost "curl -v --fail --max-time 5 https://ghcr.io/v2/ -o /dev/null" 2>&1) && { NET_READY=1; break; }
-        sleep 3
-    done
-    if [ "$NET_READY" -eq 1 ]; then
-        step "Guest can reach ghcr.io after $((SECONDS - NET_WAIT_START))s."
-    else
-        step "WARNING: guest still couldn't reach ghcr.io after $((SECONDS - NET_WAIT_START))s — proceeding anyway; migrate-bootloader's own retry loop is the last line of defense."
-        step "--- diagnostics: last curl attempt ---"
-        echo "$LAST_NET_PROBE" | tail -30
-        step "--- diagnostics: DNS resolution ---"
-        ssh $SSH_OPTS root@localhost "getent hosts ghcr.io; resolvectl status 2>&1 | head -20 || cat /etc/resolv.conf" 2>&1 || true
-        step "--- diagnostics: interface/route state ---"
-        ssh $SSH_OPTS root@localhost "ip addr show; ip route show" 2>&1 || true
-    fi
+    # Diagnosed via a previous run's captured curl -v output: the guest's
+    # network, DNS, and TLS to ghcr.io were fine the whole time (a clean
+    # HTTP/2 401 + Www-Authenticate challenge came back in under a second)
+    # -- the real bug was RegistryEndpoint::resolve silently swallowing
+    # probe_v2's actual error (fixed to surface it). This wait step is kept
+    # only as a correct, fast sanity probe (a registry's /v2/ legitimately
+    # 401s an anonymous request -- that is success, not failure, unlike the
+    # earlier version of this probe which used curl --fail and treated
+    # every 401 as unreachable).
+    step "=== migrate-bootloader: sanity-checking guest network reaches the registry ==="
+    NET_STATUS=$(ssh $SSH_OPTS root@localhost "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://ghcr.io/v2/" 2>&1) || true
+    case "$NET_STATUS" in
+        2??|401) step "OK: guest reaches ghcr.io (HTTP $NET_STATUS)." ;;
+        *)
+            step "WARNING: unexpected response probing ghcr.io/v2/ (got '$NET_STATUS') — proceeding anyway; migrate-bootloader's own error message will now include the real underlying cause if this is a genuine problem."
+            ssh $SSH_OPTS root@localhost "getent hosts ghcr.io; ip route show" 2>&1 || true
+            ;;
+    esac
 
     # Most real GRUB2 deployments don't ship systemd-bootx64.efi locally
     # (confirmed empirically: Bluefin stable doesn't) — --from-image pulls
