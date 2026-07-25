@@ -215,6 +215,48 @@ fn diff_by_name<'a>(
     plan.target_only.dedup();
 }
 
+/// #80: system accounts the target image's `sysusers.d` declares that this
+/// host's *live* `/etc/passwd`/`/etc/group` lacks.
+///
+/// `bootc switch`'s native OSTree `/etc` merge is a plain whole-*file*
+/// 3-way merge with no identity-DB key-level reconciliation (confirmed by
+/// reading ostree's own `merge_configuration_from()` — see issue #80): a
+/// locally-modified `/etc/passwd` (true of virtually every real system —
+/// any human user, `sshd_config` tweak, or `/etc/hosts` edit already counts)
+/// is kept verbatim across the switch. So a system account the target
+/// declares via `sysusers.d` (e.g. `messagebus` for a classic-dbus target
+/// switching from a dbus-broker source) will very likely **not** be added
+/// by the switch, even though the target's own factory `/etc/passwd` has
+/// it.
+///
+/// This is advisory only — it does not gate anything, matching the "warn,
+/// don't auto-add" scope decided on #80 (auto-adding accounts pre-switch
+/// would itself be exactly the kind of compensating `/etc` mutation the
+/// module doc on `OstreeDeploy` avoids by design, deferring to `bootc
+/// switch`). Returns names sorted and deduplicated; empty when nothing is
+/// missing (the common case).
+pub fn missing_target_sysusers(
+    target_sysusers: &[crate::scan::SysusersEntry],
+    host_passwd: &[PasswdEntry],
+    host_group: &[GroupEntry],
+) -> Vec<String> {
+    let passwd_names: BTreeSet<&str> = host_passwd.iter().map(|p| p.name.as_str()).collect();
+    let group_names: BTreeSet<&str> = host_group.iter().map(|g| g.name.as_str()).collect();
+
+    let mut missing: Vec<String> = target_sysusers
+        .iter()
+        .filter(|e| match e.kind {
+            'u' => !passwd_names.contains(e.name.as_str()),
+            'g' => !group_names.contains(e.name.as_str()),
+            _ => false,
+        })
+        .map(|e| e.name.clone())
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 /// Turn remap entries into an ordered, collision-free step sequence: every
 /// entry first moves old→scratch (scratch ids picked from a range unused on
 /// either side), then scratch→final. Safe for arbitrary id permutations.
@@ -380,6 +422,69 @@ sshd:x:74:74::/usr/share/empty.sshd:/sbin/nologin
 james:x:1000:1000::/home/james:/bin/bash
 newsvc:x:985:985::/var/lib/newsvc:/sbin/nologin
 ";
+
+    #[test]
+    fn missing_target_sysusers_flags_absent_user_and_group() {
+        let target_sysusers = vec![
+            crate::scan::SysusersEntry {
+                kind: 'u',
+                name: "messagebus".to_string(),
+                id: Some(81),
+            },
+            crate::scan::SysusersEntry {
+                kind: 'g',
+                name: "polkitd".to_string(),
+                id: Some(999),
+            },
+        ];
+        let host_passwd = parse_passwd(SRC_PASSWD);
+        let host_group = parse_group("root:x:0:\nsshd:x:74:\n");
+
+        let missing = missing_target_sysusers(&target_sysusers, &host_passwd, &host_group);
+
+        assert_eq!(
+            missing,
+            vec!["messagebus".to_string(), "polkitd".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_target_sysusers_empty_when_all_present() {
+        let target_sysusers = vec![crate::scan::SysusersEntry {
+            kind: 'u',
+            name: "sshd".to_string(),
+            id: Some(74),
+        }];
+        let host_passwd = parse_passwd(SRC_PASSWD);
+        let host_group = parse_group("");
+
+        let missing = missing_target_sysusers(&target_sysusers, &host_passwd, &host_group);
+
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn missing_target_sysusers_deduplicates_and_sorts() {
+        let target_sysusers = vec![
+            crate::scan::SysusersEntry {
+                kind: 'u',
+                name: "zzz".to_string(),
+                id: None,
+            },
+            crate::scan::SysusersEntry {
+                kind: 'u',
+                name: "aaa".to_string(),
+                id: None,
+            },
+            crate::scan::SysusersEntry {
+                kind: 'u',
+                name: "aaa".to_string(),
+                id: None,
+            },
+        ];
+        let missing = missing_target_sysusers(&target_sysusers, &[], &[]);
+        assert_eq!(missing, vec!["aaa".to_string(), "zzz".to_string()]);
+    }
 
     #[test]
     fn parses_passwd_and_skips_garbage() {

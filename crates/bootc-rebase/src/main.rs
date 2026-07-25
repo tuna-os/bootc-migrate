@@ -761,21 +761,21 @@ fn staged_image_matches(requested: &str, staged: &str) -> bool {
 /// to the same "can't establish identity, don't gate" degradation used for
 /// a target with no parseable os-release — printing a warning either way so
 /// the degradation isn't silent.
-fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>> {
-    let Some(host_base) = scan::read_host_base_info() else {
-        return Ok(None);
-    };
-
+/// Scan `target_image`'s capabilities, retrying on transient registry
+/// failures — early-boot E2E runs have raced the guest's own network coming
+/// up (`bootc switch`'s own pull moments later succeeds against the same
+/// registry). Returns `None` (with a printed warning) rather than an error
+/// so callers can degrade to "unknown information, don't gate on it."
+fn scan_target_capabilities_with_retries(
+    target_image: &str,
+    purpose: &str,
+) -> Option<scan::Capabilities> {
     const SCAN_ATTEMPTS: u32 = 3;
     const SCAN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
     let mut last_err = None;
-    let mut caps = None;
     for attempt in 1..=SCAN_ATTEMPTS {
         match scan::scan_target_image(target_image) {
-            Ok(c) => {
-                caps = Some(c);
-                break;
-            }
+            Ok(c) => return Some(c),
             Err(e) => {
                 if attempt < SCAN_ATTEMPTS {
                     std::thread::sleep(SCAN_RETRY_DELAY);
@@ -784,12 +784,21 @@ fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>>
             }
         }
     }
-    let Some(caps) = caps else {
-        eprintln!(
-            "Warning: could not scan target image for cross-base identity after {SCAN_ATTEMPTS} \
-             attempt(s) ({}); proceeding without a cross-base check.",
-            last_err.expect("caps is None only after at least one failed attempt")
-        );
+    eprintln!(
+        "Warning: could not scan target image for {purpose} after {SCAN_ATTEMPTS} attempt(s) \
+         ({}); proceeding without it.",
+        last_err.expect("None is returned only after at least one failed attempt")
+    );
+    None
+}
+
+fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>> {
+    let Some(host_base) = scan::read_host_base_info() else {
+        return Ok(None);
+    };
+
+    let Some(caps) = scan_target_capabilities_with_retries(target_image, "cross-base identity")
+    else {
         return Ok(None);
     };
     let Some(target_base) = caps.base else {
@@ -851,6 +860,38 @@ fn gate_cross_base(
         );
     }
     Ok(Some(plan))
+}
+
+/// #80: print (read-only, before staging) any system accounts the target
+/// image's `sysusers.d` declares that this host's live identity DB lacks —
+/// `bootc switch`'s native `/etc` merge has no key-level reconciliation for
+/// them (see `remap::missing_target_sysusers`'s doc for the confirmed
+/// mechanism). Advisory only; never refuses the re-base. Degrades silently
+/// (via `scan_target_capabilities_with_retries`'s own warning) when the
+/// target can't be scanned — this is a courtesy heads-up, not a gate.
+fn warn_identity_merge_gap(target_image: &str) {
+    let Some(caps) =
+        scan_target_capabilities_with_retries(target_image, "identity-DB compatibility")
+    else {
+        return;
+    };
+    let host_passwd =
+        remap::parse_passwd(&std::fs::read_to_string("/etc/passwd").unwrap_or_default());
+    let host_group = remap::parse_group(&std::fs::read_to_string("/etc/group").unwrap_or_default());
+    let missing = remap::missing_target_sysusers(&caps.sysusers, &host_passwd, &host_group);
+    if missing.is_empty() {
+        return;
+    }
+    println!(
+        "Note (#80): the target image expects system account(s) not present in this \
+         host's live /etc/passwd or /etc/group: {}. `bootc switch`'s native /etc merge \
+         does not reconcile identity databases (unlike this tool's own composefs-conversion \
+         merge) — if a locally-modified /etc/passwd is kept verbatim across the switch, \
+         these accounts won't be added, and any service depending on them (e.g. dbus \
+         needing a `messagebus` user) may fail to start after reboot. This is informational; \
+         the re-base is not blocked.",
+        missing.join(", ")
+    );
 }
 
 /// The staged deployment's root directory under `/ostree/deploy/<stateroot>`,
@@ -959,6 +1000,10 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     // anything is staged, and refuse without --accept-cross-base so the
     // blast radius is visible first — including in --dry-run.
     let cross_base_plan = gate_cross_base(&args.target_image, args.accept_cross_base, args.force)?;
+
+    // #80: advisory identity-DB gap check, independent of cross-base status
+    // (the motivating case — Bluefin GNOME → Aurora KDE — is same-base).
+    warn_identity_merge_gap(&args.target_image);
 
     if args.dry_run {
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
