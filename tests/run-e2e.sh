@@ -1017,17 +1017,21 @@ PRECHECK
     step "=== migrate-bootloader: waiting for guest network to reach the registry ==="
     NET_WAIT_START=$SECONDS
     NET_READY=0
+    LAST_NET_PROBE=""
     for _ in $(seq 1 30); do
-        if ssh $SSH_OPTS root@localhost "curl -fsS --max-time 5 https://ghcr.io/v2/ -o /dev/null" 2>/dev/null; then
-            NET_READY=1
-            break
-        fi
+        LAST_NET_PROBE=$(ssh $SSH_OPTS root@localhost "curl -v --fail --max-time 5 https://ghcr.io/v2/ -o /dev/null" 2>&1) && { NET_READY=1; break; }
         sleep 3
     done
     if [ "$NET_READY" -eq 1 ]; then
         step "Guest can reach ghcr.io after $((SECONDS - NET_WAIT_START))s."
     else
         step "WARNING: guest still couldn't reach ghcr.io after $((SECONDS - NET_WAIT_START))s — proceeding anyway; migrate-bootloader's own retry loop is the last line of defense."
+        step "--- diagnostics: last curl attempt ---"
+        echo "$LAST_NET_PROBE" | tail -30
+        step "--- diagnostics: DNS resolution ---"
+        ssh $SSH_OPTS root@localhost "getent hosts ghcr.io; resolvectl status 2>&1 | head -20 || cat /etc/resolv.conf" 2>&1 || true
+        step "--- diagnostics: interface/route state ---"
+        ssh $SSH_OPTS root@localhost "ip addr show; ip route show" 2>&1 || true
     fi
 
     # Most real GRUB2 deployments don't ship systemd-bootx64.efi locally
