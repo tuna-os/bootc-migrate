@@ -90,6 +90,20 @@ jobs:
             mode: ostree-rebase
             disk_size: 40G
             allow_failure: true
+          - name: bluefin GRUB2 -> systemd-boot (migrate-bootloader)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # No target image involved — migrate-bootloader converts the
+            # booted deployment's own bootloader. Reuses base as target only
+            # because the workflow's image-pull step expects one; unused by
+            # E2E_MODE=migrate-bootloader itself.
+            target: ghcr.io/projectbluefin/bluefin:stable
+            mode: migrate-bootloader
+            disk_size: 20G
+            # New, unvalidated live-NVRAM cell (#65) — allow_failure until
+            # proven stable across several runs, so a real bug here doesn't
+            # block every other PR's required-checks while it's being
+            # stabilized. Promote to gating once green consistently.
+            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration

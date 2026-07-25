@@ -1,4 +1,5 @@
 pub mod grub;
+pub mod live;
 pub mod systemd_boot;
 
 /// A BLS (Boot Loader Specification) Type 1 entry.
