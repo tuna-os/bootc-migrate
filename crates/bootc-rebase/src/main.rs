@@ -149,6 +149,14 @@ struct MigrateBootloaderArgs {
     /// BLS entry title to resync with (only meaningful with --resync).
     #[arg(long)]
     title: Option<String>,
+
+    /// OCI image to fetch systemd-bootx64.efi from when the current
+    /// deployment doesn't ship it locally — the common case in practice
+    /// (confirmed empirically: Bluefin stable's GRUB deployment doesn't).
+    /// Any image known to ship systemd-boot works, e.g. a composefs
+    /// sibling target image.
+    #[arg(long)]
+    from_image: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -387,6 +395,7 @@ fn run_migrate_bootloader(args: &MigrateBootloaderArgs) -> Result<()> {
         cmdline: cmdline.trim(),
         entry_token_file: entry_token_file.as_deref(),
         machine_id: machine_id.trim(),
+        from_image: args.from_image.as_deref(),
     };
     live::run_migrate(&inputs)?;
     Ok(())
@@ -1418,6 +1427,7 @@ mod tests {
             entry_token: None,
             kernel_version: None,
             title: None,
+            from_image: None,
         };
         let err = run_migrate_bootloader(&args).unwrap_err();
         assert!(err.to_string().contains("systemd-boot"));
@@ -1434,6 +1444,7 @@ mod tests {
             entry_token: None,
             kernel_version: None,
             title: None,
+            from_image: None,
         };
         let err = run_migrate_bootloader(&args).unwrap_err();
         assert!(err.to_string().contains("--entry-token"));

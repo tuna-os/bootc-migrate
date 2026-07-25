@@ -1006,8 +1006,13 @@ bootctl status 2>&1 | grep -qi 'systemd-boot' && { echo "FAIL: VM is already on 
 echo "OK: VM is not yet on systemd-boot (GRUB baseline confirmed)."
 PRECHECK
 
+    # Most real GRUB2 deployments don't ship systemd-bootx64.efi locally
+    # (confirmed empirically: Bluefin stable doesn't) — --from-image pulls
+    # it from an image known to carry it. Reuses the scenario's target
+    # image (a composefs target, proven to ship it by every other cell in
+    # this matrix that installs systemd-boot from it).
     step "=== migrate-bootloader: running bootc-rebase migrate-bootloader --to systemd-boot ==="
-    MIGRATE_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase migrate-bootloader --to systemd-boot" 2>&1) || {
+    MIGRATE_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" 2>&1) || {
         echo "FAIL: migrate-bootloader exited nonzero"
         echo "$MIGRATE_OUT"
         exit 1

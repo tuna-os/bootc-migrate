@@ -92,11 +92,14 @@ jobs:
             allow_failure: true
           - name: bluefin GRUB2 -> systemd-boot (migrate-bootloader)
             base: ghcr.io/projectbluefin/bluefin:stable
-            # No target image involved — migrate-bootloader converts the
-            # booted deployment's own bootloader. Reuses base as target only
-            # because the workflow's image-pull step expects one; unused by
-            # E2E_MODE=migrate-bootloader itself.
-            target: ghcr.io/projectbluefin/bluefin:stable
+            # No backend conversion happens here — migrate-bootloader
+            # converts the booted deployment's own bootloader in place. The
+            # target image is used only as --from-image's systemd-boot
+            # binary source (confirmed empirically: Bluefin stable's own
+            # GRUB deployment doesn't ship systemd-bootx64.efi locally);
+            # Dakota is proven to ship it by every composefs-migrate cell
+            # in this matrix that installs systemd-boot from it.
+            target: ghcr.io/projectbluefin/dakota:stable
             mode: migrate-bootloader
             disk_size: 20G
             # New, unvalidated live-NVRAM cell (#65) — allow_failure until

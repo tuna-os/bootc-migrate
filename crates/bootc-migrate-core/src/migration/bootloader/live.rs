@@ -153,22 +153,43 @@ pub fn write_bls_entry(esp_path: &Path, entry: &BlsEntry) -> Result<()> {
 /// target image to pull from; it converts the *current* deployment's own
 /// bootloader) to the ESP's `EFI/systemd/` and `EFI/BOOT/` (removable-media
 /// fallback) paths.
-pub fn install_systemd_boot_binary(esp_path: &Path) -> Result<()> {
-    let src = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-    if !src.exists() {
-        bail!(
-            "host does not ship systemd-bootx64.efi at {} — migrate-bootloader converts the \
-             current deployment's own bootloader and has no target image to pull binaries \
-             from; install a systemd-boot package first",
-            src.display()
-        );
-    }
+///
+/// Most real GRUB2 deployments (confirmed empirically: Bluefin stable does
+/// not) don't ship the binary locally at all, so `from_image` — an OCI
+/// image known to carry it (e.g. a composefs sibling target) — is the
+/// primary path in practice, not a rare fallback. When absent and the host
+/// doesn't have the binary either, this fails with actionable guidance
+/// rather than silently doing nothing.
+pub fn install_systemd_boot_binary(esp_path: &Path, from_image: Option<&str>) -> Result<()> {
+    let host_src = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
+
     let sd_dir = esp_path.join("EFI/systemd");
     fs::create_dir_all(&sd_dir)?;
     let removable_dir = esp_path.join("EFI/BOOT");
     fs::create_dir_all(&removable_dir)?;
     let sd_dst = sd_dir.join("systemd-bootx64.efi");
-    fs::copy(src, &sd_dst).context("installing systemd-bootx64.efi")?;
+
+    if host_src.exists() {
+        fs::copy(host_src, &sd_dst).context("installing systemd-bootx64.efi")?;
+    } else if let Some(image) = from_image {
+        crate::registry::extract_files_via_registry(
+            image,
+            &[(
+                Path::new("usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
+                sd_dst.as_path(),
+            )],
+        )
+        .with_context(|| format!("fetching systemd-bootx64.efi from {image}"))?;
+    } else {
+        bail!(
+            "host does not ship systemd-bootx64.efi at {} and no --from-image was given — \
+             migrate-bootloader converts the current deployment's own bootloader and has no \
+             target image by default; pass --from-image <image known to ship systemd-boot> \
+             or install a systemd-boot package on this host first",
+            host_src.display()
+        );
+    }
+
     fs::copy(&sd_dst, removable_dir.join("BOOTX64.EFI"))
         .context("installing BOOTX64.EFI removable-media loader")?;
     Ok(())
@@ -231,6 +252,10 @@ pub struct MigrateInputs<'a> {
     pub cmdline: &'a str,
     pub entry_token_file: Option<&'a str>,
     pub machine_id: &'a str,
+    /// An OCI image known to ship `systemd-bootx64.efi`, used when the
+    /// host's own deployment doesn't (the common case — see
+    /// [`install_systemd_boot_binary`]'s doc). `None` means host-only.
+    pub from_image: Option<&'a str>,
 }
 
 /// Full sequence: populate the ESP, write the BLS entry, install the
@@ -245,6 +270,7 @@ pub fn run_migrate(inputs: &MigrateInputs) -> Result<MigrationState> {
         cmdline,
         entry_token_file,
         machine_id,
+        from_image,
     } = *inputs;
 
     if let Some(existing) = load_state(state_path)? {
@@ -270,7 +296,7 @@ pub fn run_migrate(inputs: &MigrateInputs) -> Result<MigrationState> {
     build_initrd(&kver, &initrd_path)?;
 
     populate_esp_kernel(esp_path, &entry_token, &kver, &vmlinuz, &initrd_path)?;
-    install_systemd_boot_binary(esp_path)?;
+    install_systemd_boot_binary(esp_path, from_image)?;
 
     let filename = format!("bootc-rebase-{entry_token}-{kver}.conf");
     let entry = build_migrate_bootloader_entry(
@@ -530,19 +556,21 @@ mod tests {
     }
 
     #[test]
-    fn install_systemd_boot_binary_errors_clearly_when_host_lacks_it() {
+    fn install_systemd_boot_binary_errors_clearly_when_host_and_from_image_both_absent() {
         // Can't stub the hardcoded /usr/lib/systemd/boot/efi source path in
         // a unit test without root/mount tricks; assert the error path at
-        // least names the missing source so a real run's failure is
-        // actionable (full success path covered by the E2E cell).
+        // least names the missing source and mentions --from-image so a
+        // real run's failure is actionable (full success path — either
+        // source — covered by the E2E cell).
         let tmp = tempfile::tempdir().unwrap();
         let esp = tmp.path().join("esp");
         // On any host actually running this test suite that does ship the
         // binary, this would succeed instead — so only assert the shape of
         // failure when it doesn't exist, matching CI's non-UEFI runners.
         if !Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi").exists() {
-            let err = install_systemd_boot_binary(&esp).unwrap_err();
+            let err = install_systemd_boot_binary(&esp, None).unwrap_err();
             assert!(err.to_string().contains("systemd-bootx64.efi"));
+            assert!(err.to_string().contains("--from-image"));
         }
     }
 
