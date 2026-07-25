@@ -1006,6 +1006,30 @@ bootctl status 2>&1 | grep -qi 'systemd-boot' && { echo "FAIL: VM is already on 
 echo "OK: VM is not yet on systemd-boot (GRUB baseline confirmed)."
 PRECHECK
 
+    # This cell reaches its first network-dependent operation (the
+    # --from-image registry fetch) much earlier in wall-clock-since-boot
+    # than the composefs-migrate cells do (they have several preceding
+    # local steps — copying the migration utility, injecting fixtures —
+    # that incidentally give the guest's own outbound network extra time to
+    # come up before their first registry pull). Wait for it explicitly
+    # here instead of relying on that same incidental buffer, which
+    # migrate-bootloader's shorter path doesn't have.
+    step "=== migrate-bootloader: waiting for guest network to reach the registry ==="
+    NET_WAIT_START=$SECONDS
+    NET_READY=0
+    for _ in $(seq 1 30); do
+        if ssh $SSH_OPTS root@localhost "curl -fsS --max-time 5 https://ghcr.io/v2/ -o /dev/null" 2>/dev/null; then
+            NET_READY=1
+            break
+        fi
+        sleep 3
+    done
+    if [ "$NET_READY" -eq 1 ]; then
+        step "Guest can reach ghcr.io after $((SECONDS - NET_WAIT_START))s."
+    else
+        step "WARNING: guest still couldn't reach ghcr.io after $((SECONDS - NET_WAIT_START))s — proceeding anyway; migrate-bootloader's own retry loop is the last line of defense."
+    fi
+
     # Most real GRUB2 deployments don't ship systemd-bootx64.efi locally
     # (confirmed empirically: Bluefin stable doesn't) — --from-image pulls
     # it from an image known to carry it. Reuses the scenario's target
