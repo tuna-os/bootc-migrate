@@ -25,7 +25,7 @@ concurrency:
 jobs:
   # Linting, formatting, and unit tests — everything `just check` runs.
   validate:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +41,7 @@ jobs:
   # that delete or bypass meaningful test coverage — it is NOT a target.
   # Raise the floor as milestones add tests; never lower it to merge.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,7 +64,7 @@ jobs:
   # Workflow-file lint: catches broken expressions/needs/inputs in the CI
   # definitions themselves before they bite at dispatch time.
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Style-level shellcheck findings stay advisory, matching the repo's
     # `shellcheck --severity=warning` convention (justfile lint-shell).
     env:
@@ -78,7 +78,7 @@ jobs:
 
   # Dependency license and source policy (deny.toml).
   cargo-deny:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -99,7 +99,7 @@ jobs:
   required-checks:
     if: always()
     needs: [validate, cargo-deny, coverage, actionlint, e2e-gate]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Check all jobs succeeded
         env:
@@ -115,7 +115,7 @@ jobs:
   # (which runs in parallel) and blocks merge if any scenario failed.
   e2e-gate:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [validate]
     steps:
       - name: Wait for E2E workflow
