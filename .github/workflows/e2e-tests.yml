@@ -18,7 +18,7 @@ concurrency:
 jobs:
   e2e:
     name: ${{ matrix.scenario.name }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: runs-on=${{ github.run_id }}/runner=build-amd64
     timeout-minutes: 45
     # Exploratory cells (aurora: see below) opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without dragging
