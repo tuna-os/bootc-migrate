@@ -2,6 +2,81 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WirelessDevice {
+    interface: String,
+    modalias: String,
+}
+
+fn read_wireless_devices(net_class: &Path) -> Result<Vec<WirelessDevice>> {
+    let entries = match fs::read_dir(net_class) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", net_class.display()));
+        }
+    };
+
+    let mut devices = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.join("wireless").is_dir() {
+            continue;
+        }
+        let modalias_path = path.join("device/modalias");
+        let modalias = match fs::read_to_string(&modalias_path) {
+            Ok(modalias) => modalias.trim().to_owned(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read {}", modalias_path.display()));
+            }
+        };
+        if modalias.is_empty() {
+            continue;
+        }
+        devices.push(WirelessDevice {
+            interface: entry.file_name().to_string_lossy().into_owned(),
+            modalias,
+        });
+    }
+    devices.sort_by(|a, b| a.interface.cmp(&b.interface));
+    Ok(devices)
+}
+
+fn target_resolves_modalias(target_root: &Path, kver: &str, modalias: &str) -> Result<bool> {
+    let output = Command::new("/usr/sbin/modprobe")
+        .arg("--dirname")
+        .arg(target_root)
+        .args(["--set-version", kver, "--resolve-alias", modalias])
+        .output()
+        .context("failed to query the target kernel's module aliases with modprobe")?;
+
+    if output.status.success() {
+        return Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("not found in directory") {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "modprobe could not query target kernel {kver}: {}",
+        stderr.trim()
+    )
+}
+
+fn missing_target_wireless_drivers(target_root: &Path, kver: &str) -> Result<Vec<WirelessDevice>> {
+    let mut missing = Vec::new();
+    for device in read_wireless_devices(Path::new("/sys/class/net"))? {
+        if !target_resolves_modalias(target_root, kver, &device.modalias)? {
+            missing.push(device);
+        }
+    }
+    Ok(missing)
+}
+
 // ---- Phase 5 ----
 
 pub fn phase5_setup_bootloader(
@@ -138,6 +213,34 @@ pub fn phase5_setup_bootloader(
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .ok_or_else(|| anyhow!("could not find kernel version in mounted image"))?;
     println!("Found kernel version: {}", kver);
+
+    match missing_target_wireless_drivers(&mount_path, &kver) {
+        Ok(missing) if !missing.is_empty() => {
+            let devices = missing
+                .iter()
+                .map(|device| format!("{} ({})", device.interface, device.modalias))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = format!(
+                "target kernel {kver} has no module alias for wireless device(s): {devices}. \
+                 Wi-Fi will be unavailable after migration"
+            );
+            if force {
+                eprintln!(
+                    "[phase5] WARNING: {message}. --force was supplied, so bootloader setup will continue."
+                );
+            } else {
+                anyhow::bail!(
+                    "{message}. Refusing to install the ComposeFS boot entry. Fix the target image, \
+                     or rerun with --force only if alternate networking is available"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[phase5] warning: could not verify target wireless driver support: {e:#}")
+        }
+    }
 
     let mounted_vmlinuz = modules_dir.join(&kver).join("vmlinuz");
     let mounted_initrd = modules_dir.join(&kver).join("initramfs.img");
@@ -938,6 +1041,7 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn esp_parsing_returns_none_for_nonexistent() {
@@ -950,6 +1054,34 @@ mod tests {
         // If findmnt returns empty, parsing should return None.
         // The function returns None if the source string is empty.
         // This is exercised by get_esp_disk_and_part's early return on empty source.
+    }
+
+    #[test]
+    fn wireless_probe_reads_only_devices_with_modaliases() {
+        let temp = tempdir().unwrap();
+        let net = temp.path().join("net");
+        fs::create_dir_all(net.join("wlan0/wireless")).unwrap();
+        fs::create_dir_all(net.join("wlan0/device")).unwrap();
+        fs::write(
+            net.join("wlan0/device/modalias"),
+            "pci:v000017CBd00001107sv00001EACsd00008000bc02sc80i00\n",
+        )
+        .unwrap();
+        fs::create_dir_all(net.join("wlan-no-alias/wireless")).unwrap();
+        fs::create_dir_all(net.join("ethernet/device")).unwrap();
+
+        assert_eq!(
+            read_wireless_devices(&net).unwrap(),
+            vec![WirelessDevice {
+                interface: "wlan0".to_owned(),
+                modalias: "pci:v000017CBd00001107sv00001EACsd00008000bc02sc80i00".to_owned(),
+            }]
+        );
+        assert!(
+            read_wireless_devices(&net.join("missing"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── Slice 1: origin file schema tests ──

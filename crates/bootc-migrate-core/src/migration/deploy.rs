@@ -9,6 +9,7 @@ pub fn phase4_stage_deploy(
     config_digest: &str,
     sealed_config: &str,
     dry_run: bool,
+    force: bool,
 ) -> Result<PathBuf> {
     println!("=== Phase 4: Staging Deployment State ===");
 
@@ -28,12 +29,16 @@ pub fn phase4_stage_deploy(
     // with "Opening origin file: No such file or directory" and break the
     // post-reboot validation.
     let origin_path = deploy_dir.join(format!("{}.origin", verity.as_hex()));
-    if deploy_dir.exists() && origin_path.exists() {
+    let already_staged = deploy_dir.exists() && origin_path.exists();
+    if already_staged && !force {
         println!(
             "Deployment already staged at {}. Skipping Phase 4.",
             deploy_dir.display()
         );
         return Ok(deploy_dir);
+    }
+    if already_staged {
+        println!("[phase4] --force: refreshing the existing staged deployment.");
     }
 
     fs::create_dir_all(&deploy_dir).context("failed to create deployment directory")?;
@@ -51,10 +56,16 @@ pub fn phase4_stage_deploy(
         xattr::copy_dir_all_with_xattrs("/etc", &etc_dir)
             .context("failed to copy /etc (fallback)")?;
     }
+    let removed = sanitize_composefs_fstab(&etc_dir)?;
+    if removed > 0 {
+        println!(
+            "[phase4] removed {removed} host root or /var mount(s) from the target /etc/fstab"
+        );
+    }
 
     // Stage /var symlink
     let var_symlink = deploy_dir.join("var");
-    if var_symlink.exists() {
+    if var_symlink.exists() || var_symlink.is_symlink() {
         fs::remove_file(&var_symlink).context("failed to remove existing var entry")?;
     }
     std::os::unix::fs::symlink("../../os/default/var", &var_symlink)
@@ -88,7 +99,7 @@ pub fn phase4_stage_deploy(
     }
 
     // Handle /var migration
-    phase4_var_migration(&etc_dir, dry_run)?;
+    phase4_var_migration()?;
 
     // For XFS roots, the composefs repo lives in an ext4 loopback file; the
     // booted system must mount it at /sysroot/composefs so `bootc status` and
@@ -136,49 +147,136 @@ fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn phase4_var_migration(etc_dir: &Path, _dry_run: bool) -> Result<()> {
+fn phase4_var_migration() -> Result<()> {
     println!("=== Migrating /var data to ComposeFS state ===");
     let target_var = Path::new("/sysroot/state/os/default/var");
+    let completion_marker =
+        Path::new("/sysroot/state/os/default/.bootc-migrate-composefs-var-complete");
 
-    // Check if /var is already populated (idempotency)
-    if target_var.exists() {
-        let count = fs::read_dir(target_var).map(|d| d.count()).unwrap_or(0);
-        if count > 0 {
-            println!(
-                "/var already populated at {}. Skipping var migration.",
-                target_var.display()
-            );
-            return Ok(());
-        }
+    // A dedicated filesystem or direct Btrfs subvolume is mounted at this
+    // stateroot path by the initrd (Phase 5), so its existing data remains in
+    // place. Copying it would be both wasteful and lossy for special files.
+    if let Some(var) = detect_separate_var()? {
+        println!(
+            "[phase4] preserving /var in place ({}, UUID={}, options={}); Phase 5 will mount it at the composefs stateroot",
+            var.fstype, var.uuid, var.options
+        );
+        return Ok(());
     }
 
-    // Always copy /var data into state/os/default/var so the bootc initramfs
-    // bind-mount of that path onto the deploy's /var exposes user data
-    // (roothome/.ssh, home/, lib/containers, etc.). Do NOT synthesize an
-    // /etc/fstab entry for /var: on Bluefin /proc/mounts reports /var as
-    // subvolid=5 (the root subvol), and mounting that at /var post-pivot
-    // shadows the bind-mount with /ostree, /state, /boot — losing user data.
-    let _ = etc_dir; // (kept for signature compat; no fstab edits anymore)
-
-    if !target_var.exists() {
-        fs::create_dir_all(target_var.parent().unwrap())?;
+    // A target /var can contain a directory skeleton before migration. Only our
+    // completion marker proves the live data copy finished successfully.
+    if completion_marker.exists() {
+        println!(
+            "/var migration already completed at {}. Skipping.",
+            target_var.display()
+        );
+        return Ok(());
     }
 
-    let source_var = if Path::new("/sysroot/ostree/deploy/default/var").exists() {
-        "/sysroot/ostree/deploy/default/var"
-    } else {
-        "/var"
-    };
+    fs::create_dir_all(target_var)?;
 
-    println!(
-        "Migrating /var data from {} to ComposeFS state...",
-        source_var
-    );
-    xattr::copy_dir_all_with_xattrs(source_var, target_var)
+    // Copy the mounted live tree. The old OSTree deployment path may exist but
+    // is not necessarily the source backing the active /var mount.
+    println!("Migrating /var data from /var to ComposeFS state...");
+    xattr::copy_dir_all_with_xattrs("/var", target_var)
         .context("failed to migrate /var data to ComposeFS state")?;
+    fs::write(
+        completion_marker,
+        "The live /var tree was copied by bootc-migrate-composefs.\n",
+    )
+    .context("failed to write /var migration completion marker")?;
     println!("/var data migrated successfully.");
 
     Ok(())
+}
+
+/// Remove host root mounts that are invalid after composefs assembles `/` and
+/// `/var`. Other filesystems such as `/boot`, `/boot/efi`, `/home`, and swap
+/// remain untouched.
+fn sanitize_composefs_fstab(etc_dir: &Path) -> Result<usize> {
+    let path = etc_dir.join("fstab");
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+    };
+
+    let mut removed = 0usize;
+    let mut filtered = String::with_capacity(contents.len());
+    for line in contents.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let mountpoint = if trimmed.is_empty() || trimmed.starts_with('#') {
+            None
+        } else {
+            trimmed.split_whitespace().nth(1)
+        };
+        if matches!(mountpoint, Some("/" | "/var")) {
+            removed += 1;
+        } else {
+            filtered.push_str(line);
+        }
+    }
+
+    if removed > 0 {
+        fs::write(&path, filtered)
+            .with_context(|| format!("failed to sanitize {}", path.display()))?;
+    }
+    Ok(removed)
+}
+
+/// Work around target images that replace Mesa's `GL/lib/gbm` symlink with a
+/// directory containing only the NVIDIA GBM backend. On hybrid laptops that
+/// makes Mutter fail to initialize the AMD GPU driving the internal panel.
+///
+/// Mesa's loader supports a colon-separated `GBM_BACKENDS_PATH`; retain the
+/// NVIDIA directory first and add the target's Mesa-default directory as a
+/// fallback. `/etc/environment` is consumed by GDM's PAM session as well as
+/// normal user sessions.
+fn apply_split_gbm_backend_compat(target_root: &Path, etc_dir: &Path) -> Result<bool> {
+    let multiarch = format!("{}-linux-gnu", std::env::consts::ARCH);
+    let relative_gl = Path::new("usr/lib").join(&multiarch).join("GL");
+    let active = target_root.join(&relative_gl).join("lib/gbm");
+    let mesa = target_root.join(&relative_gl).join("default/lib/gbm");
+
+    // A normal image exposes Mesa through the active directory already. Only
+    // amend the environment for the precise split-backend layout.
+    if !active.is_dir() || !mesa.join("dri_gbm.so").is_file() || active.join("dri_gbm.so").is_file()
+    {
+        return Ok(false);
+    }
+
+    let environment_path = etc_dir.join("environment");
+    let mut environment = match fs::read_to_string(&environment_path) {
+        Ok(environment) => environment,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to read {}", environment_path.display()));
+        }
+    };
+    let already_configured = environment.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "GBM_BACKENDS_PATH")
+    });
+    if already_configured {
+        return Ok(false);
+    }
+
+    if !environment.is_empty() && !environment.ends_with('\n') {
+        environment.push('\n');
+    }
+    environment
+        .push_str("# Compatibility for target images with split Mesa and NVIDIA GBM backends\n");
+    environment.push_str(&format!(
+        "GBM_BACKENDS_PATH=/usr/lib/{multiarch}/GL/lib/gbm:/usr/lib/{multiarch}/GL/default/lib/gbm\n"
+    ));
+    fs::write(&environment_path, environment)
+        .with_context(|| format!("failed to update {}", environment_path.display()))?;
+    Ok(true)
 }
 
 /// Build a fstab entry for the /var btrfs subvolume by parsing /proc/mounts and
@@ -296,6 +394,27 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &new_default_etc, etc_dir)
         .context("3-way /etc merge failed")?;
 
+    match apply_split_gbm_backend_compat(&mount_path, etc_dir) {
+        Ok(true) => println!(
+            "[phase4] added Mesa's GBM backend directory for hybrid NVIDIA graphics compatibility"
+        ),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("[phase4] warning: failed to configure split GBM backend paths: {e:#}")
+        }
+    }
+
+    match apply_legacy_var_home_compat(Path::new("/"), &mount_path, etc_dir) {
+        Ok(Some(direction)) => println!(
+            "[phase4] added {} compatibility bind for the target's native /home layout",
+            direction.description()
+        ),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("[phase4] warning: failed to configure /var/home compatibility: {e:#}")
+        }
+    }
+
     // Drop /etc symlinks whose /usr/* target does not exist in the target image.
     // Bluefin → Dakota: e.g. /etc/systemd/system/dbus.service points to
     // dbus-broker.service which Dakota doesn't ship; the dangling symlink
@@ -313,6 +432,126 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
     drop_ostree_era_etc_artifacts(etc_dir);
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyHomeCompat {
+    HomeToVarHome,
+    VarHomeToHome,
+}
+
+impl LegacyHomeCompat {
+    fn description(self) -> &'static str {
+        match self {
+            Self::HomeToVarHome => "/home → /var/home",
+            Self::VarHomeToHome => "/var/home → /home",
+        }
+    }
+
+    fn fstab_entry(self) -> &'static str {
+        match self {
+            Self::HomeToVarHome => {
+                "/home /var/home none bind,x-systemd.requires-mounts-for=/home 0 0"
+            }
+            Self::VarHomeToHome => {
+                "/var/home /home none bind,x-systemd.requires-mounts-for=/var/home 0 0"
+            }
+        }
+    }
+}
+
+fn fstab_home_compat_direction(fstab: &str) -> Option<LegacyHomeCompat> {
+    let mut has_home_mount = false;
+    let mut has_var_home_mount = false;
+    let mut already_bridged = false;
+
+    for line in fstab.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut fields = trimmed.split_whitespace();
+        let Some(source) = fields.next() else {
+            continue;
+        };
+        let Some(mountpoint) = fields.next() else {
+            continue;
+        };
+
+        has_home_mount |= mountpoint == "/home";
+        has_var_home_mount |= mountpoint == "/var/home";
+        already_bridged |= matches!(
+            (source, mountpoint),
+            ("/home", "/var/home") | ("/var/home", "/home")
+        );
+    }
+
+    if already_bridged || (has_home_mount && has_var_home_mount) {
+        None
+    } else if has_home_mount {
+        Some(LegacyHomeCompat::HomeToVarHome)
+    } else {
+        Some(LegacyHomeCompat::VarHomeToHome)
+    }
+}
+
+/// Preserve both home-directory spellings when an OSTree source uses
+/// `/home -> /var/home` but the target image has a native `/home` directory.
+///
+/// Existing files are not rewritten. A bind mount keeps absolute symlinks,
+/// script interpreters, desktop settings, and other persisted paths valid
+/// while allowing the target to use its preferred `/home` location. When the
+/// source has a dedicated `/home` mount, `/home` is canonical; otherwise the
+/// preserved `/var` tree remains canonical.
+fn apply_legacy_var_home_compat(
+    source_root: &Path,
+    target_root: &Path,
+    etc_dir: &Path,
+) -> Result<Option<LegacyHomeCompat>> {
+    let source_home = source_root.join("home");
+    let source_var_home = source_root.join("var/home");
+    let source_uses_var_home = match (source_home.canonicalize(), source_var_home.canonicalize()) {
+        (Ok(home), Ok(var_home)) => home == var_home,
+        _ => false,
+    };
+    if !source_uses_var_home {
+        return Ok(None);
+    }
+
+    let target_home = target_root.join("home");
+    let target_home_metadata = match fs::symlink_metadata(&target_home) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", target_home.display()));
+        }
+    };
+    if !target_home_metadata.file_type().is_dir() {
+        return Ok(None);
+    }
+
+    let fstab_path = etc_dir.join("fstab");
+    let mut fstab = match fs::read_to_string(&fstab_path) {
+        Ok(fstab) => fstab,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to read {}", fstab_path.display()));
+        }
+    };
+    let Some(direction) = fstab_home_compat_direction(&fstab) else {
+        return Ok(None);
+    };
+
+    if !fstab.is_empty() && !fstab.ends_with('\n') {
+        fstab.push('\n');
+    }
+    fstab.push_str("# Preserve OSTree /var/home paths when the target uses a native /home\n");
+    fstab.push_str(direction.fstab_entry());
+    fstab.push('\n');
+    fs::write(&fstab_path, fstab)
+        .with_context(|| format!("failed to update {}", fstab_path.display()))?;
+
+    Ok(Some(direction))
 }
 
 /// Compute the "Config Drift Review" diff (issue #15): every path under live
@@ -474,4 +713,194 @@ fn find_ostree_etc_default() -> Result<PathBuf> {
         }
     }
     anyhow::bail!("could not locate OSTree deployment default /etc");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn fstab_sanitizer_drops_only_composefs_owned_mounts() {
+        let temp = tempdir().unwrap();
+        let etc = temp.path().join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        fs::write(
+            etc.join("fstab"),
+            "# generated by anaconda\n\
+             UUID=root / btrfs subvol=root,ro 0 0\n\
+             UUID=boot /boot ext4 defaults 1 2\n\
+             UUID=esp /boot/efi vfat umask=0077 0 2\n\
+             UUID=home /home btrfs subvol=home 0 0\n\
+             UUID=var /var btrfs subvol=var 0 0\n\
+             /var/swap/swapfile none swap defaults,nofail 0 0\n",
+        )
+        .unwrap();
+
+        assert_eq!(sanitize_composefs_fstab(&etc).unwrap(), 2);
+        assert_eq!(
+            fs::read_to_string(etc.join("fstab")).unwrap(),
+            "# generated by anaconda\n\
+             UUID=boot /boot ext4 defaults 1 2\n\
+             UUID=esp /boot/efi vfat umask=0077 0 2\n\
+             UUID=home /home btrfs subvol=home 0 0\n\
+             /var/swap/swapfile none swap defaults,nofail 0 0\n"
+        );
+        assert_eq!(sanitize_composefs_fstab(&etc).unwrap(), 0);
+    }
+
+    #[test]
+    fn home_compat_direction_follows_preserved_home_mount() {
+        struct Case {
+            name: &'static str,
+            fstab: &'static str,
+            expected: Option<LegacyHomeCompat>,
+        }
+
+        let cases = [
+            Case {
+                name: "dedicated home becomes canonical",
+                fstab: "UUID=home /home btrfs subvol=home 0 0\n",
+                expected: Some(LegacyHomeCompat::HomeToVarHome),
+            },
+            Case {
+                name: "home inside var remains canonical",
+                fstab: "UUID=boot /boot ext4 defaults 1 2\n",
+                expected: Some(LegacyHomeCompat::VarHomeToHome),
+            },
+            Case {
+                name: "legacy home mount remains canonical",
+                fstab: "UUID=home /var/home btrfs subvol=home 0 0\n",
+                expected: Some(LegacyHomeCompat::VarHomeToHome),
+            },
+            Case {
+                name: "both locations already mounted",
+                fstab: "UUID=home /home btrfs subvol=home 0 0\n\
+                        UUID=home /var/home btrfs subvol=home 0 0\n",
+                expected: None,
+            },
+            Case {
+                name: "existing forward bridge is idempotent",
+                fstab: "/home /var/home none bind 0 0\n",
+                expected: None,
+            },
+            Case {
+                name: "existing reverse bridge is idempotent",
+                fstab: "/var/home /home none bind 0 0\n",
+                expected: None,
+            },
+            Case {
+                name: "commented mounts are ignored",
+                fstab: "# UUID=home /home btrfs subvol=home 0 0\n",
+                expected: Some(LegacyHomeCompat::VarHomeToHome),
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                fstab_home_compat_direction(case.fstab),
+                case.expected,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_var_home_compat_is_layout_gated_and_idempotent() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let etc = temp.path().join("etc");
+        fs::create_dir_all(source.join("var/home")).unwrap();
+        fs::create_dir_all(target.join("home")).unwrap();
+        fs::create_dir_all(&etc).unwrap();
+        std::os::unix::fs::symlink("var/home", source.join("home")).unwrap();
+        fs::write(etc.join("fstab"), "UUID=home /home btrfs subvol=home 0 0\n").unwrap();
+
+        assert_eq!(
+            apply_legacy_var_home_compat(&source, &target, &etc).unwrap(),
+            Some(LegacyHomeCompat::HomeToVarHome)
+        );
+        assert_eq!(
+            apply_legacy_var_home_compat(&source, &target, &etc).unwrap(),
+            None
+        );
+        assert_eq!(
+            fs::read_to_string(etc.join("fstab")).unwrap(),
+            "UUID=home /home btrfs subvol=home 0 0\n\
+             # Preserve OSTree /var/home paths when the target uses a native /home\n\
+             /home /var/home none bind,x-systemd.requires-mounts-for=/home 0 0\n"
+        );
+
+        let native_source = temp.path().join("native-source");
+        let native_etc = temp.path().join("native-etc");
+        fs::create_dir_all(native_source.join("home")).unwrap();
+        fs::create_dir_all(native_source.join("var/home")).unwrap();
+        fs::create_dir_all(&native_etc).unwrap();
+        assert_eq!(
+            apply_legacy_var_home_compat(&native_source, &target, &native_etc).unwrap(),
+            None
+        );
+        assert!(!native_etc.join("fstab").exists());
+    }
+
+    fn make_split_gbm_tree(root: &Path) -> (PathBuf, PathBuf) {
+        let multiarch = format!("{}-linux-gnu", std::env::consts::ARCH);
+        let gl = root.join("usr/lib").join(multiarch).join("GL");
+        let active = gl.join("lib/gbm");
+        let mesa = gl.join("default/lib/gbm");
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&mesa).unwrap();
+        fs::write(mesa.join("dri_gbm.so"), b"mesa").unwrap();
+        (active, mesa)
+    }
+
+    #[test]
+    fn split_gbm_compat_adds_mesa_fallback_idempotently() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        let etc = temp.path().join("etc");
+        make_split_gbm_tree(&target);
+        fs::create_dir_all(&etc).unwrap();
+        fs::write(etc.join("environment"), "EXISTING=value").unwrap();
+
+        assert!(apply_split_gbm_backend_compat(&target, &etc).unwrap());
+        assert!(!apply_split_gbm_backend_compat(&target, &etc).unwrap());
+
+        let environment = fs::read_to_string(etc.join("environment")).unwrap();
+        let expected = format!(
+            "GBM_BACKENDS_PATH=/usr/lib/{0}-linux-gnu/GL/lib/gbm:/usr/lib/{0}-linux-gnu/GL/default/lib/gbm",
+            std::env::consts::ARCH
+        );
+        assert!(environment.contains("EXISTING=value\n"));
+        assert_eq!(environment.matches(&expected).count(), 1);
+    }
+
+    #[test]
+    fn split_gbm_compat_leaves_working_or_user_configured_layout_alone() {
+        let temp = tempdir().unwrap();
+        let working_target = temp.path().join("working-target");
+        let (active, _) = make_split_gbm_tree(&working_target);
+        fs::write(active.join("dri_gbm.so"), b"mesa").unwrap();
+        let working_etc = temp.path().join("working-etc");
+        fs::create_dir_all(&working_etc).unwrap();
+        assert!(
+            !apply_split_gbm_backend_compat(&working_target, &working_etc).unwrap(),
+            "a target whose active GBM path already exposes Mesa needs no override"
+        );
+        assert!(!working_etc.join("environment").exists());
+
+        let overridden_target = temp.path().join("overridden-target");
+        make_split_gbm_tree(&overridden_target);
+        let overridden_etc = temp.path().join("overridden-etc");
+        fs::create_dir_all(&overridden_etc).unwrap();
+        let custom = "GBM_BACKENDS_PATH=/custom/gbm\n";
+        fs::write(overridden_etc.join("environment"), custom).unwrap();
+        assert!(!apply_split_gbm_backend_compat(&overridden_target, &overridden_etc).unwrap());
+        assert_eq!(
+            fs::read_to_string(overridden_etc.join("environment")).unwrap(),
+            custom
+        );
+    }
 }

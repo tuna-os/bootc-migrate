@@ -194,20 +194,24 @@ Six phases (numbered 0–5 to match the console output), run as one command:
   sealed config digest that Phases 4 and 5 mount.
 - **Phase 4 — Stage deploy** — 3-way `/etc` merge (read from the sealed mount,
   no registry streaming), identity-DB line-union, dangling `/usr/*` symlink
-  pruning, `/var` data copy into `state/os/default/var`, and `.origin`
+  pruning, `/home` ↔ `/var/home` compatibility for native-home targets, `/var`
+  preservation (copy or in-place dedicated subvolume), and `.origin`
   (boot_digest, manifest_digest) written via tini.
 - **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed mount
-  to the ESP (no registry streaming), writes BLS entries, and registers
-  `Linux Boot Manager` in UEFI NVRAM. The original GRUB entry is left as a
-  rollback escape hatch.
+  to the ESP (no registry streaming), verifies that the target kernel resolves
+  the current wireless devices, writes BLS entries (including a durable
+  stateroot mount argument for a dedicated `/var`), and registers `Linux Boot
+  Manager` in UEFI NVRAM. The original GRUB entry is left as a rollback escape
+  hatch.
 
 After a successful reboot into the composefs entry, `bootc-migrate
 commit` removes the OSTree fallback and makes composefs permanent.
 
 ## Usage — end-to-end walkthrough
 
-> **Before you start.** This tool rewrites bootloader state and copies the
-> entire `/var`. Don't run it on a machine you can't reinstall in a pinch.
+> **Before you start.** This tool rewrites bootloader state and either reuses
+> or copies the entire `/var`. Don't run it on a machine you can't reinstall
+> in a pinch.
 > Until you run `commit`, it's reversible — but a fresh backup is still
 > cheap insurance.
 
@@ -269,7 +273,7 @@ phase headers (0–5) print as it goes:
 | **1 — OSTree import** *(optional)* | Reflinks existing OSTree file objects into the composefs object store so Phase 2 mostly dedups | tens of seconds to a few minutes; skip with `--skip-import` |
 | **2 — OCI pull** | `bootc internals cfs oci pull` of the target image | minutes (network-bound) |
 | **3 — EROFS image** | Builds + fs-verity-signs the composefs metadata image | seconds |
-| **4 — Stage deploy** | 3-way `/etc` merge (from sealed mount), dangling-symlink prune, identity-DB line-union, `/var` copy to `state/os/default/var`, `.origin` file written | ~1 minute |
+| **4 — Stage deploy** | 3-way `/etc` merge (from sealed mount), dangling-symlink prune, identity-DB line-union, `/var` copy or dedicated-subvolume preservation, `.origin` file written | ~1 minute |
 | **5 — Bootloader** | Copies systemd-boot from mounted image, writes BLS entries, registers NVRAM | ~30s |
 
 When it ends with `=== MIGRATION COMPLETED ===` the on-disk state is
@@ -331,8 +335,9 @@ deployment stays bootable:
   existing `/boot/loader/entries/ostree-*.conf` files.
 - The original `/ostree/deploy/<n>/deploy/<commit>.0/` rootfs and
   `/ostree/deploy/<n>/var/` stay on disk.
-- Phase 4 *copies* `/var` to `state/os/default/var`; the OSTree side's `/var`
-  is independent of the composefs side's after migration.
+- Phase 4 either copies `/var` to `state/os/default/var` or, for a dedicated
+  filesystem/Btrfs subvolume, reuses it in place through a persistent BLS mount
+  argument. The original data is not deleted during migration.
 - We push `Linux Boot Manager` (systemd-boot) to the front of NVRAM `BootOrder`
   but the `Fedora` shim entry (which boots GRUB → OSTree) remains listed.
 
@@ -379,7 +384,9 @@ Validated end-to-end (21+ assertions per run; see `tests/run-e2e.sh`):
 - **User homes** — `/var/home/<user>/`, dotfiles, project trees, SSH keys
   (with `.ssh` mode preserved so StrictModes still accepts your keys),
   wallpapers, GNOME extensions, dconf user db, glib gsettings keyfile,
-  homebrew Cellar, per-user flatpak installs
+  homebrew Cellar, per-user flatpak installs. When an OSTree source uses
+  `/home -> /var/home` and the target has a native `/home`, both absolute path
+  spellings remain valid through an ordered compatibility bind mount.
 - **/etc state** — `/etc/sudoers.d/*`, `/etc/hosts` edits, custom
   `sshd_config.d/*`, custom config files added under `/etc/`, in-place
   edits to image-shipped files (`/etc/hostname`), `/etc` symlinks
@@ -405,6 +412,7 @@ What's intentionally *not* carried forward:
 | `bootc status` says "No manifest_digest in origin" | You're on an old build of this tool | Update to `main` — version info is on the first line of the migration log |
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
+| Phase 5 refuses because the target kernel has no module alias for a wireless device | The image omits the driver for Wi-Fi hardware present on the source system | Fix or update the target image. Use `--force` only when alternate networking is available and losing Wi-Fi is acceptable |
 | Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate undo --full` (full cleanup including object store); then reboot into OSTree |
 
 ## Requirements
