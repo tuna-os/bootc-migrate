@@ -1,0 +1,6 @@
+self-hosted-runner:
+  # Labels of self-hosted runners used by the E2E workflows. The "kvm" label is
+  # the KVM-capable host (kanpur) that boots real VMs; those jobs stay gated on
+  # vars.KVM_E2E_ENABLED.
+  labels:
+    - kvm
