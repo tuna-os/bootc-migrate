@@ -77,6 +77,30 @@ fn missing_target_wireless_drivers(target_root: &Path, kver: &str) -> Result<Vec
     Ok(missing)
 }
 
+fn bootc_bls_entries(entries_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(entries_dir)
+        .with_context(|| format!("reading BLS entries from {}", entries_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("bootc_") {
+            entries.push(entry.path());
+        }
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn bootc_bls_entry_targets_verity(entry_path: &Path, verity: &str) -> Result<bool> {
+    let contents = fs::read_to_string(entry_path)
+        .with_context(|| format!("reading BLS entry {}", entry_path.display()))?;
+    let expected = format!("composefs={verity}");
+    Ok(contents.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        matches!(fields.next(), Some("options")) && fields.any(|field| field == expected.as_str())
+    }))
+}
+
 // ---- Phase 5 ----
 
 pub fn phase5_setup_bootloader(
@@ -99,7 +123,9 @@ pub fn phase5_setup_bootloader(
         && report.nvram_writable
         && report.esp_ready_for_systemd_boot;
 
-    // Optional: Phase 5 idempotency — check if composefs entry already exists.
+    // Optional: Phase 5 idempotency — retain an entry only when it targets this
+    // exact rootfs. Rebuilding a migration creates a new verity digest; keeping
+    // its predecessor would leave the bootloader pointing at a pruned image.
     let esp = if use_systemd_boot {
         Some(ensure_esp_mounted(report)?)
     } else {
@@ -111,28 +137,47 @@ pub fn phase5_setup_bootloader(
         Path::new("/boot/loader/entries").to_path_buf()
     };
     if entries_check.exists() {
-        let has_existing = fs::read_dir(&entries_check)
-            .map(|d| {
-                d.filter_map(|e| e.ok())
-                    .any(|e| e.file_name().to_string_lossy().starts_with("bootc_"))
-            })
-            .unwrap_or(false);
-        if has_existing && !force {
+        let existing_entries = bootc_bls_entries(&entries_check)?;
+        let entry_targets = existing_entries
+            .iter()
+            .map(|entry| bootc_bls_entry_targets_verity(entry, verity.as_hex()))
+            .collect::<Result<Vec<_>>>()?;
+        let has_current = entry_targets.iter().any(|matches| *matches);
+        let has_stale = entry_targets.iter().any(|matches| !matches);
+
+        if has_current && !has_stale && !force {
             println!(
-                "BLS entries already present in {}. Skipping Phase 5.",
+                "A BLS entry for ComposeFS {} already exists in {}. Skipping Phase 5.",
+                verity.as_hex(),
                 entries_check.display()
             );
             return Ok(());
         }
-        if has_existing && force {
-            println!("[phase5] --force: re-running Phase 5 over existing BLS entries.");
-            // Remove existing bootc_ entries so they get cleanly rewritten.
-            if let Ok(rd) = fs::read_dir(&entries_check) {
-                for entry in rd.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with("bootc_") {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
+
+        if dry_run {
+            if !existing_entries.is_empty() {
+                println!(
+                    "[DRY RUN] Would replace {} existing ComposeFS BLS entry/entries in {}.",
+                    existing_entries.len(),
+                    entries_check.display()
+                );
+            }
+            println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
+            return Ok(());
+        }
+
+        if !existing_entries.is_empty() {
+            if force {
+                println!("[phase5] --force: re-running Phase 5 over existing BLS entries.");
+            } else {
+                println!(
+                    "[phase5] replacing stale ComposeFS BLS entry/entries for {}.",
+                    verity.as_hex()
+                );
+            }
+            for entry in existing_entries {
+                fs::remove_file(&entry)
+                    .with_context(|| format!("removing stale BLS entry {}", entry.display()))?;
             }
         }
     }
@@ -140,11 +185,6 @@ pub fn phase5_setup_bootloader(
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mut mount_path = temp_mount.path().to_path_buf();
-
-    if dry_run {
-        println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
-        return Ok(());
-    }
 
     // Mount via the sealed config digest (see perform_etc_merge): the rootfs
     // verity would miss the oci-config stream and fall back to a raw EROFS mount
@@ -1081,6 +1121,35 @@ mod tests {
             read_wireless_devices(&net.join("missing"))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn bootc_bls_entry_matches_only_its_composefs_verity() {
+        let temp = tempdir().unwrap();
+        let entry = temp.path().join("bootc_dakota-current.conf");
+        fs::write(
+            &entry,
+            "title Dakota\n\
+             options root=UUID=root composefs=current-verity rw\n",
+        )
+        .unwrap();
+
+        assert!(bootc_bls_entry_targets_verity(&entry, "current-verity").unwrap());
+        assert!(!bootc_bls_entry_targets_verity(&entry, "stale-verity").unwrap());
+    }
+
+    #[test]
+    fn bootc_bls_entries_ignore_non_composefs_names() {
+        let temp = tempdir().unwrap();
+        let entries = temp.path().join("entries");
+        fs::create_dir_all(&entries).unwrap();
+        fs::write(entries.join("bootc_dakota.conf"), "options composefs=abc\n").unwrap();
+        fs::write(entries.join("ostree-1.conf"), "options ostree=foo\n").unwrap();
+
+        assert_eq!(
+            bootc_bls_entries(&entries).unwrap(),
+            vec![entries.join("bootc_dakota.conf")]
         );
     }
 

@@ -11,7 +11,7 @@ pub mod seal;
 pub use boot::phase5_setup_bootloader;
 pub use deploy::phase4_stage_deploy;
 pub use import::phase1_import_objects;
-pub use pull::phase2_pull_image;
+pub use pull::{PulledImage, phase2_pull_image};
 pub use rollback::run_rollback;
 pub use seal::phase3_create_image;
 
@@ -907,18 +907,17 @@ pub fn run_migration(
 
     // ---- Phase 2: Pull OCI image ----
     let store = crate::composefs::BootcCliStore::default();
-    let (_manifest_digest, config_digest) = phase2_pull_image(&store, target_image, dry_run)?;
+    let pulled_image = phase2_pull_image(&store, target_image, dry_run)?;
 
     // ---- Phase 3: Create and seal EROFS image ----
     let (verity, sealed_config) =
-        phase3_create_image(&store, target_image, &config_digest, dry_run)?;
+        phase3_create_image(&store, target_image, &pulled_image.config_digest, dry_run)?;
 
     // ---- Phase 4: Stage deployment state ----
     let _deploy_dir = phase4_stage_deploy(
         &verity,
         target_image,
-        &_manifest_digest,
-        &config_digest,
+        &pulled_image,
         &sealed_config,
         dry_run,
         force,
@@ -928,7 +927,7 @@ pub fn run_migration(
     phase5_setup_bootloader(
         report,
         &verity,
-        target_image,
+        &pulled_image.image_reference,
         &sealed_config,
         dry_run,
         bootloader,
