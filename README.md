@@ -326,6 +326,27 @@ the sole default with timeout 0.
 | `--skip-preflight`    | Bypass preflight checks (don't, unless you know exactly why)       |
 | `--force`             | Proceed past non-fatal warnings                                    |
 
+### Move system Steam into Flatpak Steam
+
+After installing and launching `com.valvesoftware.Steam` once, its per-user
+data can absorb a system Steam installation without re-downloading games:
+
+```bash
+bootc-migrate system-to-flatpak-steam --dry-run
+bootc-migrate system-to-flatpak-steam
+```
+
+Run it as the desktop user, **without** `sudo`, after closing Steam and all
+Steam games. It uses filesystem renames only—never a recursive copy—to move
+`steamapps`, `userdata`, and `config` from `~/.local/share/Steam` into Flatpak
+Steam's data directory. The pre-existing Flatpak versions and both library
+registries are retained in a timestamped rollback directory under
+`~/.var/app/com.valvesoftware.Steam/`.
+
+The command deliberately leaves the native Steam runtime files and unrelated
+non-Steam folders such as `~/Games` alone. Add a Flatpak filesystem override
+for `~/Games` separately if Steam shortcuts need it.
+
 ### Rollback / recovery
 
 Until you run `commit`, the migration is **reversible**. The previous OSTree
