@@ -32,6 +32,7 @@ pub mod reflink;
 pub mod registry;
 pub mod remap;
 pub mod scan;
+pub mod steam_flatpak;
 pub mod transaction;
 pub mod types;
 pub mod xattr;

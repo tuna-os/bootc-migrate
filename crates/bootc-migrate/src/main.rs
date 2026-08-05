@@ -1,5 +1,6 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::process;
 
 use bootc_migrate_core::{migration, preflight, transaction};
@@ -95,6 +96,18 @@ enum Command {
         /// Output as machine-readable JSON instead of a table.
         #[arg(long)]
         json: bool,
+    },
+    /// Move a system Steam library and user settings into Flatpak Steam.
+    ///
+    /// Run as the desktop user, with Steam fully stopped. This moves only
+    /// Steam's game library, user data, and configuration using filesystem
+    /// renames; it never copies game trees. Existing Flatpak state is kept in
+    /// a rollback directory below ~/.var/app/com.valvesoftware.Steam.
+    #[command(name = "system-to-flatpak-steam")]
+    SystemToFlatpakSteam {
+        /// Preview the validated moves without changing Steam data.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -264,6 +277,19 @@ fn main() {
         return;
     }
 
+    // Handle the per-user system Steam -> Flatpak Steam conversion.
+    if let Some(Command::SystemToFlatpakSteam { dry_run }) = args.command {
+        let result = run_system_to_flatpak_steam(dry_run);
+        if let Err(e) = result {
+            eprintln!("Error: {:#}", e);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
     // Handle explicit `tui` subcommand, or fall into the wizard automatically
     // when no target image was given on the command line. Root isn't required
     // just to browse the wizard — the migration subprocess it spawns on Run
@@ -418,6 +444,53 @@ fn run_etc_drift(json: bool) -> Result<()> {
             bootc_migrate_core::mergetc::DriftKind::TypeChanged => "TypeChanged",
         };
         println!("  {:<50} [{}]", format!("/etc/{}", entry.path), kind);
+    }
+    Ok(())
+}
+
+fn run_system_to_flatpak_steam(dry_run: bool) -> Result<()> {
+    if rustix::process::getuid().is_root() {
+        bail!("system-to-flatpak-steam must be run as the desktop user, not via sudo");
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set; run as the desktop user")?;
+    if !home.is_absolute() {
+        bail!("HOME must be an absolute path, got {}", home.display());
+    }
+
+    if !dry_run {
+        bootc_migrate_core::steam_flatpak::ensure_steam_is_stopped()?;
+    }
+    let outcome = bootc_migrate_core::steam_flatpak::migrate(&home, dry_run)?;
+    let plan = outcome.plan;
+
+    println!("=== System Steam to Flatpak Steam ===");
+    println!("System Steam:  {}", plan.native_root.display());
+    println!("Flatpak Steam: {}", plan.flatpak_root.display());
+    println!(
+        "Library path:  {} -> {}",
+        plan.native_library_path, plan.flatpak_library_path
+    );
+    for directory in &plan.portable_directories {
+        println!(
+            "{} {} -> {}",
+            if dry_run {
+                "[dry-run] would move"
+            } else {
+                "Moved"
+            },
+            plan.native_root.join(directory).display(),
+            plan.flatpak_root.join(directory).display()
+        );
+    }
+    if let Some(backup) = outcome.backup_dir {
+        println!("Preserved previous Flatpak state in {}", backup.display());
+        println!(
+            "Start Flatpak Steam and validate the library before removing any native Steam runtime files."
+        );
+    } else {
+        println!("No changes made.");
     }
     Ok(())
 }

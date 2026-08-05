@@ -15,10 +15,17 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
+# The scenarios boot full VMs via QEMU and need hardware KVM acceleration.
+# GitHub-hosted runners (including larger runners) do NOT expose /dev/kvm, so
+# these jobs gate on a KVM-capable self-hosted runner (kanpur) via the
+# KVM_E2E_ENABLED org variable. While the var is unset the matrix is skipped
+# and e2e-gate/required-checks pass trivially. To re-enable: register kanpur
+# as an org runner labelled "kvm" and set KVM_E2E_ENABLED=true.
 jobs:
   e2e:
+    if: ${{ vars.KVM_E2E_ENABLED == 'true' }}
     name: ${{ matrix.scenario.name }}
-    runs-on: runs-on=${{ github.run_id }}/runner=build-amd64
+    runs-on: [self-hosted, kvm]
     timeout-minutes: 45
     # Exploratory cells (aurora: see below) opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without dragging
@@ -125,10 +132,10 @@ jobs:
             swtpm \
             swtpm-tools \
 
-      # GitHub-hosted Linux runners expose /dev/kvm but the runner user isn't in
-      # the kvm group by default. Make it world-accessible for this job so QEMU
-      # can use KVM acceleration (TCG fallback is ~10x slower and would blow the
-      # 45-minute job timeout).
+      # This job only runs on the kanpur self-hosted runner (label "kvm").
+      # Make /dev/kvm world-accessible so QEMU can use KVM acceleration (TCG
+      # fallback is ~10x slower and blows the 45-minute job timeout — proven on
+      # GitHub-hosted 2-core runners, where SSH banner exchanges time out).
       - name: Enable KVM access
         run: |
           if [ -e /dev/kvm ]; then

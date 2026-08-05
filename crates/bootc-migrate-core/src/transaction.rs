@@ -19,7 +19,7 @@
 use crate::migration;
 use crate::motd;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub fn commit(dry_run: bool) -> Result<()> {
     println!("=== Committing composefs deployment as permanent default ===");
@@ -122,31 +122,24 @@ pub fn commit(dry_run: bool) -> Result<()> {
     composefs_entries.reverse();
     let primary = composefs_entries[0].trim_end_matches(".conf");
 
+    // /sysroot is typically read-only on a composefs-booted system. Prepare
+    // a writable view of the same filesystem before retiring the rollback
+    // entry, so a failed cleanup cannot be reported as a completed commit.
+    let needs_sysroot_cleanup = has_legacy_ostree_content(Path::new("/sysroot/ostree"))?
+        || Path::new("/sysroot/.bootc-aleph.json").exists();
+    let sysroot_cleanup_mount = if dry_run || !needs_sysroot_cleanup {
+        None
+    } else {
+        Some(mount_sysroot_for_cleanup()?)
+    };
+
     if is_systemd_boot {
         // Remove the OSTree fallback entry + its kernel/initrd from the ESP so the next
         // boot menu only shows the composefs entry. The composefs entry remains the
         // loader.conf default; nothing else needs to change.
         let esp_root = entries_dir.parent().and_then(|p| p.parent());
         if let Some(esp_root) = esp_root {
-            let fallback_entry = entries_dir.join("ostree-fallback-0.conf");
-            if fallback_entry.exists() {
-                std::fs::remove_file(&fallback_entry)
-                    .with_context(|| format!("failed to remove {}", fallback_entry.display()))?;
-                println!("Removed OSTree fallback BLS entry from ESP.");
-            }
-            let fallback_dir = esp_root.join("EFI/Linux/ostree-fallback");
-            if fallback_dir.exists() {
-                std::fs::remove_dir_all(&fallback_dir)
-                    .with_context(|| format!("failed to remove {}", fallback_dir.display()))?;
-                println!("Removed OSTree fallback kernel/initrd from ESP.");
-            }
-            // Drop the timeout now that composefs is the only entry.
-            let loader_conf = esp_root.join("loader/loader.conf");
-            if loader_conf.exists() {
-                let body = format!("default {}\ntimeout 0\nconsole-mode keep\n", primary);
-                std::fs::write(&loader_conf, body)
-                    .with_context(|| format!("failed to rewrite {}", loader_conf.display()))?;
-            }
+            finalize_systemd_boot_commit(esp_root, &entries_dir, primary, dry_run)?;
         }
         println!(
             "Composefs deployment '{}' committed as the permanent systemd-boot default.",
@@ -172,44 +165,25 @@ pub fn commit(dry_run: bool) -> Result<()> {
 
     // --- Full OSTree-side cleanup so the on-disk layout matches a fresh
     //     bootc install of the target image. ---
-    // /sysroot is typically read-only on a composefs-booted system.
-    // Even after remount rw, the composefs EROFS overlay blocks mutation
-    // of paths that are pinned by the metadata tree (e.g. /sysroot/ostree).
-    // To bypass the overlay, mount the underlying btrfs device at a
-    // temporary location — that mount is a plain btrfs, no EROFS.
-    let alt_root = Path::new("/var/tmp/commit-cleanup");
-    let has_alt_mount = if !dry_run {
-        let _ = std::fs::create_dir_all(alt_root);
-        mount_sysroot_btrfs_at(alt_root).is_ok()
-    } else {
-        false
-    };
     let mut total_freed: u64 = 0;
+    let sysroot_cleanup_root = sysroot_cleanup_mount
+        .as_ref()
+        .map_or_else(|| Path::new("/sysroot"), SysrootCleanupMount::root);
 
-    // 1. /sysroot/ostree — the entire OSTree object store + deploys + the
-    //    leaked Bluefin /var copy under ostree/deploy/<n>/var.
-    //    If we have an alternate mount (bypassing the composefs EROFS overlay),
-    //    operate through that; otherwise fall back to the direct path.
-    let ostree_label = "OSTree object store + deploys (incl. leaked pre-migration /var)";
-    if has_alt_mount {
-        total_freed += remove_path_with_size(&alt_root.join("ostree"), ostree_label, dry_run);
-        // .bootc-aleph.json also through the alt mount for a clean delete.
-        total_freed += remove_path_with_size(
-            &alt_root.join(".bootc-aleph.json"),
-            "stale Bluefin install-provenance marker",
-            dry_run,
-        );
-    } else {
-        total_freed += remove_path_with_size(Path::new("/sysroot/ostree"), ostree_label, dry_run);
-    }
-    // .bootc-aleph.json — via alt mount if available, otherwise direct.
-    if !has_alt_mount {
-        total_freed += remove_path_with_size(
-            Path::new("/sysroot/.bootc-aleph.json"),
-            "stale Bluefin install-provenance marker",
-            dry_run,
-        );
-    }
+    // 1. /sysroot/ostree — remove the legacy OSTree object store + deploys,
+    //    including the leaked Bluefin /var copy under
+    //    ostree/deploy/<n>/var. The target bootc installation owns
+    //    ostree/bootc/storage, so preserve that runtime state.
+    total_freed += remove_legacy_ostree_content(
+        &sysroot_cleanup_root.join("ostree"),
+        "legacy OSTree object store + deploys (incl. leaked pre-migration /var)",
+        dry_run,
+    )?;
+    total_freed += remove_path_with_size(
+        &sysroot_cleanup_root.join(".bootc-aleph.json"),
+        "stale Bluefin install-provenance marker",
+        dry_run,
+    )?;
 
     // /boot may be read-only under composefs (e.g. separate ext4 /boot partition
     // on LUKS where the initramfs mounts it ro). Remount rw before cleanup.
@@ -230,12 +204,40 @@ pub fn commit(dry_run: bool) -> Result<()> {
                     &entry.path(),
                     &format!("stale OSTree BLS entry: {}", name),
                     dry_run,
-                );
+                )?;
             }
         }
     }
 
-    // 3. When we migrated to systemd-boot, drop the GRUB2 bits the user no
+    // 3. The legacy OSTree boot layout makes /boot/loader a symlink to a
+    // generation directory (for example loader.1). systemd's bootctl
+    // intentionally refuses to operate through that symlink, which leaves
+    // systemd-boot-update.service failed on a successfully migrated target.
+    // It is the rollback path until commit, so clean it only now and only
+    // when it contains no non-OSTree content.
+    if is_systemd_boot {
+        total_freed += remove_path_with_size(
+            Path::new("/boot/ostree"),
+            "legacy OSTree kernel and initramfs artifacts",
+            dry_run,
+        )?;
+        match cleanup_legacy_ostree_loader(Path::new("/boot"), dry_run)? {
+            LegacyOstreeLoaderCleanup::Removed => {
+                println!(
+                    "Removed legacy OSTree /boot/loader generation so systemd-boot can maintain $BOOT."
+                );
+            }
+            LegacyOstreeLoaderCleanup::RetainedNonOstreeContent => {
+                eprintln!(
+                    "warning: retained non-OSTree content under the legacy /boot/loader generation; \
+                     bootctl may require manual cleanup before it can update $BOOT metadata."
+                );
+            }
+            LegacyOstreeLoaderCleanup::NotLegacy => {}
+        }
+    }
+
+    // 4. When we migrated to systemd-boot, drop the GRUB2 bits the user no
     //    longer needs. Keep them when --bootloader grub2 was used.
     if is_systemd_boot {
         for path in &["/boot/grub2", "/boot/efi/EFI/fedora"] {
@@ -243,11 +245,11 @@ pub fn commit(dry_run: bool) -> Result<()> {
                 Path::new(path),
                 "GRUB2 boot artifacts (migrated to systemd-boot)",
                 dry_run,
-            );
+            )?;
         }
     }
 
-    // 4. Drop ostree-remount.service enablement. On a composefs-booted
+    // 5. Drop ostree-remount.service enablement. On a composefs-booted
     //    system OSTree bind mounts are irrelevant; the symlink may be
     //    re-created during boot by the target image's presets even though
     //    Phase 4 removed it from the deploy /etc.
@@ -267,7 +269,7 @@ pub fn commit(dry_run: bool) -> Result<()> {
         }
     }
 
-    // 5. Drop OSTree-only bookkeeping state under /var (issue #17).
+    // 6. Drop OSTree-only bookkeeping state under /var (issue #17).
     for var_path in &[
         "/var/lib/sysimage/ostree",
         "/var/lib/rpm-ostree",
@@ -278,7 +280,7 @@ pub fn commit(dry_run: bool) -> Result<()> {
             Path::new(var_path),
             "OSTree-only bookkeeping state under /var",
             dry_run,
-        );
+        )?;
     }
 
     let human = format_bytes(total_freed);
@@ -297,14 +299,216 @@ pub fn commit(dry_run: bool) -> Result<()> {
             }
         );
     }
-    if has_alt_mount {
-        let _ = std::process::Command::new("umount").arg(alt_root).status();
-        let _ = std::fs::remove_dir(alt_root);
-    }
     if !dry_run && let Err(e) = motd::clear_migration_reminder() {
         eprintln!("Warning: failed to clear login reminder: {e:#}");
     }
     Ok(())
+}
+
+fn finalize_systemd_boot_commit(
+    esp_root: &Path,
+    entries_dir: &Path,
+    primary: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let fallback_entry = entries_dir.join("ostree-fallback-0.conf");
+    if fallback_entry.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove OSTree fallback BLS entry from ESP: {}",
+                fallback_entry.display()
+            );
+        } else {
+            std::fs::remove_file(&fallback_entry)
+                .with_context(|| format!("failed to remove {}", fallback_entry.display()))?;
+            println!("Removed OSTree fallback BLS entry from ESP.");
+        }
+    }
+
+    let fallback_dir = esp_root.join("EFI/Linux/ostree-fallback");
+    if fallback_dir.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove OSTree fallback kernel/initrd from ESP: {}",
+                fallback_dir.display()
+            );
+        } else {
+            std::fs::remove_dir_all(&fallback_dir)
+                .with_context(|| format!("failed to remove {}", fallback_dir.display()))?;
+            println!("Removed OSTree fallback kernel/initrd from ESP.");
+        }
+    }
+
+    // Drop the timeout now that composefs is the only entry.
+    let loader_conf = esp_root.join("loader/loader.conf");
+    if loader_conf.exists() {
+        let body = format!("default {primary}\ntimeout 0\nconsole-mode keep\n");
+        if dry_run {
+            println!(
+                "[dry-run] would update {} to make {} the sole default.",
+                loader_conf.display(),
+                primary
+            );
+        } else {
+            std::fs::write(&loader_conf, body)
+                .with_context(|| format!("failed to rewrite {}", loader_conf.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyOstreeLoaderCleanup {
+    NotLegacy,
+    RetainedNonOstreeContent,
+    Removed,
+}
+
+fn is_legacy_ostree_loader_target(target: &Path) -> bool {
+    let mut components = target.components();
+    let Some(Component::Normal(name)) = components.next() else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false;
+    }
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.strip_prefix("loader.").is_some_and(|generation| {
+        !generation.is_empty() && generation.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+fn legacy_ostree_loader_target(boot_dir: &Path) -> Result<Option<PathBuf>> {
+    let loader_link = boot_dir.join("loader");
+    let metadata = match std::fs::symlink_metadata(&loader_link) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", loader_link.display()));
+        }
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let target = std::fs::read_link(&loader_link)
+        .with_context(|| format!("failed to read {}", loader_link.display()))?;
+    if !is_legacy_ostree_loader_target(&target) {
+        return Ok(None);
+    }
+    Ok(Some(boot_dir.join(target)))
+}
+
+fn only_ostree_entries(entries_dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(entries_dir)
+        .with_context(|| format!("failed to read {}", entries_dir.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", entries_dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
+        if !metadata.is_file() || !name.starts_with("ostree-") || !name.ends_with(".conf") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn cleanup_legacy_ostree_loader(
+    boot_dir: &Path,
+    dry_run: bool,
+) -> Result<LegacyOstreeLoaderCleanup> {
+    let loader_link = boot_dir.join("loader");
+    let Some(loader_dir) = legacy_ostree_loader_target(boot_dir)? else {
+        return Ok(LegacyOstreeLoaderCleanup::NotLegacy);
+    };
+    let metadata = match std::fs::symlink_metadata(&loader_dir) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove broken legacy OSTree loader link: {}",
+                    loader_link.display()
+                );
+            } else {
+                std::fs::remove_file(&loader_link)
+                    .with_context(|| format!("failed to remove {}", loader_link.display()))?;
+            }
+            return Ok(LegacyOstreeLoaderCleanup::Removed);
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", loader_dir.display()));
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(LegacyOstreeLoaderCleanup::RetainedNonOstreeContent);
+    }
+
+    let entries_dir = loader_dir.join("entries");
+    let staged_entries_dir = loader_dir.join("entries.staged");
+    let mut removable_dirs = Vec::new();
+    for entry in std::fs::read_dir(&loader_dir)
+        .with_context(|| format!("failed to read {}", loader_dir.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", loader_dir.display()))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Ok(LegacyOstreeLoaderCleanup::RetainedNonOstreeContent);
+        }
+        if path == entries_dir {
+            if !only_ostree_entries(&path)? {
+                return Ok(LegacyOstreeLoaderCleanup::RetainedNonOstreeContent);
+            }
+        } else if path == staged_entries_dir {
+            if std::fs::read_dir(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?
+                .next()
+                .is_some()
+            {
+                return Ok(LegacyOstreeLoaderCleanup::RetainedNonOstreeContent);
+            }
+        } else {
+            return Ok(LegacyOstreeLoaderCleanup::RetainedNonOstreeContent);
+        }
+        removable_dirs.push(path);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove legacy OSTree loader link and empty generation: {} -> {}",
+            loader_link.display(),
+            loader_dir.display()
+        );
+        return Ok(LegacyOstreeLoaderCleanup::Removed);
+    }
+
+    if entries_dir.is_dir() {
+        for entry in std::fs::read_dir(&entries_dir)
+            .with_context(|| format!("failed to read {}", entries_dir.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("failed to read entry in {}", entries_dir.display()))?;
+            std::fs::remove_file(entry.path())
+                .with_context(|| format!("failed to remove {}", entry.path().display()))?;
+        }
+    }
+    std::fs::remove_file(&loader_link)
+        .with_context(|| format!("failed to remove {}", loader_link.display()))?;
+    for dir in removable_dirs {
+        std::fs::remove_dir(&dir).with_context(|| format!("failed to remove {}", dir.display()))?;
+    }
+    std::fs::remove_dir(&loader_dir)
+        .with_context(|| format!("failed to remove {}", loader_dir.display()))?;
+
+    Ok(LegacyOstreeLoaderCleanup::Removed)
 }
 
 fn dir_size(path: &Path) -> u64 {
@@ -329,10 +533,13 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-fn remove_path_with_size(path: &Path, label: &str, dry_run: bool) -> u64 {
+fn remove_path_with_size(path: &Path, label: &str, dry_run: bool) -> Result<u64> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(_) => return 0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", path.display()));
+        }
     };
     let size = dir_size(path);
     let human = format_bytes(size);
@@ -343,16 +550,21 @@ fn remove_path_with_size(path: &Path, label: &str, dry_run: bool) -> u64 {
             label,
             human
         );
-        return size;
+        return Ok(size);
     }
     let res = if meta.is_dir() && !meta.file_type().is_symlink() {
         // On OSTree/bootc systems, /sysroot/ostree is typically a btrfs
         // subvolume — rm -rf returns EPERM. Try `btrfs subvolume delete`
         // first; if that fails, clear the immutable flag (chattr -i) and
         // fall back to remove_dir_all.
+        //
+        // A normal directory is not a Btrfs subvolume. Keep the probe quiet
+        // because that expected fallback must not look like a commit error.
         let btrfs_ok = std::process::Command::new("btrfs")
             .args(["subvolume", "delete"])
             .arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -376,13 +588,62 @@ fn remove_path_with_size(path: &Path, label: &str, dry_run: bool) -> u64 {
     match res {
         Ok(()) => {
             println!("Removed {} — {} ({})", path.display(), label, human);
-            size
+            Ok(size)
         }
+        Err(e) => Err(e).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+/// True when `/sysroot/ostree` contains data that belongs to the source
+/// OSTree deployment rather than the target bootc runtime.
+fn has_legacy_ostree_content(ostree_dir: &Path) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(ostree_dir) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => {
-            eprintln!("warning: failed to remove {}: {}", path.display(), e);
-            0
+            return Err(e).with_context(|| format!("failed to inspect {}", ostree_dir.display()));
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(true);
+    }
+
+    for entry in std::fs::read_dir(ostree_dir)
+        .with_context(|| format!("failed to inspect {}", ostree_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to inspect {}", ostree_dir.display()))?;
+        if entry.file_name() != "bootc" {
+            return Ok(true);
         }
     }
+    Ok(false)
+}
+
+/// Remove source OSTree data without deleting `/sysroot/ostree/bootc`, which
+/// is owned by the target bootc installation for its container storage.
+fn remove_legacy_ostree_content(ostree_dir: &Path, label: &str, dry_run: bool) -> Result<u64> {
+    let metadata = match std::fs::symlink_metadata(ostree_dir) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", ostree_dir.display()));
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return remove_path_with_size(ostree_dir, label, dry_run);
+    }
+
+    let mut total_freed = 0;
+    for entry in std::fs::read_dir(ostree_dir)
+        .with_context(|| format!("failed to inspect {}", ostree_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to inspect {}", ostree_dir.display()))?;
+        if entry.file_name() == "bootc" {
+            continue;
+        }
+        total_freed += remove_path_with_size(&entry.path(), label, dry_run)?;
+    }
+    Ok(total_freed)
 }
 
 fn format_bytes(n: u64) -> String {
@@ -400,31 +661,124 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
-/// Mount the device backing /sysroot at `target`, bypassing the
-/// composefs EROFS overlay so that paths like /sysroot/ostree can be
-/// mutated directly on the underlying filesystem. Works on btrfs, xfs,
-/// and any other filesystem that can be mounted twice.
-fn mount_sysroot_btrfs_at(target: &Path) -> Result<()> {
-    let mounts = std::fs::read_to_string("/proc/mounts").context("failed to read /proc/mounts")?;
-    let device = mounts
-        .lines()
-        .find(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.len() >= 3 && parts[1] == "/sysroot"
-        })
-        .and_then(|line| line.split_whitespace().next())
-        .map(|s| s.to_string())
-        .context("could not find device for /sysroot in /proc/mounts")?;
+#[derive(Debug, PartialEq, Eq)]
+struct SysrootMount {
+    device: String,
+    fstype: String,
+    options: String,
+}
 
-    let status = std::process::Command::new("mount")
-        .arg(&device)
-        .arg(target)
-        .status()
-        .context("failed to execute mount for alt-root cleanup")?;
-    if !status.success() {
-        anyhow::bail!("mount {} → {} failed", device, target.display());
+/// A private, writable mount of the same subvolume currently mounted at
+/// `/sysroot`. Its Drop implementation ensures a failed cleanup cannot leave
+/// the backing filesystem mounted under /var/tmp.
+struct SysrootCleanupMount {
+    tempdir: tempfile::TempDir,
+}
+
+impl SysrootCleanupMount {
+    fn root(&self) -> &Path {
+        self.tempdir.path()
     }
-    Ok(())
+}
+
+impl Drop for SysrootCleanupMount {
+    fn drop(&mut self) {
+        match std::process::Command::new("umount")
+            .arg(self.root())
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "warning: failed to unmount temporary sysroot cleanup mount {}: {}",
+                    self.root().display(),
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to execute umount for temporary sysroot cleanup mount {}: {e}",
+                    self.root().display()
+                );
+            }
+        }
+    }
+}
+
+/// Parse the `/sysroot` record from `/proc/mounts` into an independent,
+/// writable mount. Btrfs needs its active subvolume carried over; otherwise a
+/// remount lands at the top level and does not expose `/sysroot/ostree`.
+fn parse_sysroot_mount(mounts: &str) -> Option<SysrootMount> {
+    let fields = mounts
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .find(|fields| fields.len() >= 4 && fields[1] == "/sysroot")?;
+    let device = fields[0]
+        .split_once('[')
+        .map_or(fields[0], |(device, _)| device);
+    let fstype = fields[2];
+    let mount_options = fields[3];
+
+    let mut options = vec!["rw".to_string()];
+    if fstype == "btrfs" {
+        if let Some(subvolume) = mount_options
+            .split(',')
+            .find_map(|option| option.strip_prefix("subvol="))
+        {
+            options.push(format!("subvol={subvolume}"));
+        } else if let Some(subvolume_id) = mount_options
+            .split(',')
+            .find_map(|option| option.strip_prefix("subvolid="))
+        {
+            options.push(format!("subvolid={subvolume_id}"));
+        }
+    }
+
+    Some(SysrootMount {
+        device: device.to_string(),
+        fstype: fstype.to_string(),
+        options: options.join(","),
+    })
+}
+
+/// Mount the device backing `/sysroot` at a private temporary location,
+/// bypassing the composefs EROFS overlay so that old OSTree paths can be
+/// mutated directly on the underlying filesystem.
+fn mount_sysroot_for_cleanup() -> Result<SysrootCleanupMount> {
+    let mounts = std::fs::read_to_string("/proc/mounts").context("failed to read /proc/mounts")?;
+    let sysroot_mount = parse_sysroot_mount(&mounts)
+        .context("could not find mount for /sysroot in /proc/mounts")?;
+    let tempdir = tempfile::Builder::new()
+        .prefix("bootc-migrate-commit-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create temporary sysroot cleanup mountpoint")?;
+
+    let output = std::process::Command::new("mount")
+        .args(["-t", &sysroot_mount.fstype, "-o", &sysroot_mount.options])
+        .arg(&sysroot_mount.device)
+        .arg(tempdir.path())
+        .output()
+        .context("failed to execute mount for alt-root cleanup")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "mount {} at {} with {} failed: {}",
+            sysroot_mount.device,
+            tempdir.path().display(),
+            sysroot_mount.options,
+            stderr.trim()
+        );
+    }
+
+    let cleanup_mount = SysrootCleanupMount { tempdir };
+    if Path::new("/sysroot/ostree").exists() && !cleanup_mount.root().join("ostree").exists() {
+        anyhow::bail!(
+            "temporary sysroot mount {} does not expose the existing /sysroot/ostree",
+            cleanup_mount.root().display()
+        );
+    }
+    Ok(cleanup_mount)
 }
 
 /// Undo a partial or failed migration. Removes all composefs artifacts
@@ -639,6 +993,7 @@ pub fn undo(dry_run: bool, full: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_format_bytes() {
@@ -646,5 +1001,198 @@ mod tests {
         assert_eq!(format_bytes(2048), "2.00 KiB");
         assert_eq!(format_bytes(10 * 1024 * 1024), "10.00 MiB");
         assert_eq!(format_bytes(5 * 1024 * 1024 * 1024), "5.00 GiB");
+    }
+
+    #[test]
+    fn parse_sysroot_mount_preserves_the_active_btrfs_subvolume() {
+        struct Case {
+            mounts: &'static str,
+            expected: Option<SysrootMount>,
+        }
+
+        let cases = [
+            Case {
+                mounts: "/dev/nvme0n1p3 /sysroot btrfs ro,relatime,subvolid=256,subvol=/root 0 0\n",
+                expected: Some(SysrootMount {
+                    device: "/dev/nvme0n1p3".into(),
+                    fstype: "btrfs".into(),
+                    options: "rw,subvol=/root".into(),
+                }),
+            },
+            Case {
+                mounts: "/dev/vda2[/root] /sysroot btrfs ro,subvolid=256 0 0\n",
+                expected: Some(SysrootMount {
+                    device: "/dev/vda2".into(),
+                    fstype: "btrfs".into(),
+                    options: "rw,subvolid=256".into(),
+                }),
+            },
+            Case {
+                mounts: "/dev/vda2 /sysroot ext4 ro,relatime 0 0\n",
+                expected: Some(SysrootMount {
+                    device: "/dev/vda2".into(),
+                    fstype: "ext4".into(),
+                    options: "rw".into(),
+                }),
+            },
+            Case {
+                mounts: "/dev/vda2 / btrfs rw,subvol=/root 0 0\n",
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(parse_sysroot_mount(case.mounts), case.expected);
+        }
+    }
+
+    #[test]
+    fn legacy_ostree_cleanup_preserves_target_bootc_storage() {
+        let temp = tempdir().unwrap();
+        let ostree = temp.path().join("ostree");
+        let bootc_storage = ostree.join("bootc/storage");
+        let legacy_repo = ostree.join("repo/objects");
+        let legacy_deploy = ostree.join("deploy/default/deploy");
+        std::fs::create_dir_all(&bootc_storage).unwrap();
+        std::fs::create_dir_all(&legacy_repo).unwrap();
+        std::fs::create_dir_all(&legacy_deploy).unwrap();
+        std::fs::write(bootc_storage.join("target-image"), "keep\n").unwrap();
+        std::fs::write(legacy_repo.join("object"), "remove\n").unwrap();
+        std::fs::write(legacy_deploy.join("deployment"), "remove\n").unwrap();
+
+        assert!(has_legacy_ostree_content(&ostree).unwrap());
+        assert!(remove_legacy_ostree_content(&ostree, "legacy OSTree data", true).unwrap() > 0);
+        assert!(legacy_repo.exists());
+        assert!(bootc_storage.exists());
+
+        assert!(remove_legacy_ostree_content(&ostree, "legacy OSTree data", false).unwrap() > 0);
+        assert!(!legacy_repo.exists());
+        assert!(!legacy_deploy.exists());
+        assert!(bootc_storage.exists());
+        assert!(!has_legacy_ostree_content(&ostree).unwrap());
+    }
+
+    #[test]
+    fn systemd_boot_finalization_honors_dry_run() {
+        let temp = tempdir().unwrap();
+        let esp = temp.path().join("esp");
+        let entries = esp.join("loader/entries");
+        let fallback_entry = entries.join("ostree-fallback-0.conf");
+        let fallback_dir = esp.join("EFI/Linux/ostree-fallback");
+        let loader_conf = esp.join("loader/loader.conf");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::create_dir_all(&fallback_dir).unwrap();
+        std::fs::write(&fallback_entry, "legacy entry\n").unwrap();
+        std::fs::write(fallback_dir.join("vmlinuz"), "legacy kernel\n").unwrap();
+        std::fs::write(&loader_conf, "default old\ntimeout 5\n").unwrap();
+
+        finalize_systemd_boot_commit(&esp, &entries, "bootc_target", true).unwrap();
+        assert!(fallback_entry.exists());
+        assert!(fallback_dir.exists());
+        assert_eq!(
+            std::fs::read_to_string(&loader_conf).unwrap(),
+            "default old\ntimeout 5\n"
+        );
+
+        finalize_systemd_boot_commit(&esp, &entries, "bootc_target", false).unwrap();
+        assert!(!fallback_entry.exists());
+        assert!(!fallback_dir.exists());
+        assert_eq!(
+            std::fs::read_to_string(&loader_conf).unwrap(),
+            "default bootc_target\ntimeout 0\nconsole-mode keep\n"
+        );
+    }
+
+    #[test]
+    fn legacy_ostree_loader_target_is_a_single_generation_directory() {
+        struct Case {
+            target: &'static str,
+            expected: bool,
+        }
+
+        let cases = [
+            Case {
+                target: "loader.0",
+                expected: true,
+            },
+            Case {
+                target: "loader.12",
+                expected: true,
+            },
+            Case {
+                target: "loader.",
+                expected: false,
+            },
+            Case {
+                target: "loader.current",
+                expected: false,
+            },
+            Case {
+                target: "../loader.1",
+                expected: false,
+            },
+            Case {
+                target: "/boot/loader.1",
+                expected: false,
+            },
+            Case {
+                target: "loader.1/entries",
+                expected: false,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                is_legacy_ostree_loader_target(Path::new(case.target)),
+                case.expected,
+                "{}",
+                case.target
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_ostree_loader_cleanup_is_dry_run_safe_and_removes_only_ostree_entries() {
+        let temp = tempdir().unwrap();
+        let boot = temp.path().join("boot");
+        let loader_dir = boot.join("loader.1");
+        let entries = loader_dir.join("entries");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::write(entries.join("ostree-0.conf"), "current\n").unwrap();
+        std::fs::write(entries.join("ostree-1.conf"), "previous\n").unwrap();
+        std::os::unix::fs::symlink("loader.1", boot.join("loader")).unwrap();
+
+        assert_eq!(
+            cleanup_legacy_ostree_loader(&boot, true).unwrap(),
+            LegacyOstreeLoaderCleanup::Removed
+        );
+        assert!(boot.join("loader").is_symlink());
+        assert!(entries.join("ostree-0.conf").exists());
+
+        assert_eq!(
+            cleanup_legacy_ostree_loader(&boot, false).unwrap(),
+            LegacyOstreeLoaderCleanup::Removed
+        );
+        assert!(!boot.join("loader").exists());
+        assert!(!boot.join("loader").is_symlink());
+        assert!(!loader_dir.exists());
+    }
+
+    #[test]
+    fn legacy_ostree_loader_cleanup_preserves_non_ostree_entries() {
+        let temp = tempdir().unwrap();
+        let boot = temp.path().join("boot");
+        let loader_dir = boot.join("loader.1");
+        let entries = loader_dir.join("entries");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::write(entries.join("custom-kernel.conf"), "custom\n").unwrap();
+        std::os::unix::fs::symlink("loader.1", boot.join("loader")).unwrap();
+
+        assert_eq!(
+            cleanup_legacy_ostree_loader(&boot, false).unwrap(),
+            LegacyOstreeLoaderCleanup::RetainedNonOstreeContent
+        );
+        assert!(boot.join("loader").is_symlink());
+        assert!(entries.join("custom-kernel.conf").exists());
     }
 }

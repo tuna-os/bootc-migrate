@@ -2,6 +2,105 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WirelessDevice {
+    interface: String,
+    modalias: String,
+}
+
+fn read_wireless_devices(net_class: &Path) -> Result<Vec<WirelessDevice>> {
+    let entries = match fs::read_dir(net_class) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to inspect {}", net_class.display()));
+        }
+    };
+
+    let mut devices = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.join("wireless").is_dir() {
+            continue;
+        }
+        let modalias_path = path.join("device/modalias");
+        let modalias = match fs::read_to_string(&modalias_path) {
+            Ok(modalias) => modalias.trim().to_owned(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read {}", modalias_path.display()));
+            }
+        };
+        if modalias.is_empty() {
+            continue;
+        }
+        devices.push(WirelessDevice {
+            interface: entry.file_name().to_string_lossy().into_owned(),
+            modalias,
+        });
+    }
+    devices.sort_by(|a, b| a.interface.cmp(&b.interface));
+    Ok(devices)
+}
+
+fn target_resolves_modalias(target_root: &Path, kver: &str, modalias: &str) -> Result<bool> {
+    let output = Command::new("/usr/sbin/modprobe")
+        .arg("--dirname")
+        .arg(target_root)
+        .args(["--set-version", kver, "--resolve-alias", modalias])
+        .output()
+        .context("failed to query the target kernel's module aliases with modprobe")?;
+
+    if output.status.success() {
+        return Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("not found in directory") {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "modprobe could not query target kernel {kver}: {}",
+        stderr.trim()
+    )
+}
+
+fn missing_target_wireless_drivers(target_root: &Path, kver: &str) -> Result<Vec<WirelessDevice>> {
+    let mut missing = Vec::new();
+    for device in read_wireless_devices(Path::new("/sys/class/net"))? {
+        if !target_resolves_modalias(target_root, kver, &device.modalias)? {
+            missing.push(device);
+        }
+    }
+    Ok(missing)
+}
+
+fn bootc_bls_entries(entries_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(entries_dir)
+        .with_context(|| format!("reading BLS entries from {}", entries_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("bootc_") {
+            entries.push(entry.path());
+        }
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn bootc_bls_entry_targets_verity(entry_path: &Path, verity: &str) -> Result<bool> {
+    let contents = fs::read_to_string(entry_path)
+        .with_context(|| format!("reading BLS entry {}", entry_path.display()))?;
+    let expected = format!("composefs={verity}");
+    Ok(contents.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        matches!(fields.next(), Some("options")) && fields.any(|field| field == expected.as_str())
+    }))
+}
+
 // ---- Phase 5 ----
 
 pub fn phase5_setup_bootloader(
@@ -24,7 +123,9 @@ pub fn phase5_setup_bootloader(
         && report.nvram_writable
         && report.esp_ready_for_systemd_boot;
 
-    // Optional: Phase 5 idempotency — check if composefs entry already exists.
+    // Optional: Phase 5 idempotency — retain an entry only when it targets this
+    // exact rootfs. Rebuilding a migration creates a new verity digest; keeping
+    // its predecessor would leave the bootloader pointing at a pruned image.
     let esp = if use_systemd_boot {
         Some(ensure_esp_mounted(report)?)
     } else {
@@ -36,28 +137,47 @@ pub fn phase5_setup_bootloader(
         Path::new("/boot/loader/entries").to_path_buf()
     };
     if entries_check.exists() {
-        let has_existing = fs::read_dir(&entries_check)
-            .map(|d| {
-                d.filter_map(|e| e.ok())
-                    .any(|e| e.file_name().to_string_lossy().starts_with("bootc_"))
-            })
-            .unwrap_or(false);
-        if has_existing && !force {
+        let existing_entries = bootc_bls_entries(&entries_check)?;
+        let entry_targets = existing_entries
+            .iter()
+            .map(|entry| bootc_bls_entry_targets_verity(entry, verity.as_hex()))
+            .collect::<Result<Vec<_>>>()?;
+        let has_current = entry_targets.iter().any(|matches| *matches);
+        let has_stale = entry_targets.iter().any(|matches| !matches);
+
+        if has_current && !has_stale && !force {
             println!(
-                "BLS entries already present in {}. Skipping Phase 5.",
+                "A BLS entry for ComposeFS {} already exists in {}. Skipping Phase 5.",
+                verity.as_hex(),
                 entries_check.display()
             );
             return Ok(());
         }
-        if has_existing && force {
-            println!("[phase5] --force: re-running Phase 5 over existing BLS entries.");
-            // Remove existing bootc_ entries so they get cleanly rewritten.
-            if let Ok(rd) = fs::read_dir(&entries_check) {
-                for entry in rd.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with("bootc_") {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
+
+        if dry_run {
+            if !existing_entries.is_empty() {
+                println!(
+                    "[DRY RUN] Would replace {} existing ComposeFS BLS entry/entries in {}.",
+                    existing_entries.len(),
+                    entries_check.display()
+                );
+            }
+            println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
+            return Ok(());
+        }
+
+        if !existing_entries.is_empty() {
+            if force {
+                println!("[phase5] --force: re-running Phase 5 over existing BLS entries.");
+            } else {
+                println!(
+                    "[phase5] replacing stale ComposeFS BLS entry/entries for {}.",
+                    verity.as_hex()
+                );
+            }
+            for entry in existing_entries {
+                fs::remove_file(&entry)
+                    .with_context(|| format!("removing stale BLS entry {}", entry.display()))?;
             }
         }
     }
@@ -65,11 +185,6 @@ pub fn phase5_setup_bootloader(
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mut mount_path = temp_mount.path().to_path_buf();
-
-    if dry_run {
-        println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
-        return Ok(());
-    }
 
     // Mount via the sealed config digest (see perform_etc_merge): the rootfs
     // verity would miss the oci-config stream and fall back to a raw EROFS mount
@@ -138,6 +253,34 @@ pub fn phase5_setup_bootloader(
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .ok_or_else(|| anyhow!("could not find kernel version in mounted image"))?;
     println!("Found kernel version: {}", kver);
+
+    match missing_target_wireless_drivers(&mount_path, &kver) {
+        Ok(missing) if !missing.is_empty() => {
+            let devices = missing
+                .iter()
+                .map(|device| format!("{} ({})", device.interface, device.modalias))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = format!(
+                "target kernel {kver} has no module alias for wireless device(s): {devices}. \
+                 Wi-Fi will be unavailable after migration"
+            );
+            if force {
+                eprintln!(
+                    "[phase5] WARNING: {message}. --force was supplied, so bootloader setup will continue."
+                );
+            } else {
+                anyhow::bail!(
+                    "{message}. Refusing to install the ComposeFS boot entry. Fix the target image, \
+                     or rerun with --force only if alternate networking is available"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[phase5] warning: could not verify target wireless driver support: {e:#}")
+        }
+    }
 
     let mounted_vmlinuz = modules_dir.join(&kver).join("vmlinuz");
     let mounted_initrd = modules_dir.join(&kver).join("initramfs.img");
@@ -938,6 +1081,7 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn esp_parsing_returns_none_for_nonexistent() {
@@ -950,6 +1094,63 @@ mod tests {
         // If findmnt returns empty, parsing should return None.
         // The function returns None if the source string is empty.
         // This is exercised by get_esp_disk_and_part's early return on empty source.
+    }
+
+    #[test]
+    fn wireless_probe_reads_only_devices_with_modaliases() {
+        let temp = tempdir().unwrap();
+        let net = temp.path().join("net");
+        fs::create_dir_all(net.join("wlan0/wireless")).unwrap();
+        fs::create_dir_all(net.join("wlan0/device")).unwrap();
+        fs::write(
+            net.join("wlan0/device/modalias"),
+            "pci:v000017CBd00001107sv00001EACsd00008000bc02sc80i00\n",
+        )
+        .unwrap();
+        fs::create_dir_all(net.join("wlan-no-alias/wireless")).unwrap();
+        fs::create_dir_all(net.join("ethernet/device")).unwrap();
+
+        assert_eq!(
+            read_wireless_devices(&net).unwrap(),
+            vec![WirelessDevice {
+                interface: "wlan0".to_owned(),
+                modalias: "pci:v000017CBd00001107sv00001EACsd00008000bc02sc80i00".to_owned(),
+            }]
+        );
+        assert!(
+            read_wireless_devices(&net.join("missing"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn bootc_bls_entry_matches_only_its_composefs_verity() {
+        let temp = tempdir().unwrap();
+        let entry = temp.path().join("bootc_dakota-current.conf");
+        fs::write(
+            &entry,
+            "title Dakota\n\
+             options root=UUID=root composefs=current-verity rw\n",
+        )
+        .unwrap();
+
+        assert!(bootc_bls_entry_targets_verity(&entry, "current-verity").unwrap());
+        assert!(!bootc_bls_entry_targets_verity(&entry, "stale-verity").unwrap());
+    }
+
+    #[test]
+    fn bootc_bls_entries_ignore_non_composefs_names() {
+        let temp = tempdir().unwrap();
+        let entries = temp.path().join("entries");
+        fs::create_dir_all(&entries).unwrap();
+        fs::write(entries.join("bootc_dakota.conf"), "options composefs=abc\n").unwrap();
+        fs::write(entries.join("ostree-1.conf"), "options ostree=foo\n").unwrap();
+
+        assert_eq!(
+            bootc_bls_entries(&entries).unwrap(),
+            vec![entries.join("bootc_dakota.conf")]
+        );
     }
 
     // ── Slice 1: origin file schema tests ──

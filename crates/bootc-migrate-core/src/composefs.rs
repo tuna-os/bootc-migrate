@@ -104,8 +104,9 @@ fn host_cfs_oci(args: &[&str]) -> Result<Output> {
 /// `bootc_image` (via podman). Used when the host bootc cannot write a store
 /// the migrated system can consume — either too old (no oci-manifest stream)
 /// or too new (cfs CLI without create-image/seal, issue #72). The host
-/// container storage is bind-mounted so target layers come from the local
-/// cache (Phase 2 `podman pull`) rather than being re-downloaded.
+/// container storage is bind-mounted so target layers come from the
+/// manifest-pinned local cache that Phase 2 refreshed rather than being
+/// re-downloaded.
 fn image_cfs(bootc_image: &str, args: &[&str]) -> Result<Output> {
     Command::new("podman")
         .args([
@@ -211,8 +212,16 @@ fn with_transport(image_ref: &str) -> String {
     }
 }
 
+fn is_digest_pinned_image_ref(image_ref: &str) -> bool {
+    let image_ref = image_ref.strip_prefix("docker://").unwrap_or(image_ref);
+    image_ref
+        .split_once('@')
+        .is_some_and(|(_, digest)| digest.starts_with("sha256:"))
+}
+
 impl ComposefsStore for BootcCliStore {
     fn pull_image(&self, target_image: &str, image_ref: &str) -> Result<String> {
+        let image_ref = image_ref.strip_prefix("docker://").unwrap_or(image_ref);
         let docker_ref = with_transport(image_ref);
 
         // The host bootc is only usable when it still speaks the legacy cfs
@@ -259,8 +268,8 @@ impl ComposefsStore for BootcCliStore {
         // Prefer the target image's own bootc (store written by its runtime
         // reader); otherwise fall back to a pinned legacy builder — new bootc
         // reads legacy stores, so any legacy writer is correct (#72).
-        let delegate = if image_cfs_is_legacy(target_image) {
-            target_image.to_string()
+        let delegate = if image_cfs_is_legacy(image_ref) {
+            image_ref.to_string()
         } else {
             let builder = legacy_builder_image();
             eprintln!(
@@ -291,17 +300,25 @@ impl ComposefsStore for BootcCliStore {
         std::fs::create_dir_all(STORE)
             .with_context(|| format!("creating composefs store directory {STORE}"))?;
 
-        // Prefer the locally-cached image (Phase 2 `podman pull`) so we don't make a
-        // second on-disk copy; fall back to the registry transport.
-        let cs_ref = format!("containers-storage:{}", image_ref);
-        let mut out = image_cfs(&delegate, &["oci", "pull", &cs_ref])?;
-        if !out.status.success() {
-            eprintln!(
-                "[cfs] containers-storage pull failed ({}); retrying via registry",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            out = image_cfs(&delegate, &["oci", "pull", &docker_ref])?;
-        }
+        // Only import from local storage when Phase 2 provided an immutable
+        // manifest reference. A mutable tag here can silently select an older
+        // cached image, which would make the ComposeFS root differ from the
+        // deployment metadata and boot artifacts.
+        let out = if is_digest_pinned_image_ref(image_ref) {
+            let cs_ref = format!("containers-storage:{image_ref}");
+            let local_out = image_cfs(&delegate, &["oci", "pull", &cs_ref])?;
+            if local_out.status.success() {
+                local_out
+            } else {
+                eprintln!(
+                    "[cfs] containers-storage pull failed ({}); retrying via registry",
+                    String::from_utf8_lossy(&local_out.stderr).trim()
+                );
+                image_cfs(&delegate, &["oci", "pull", &docker_ref])?
+            }
+        } else {
+            image_cfs(&delegate, &["oci", "pull", &docker_ref])?
+        };
         if !out.status.success() {
             return Err(anyhow!(
                 "pull failed: {}",
@@ -405,5 +422,18 @@ mod tests {
         // must not change behavior on old hosts.
         let help = fake_output(256, "");
         assert!(help_is_legacy_cli(&help));
+    }
+
+    #[test]
+    fn only_digest_pinned_references_may_use_local_storage() {
+        assert!(is_digest_pinned_image_ref(
+            "ghcr.io/projectbluefin/dakota@sha256:0123456789abcdef"
+        ));
+        assert!(is_digest_pinned_image_ref(
+            "docker://ghcr.io/projectbluefin/dakota@sha256:0123456789abcdef"
+        ));
+        assert!(!is_digest_pinned_image_ref(
+            "ghcr.io/projectbluefin/dakota:testing"
+        ));
     }
 }

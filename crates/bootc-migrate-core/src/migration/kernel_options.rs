@@ -11,9 +11,15 @@ use std::process::Command;
 /// - `ostree=*` — OSTree deployment locator
 /// - `BOOT_IMAGE=*` — GRUB internal
 /// - `initrd=*` — GRUB internal
-/// - `root=*` — we'll let composefs-setup-root discover the root
-/// - `rootflags=*` — often specific to the OSTree btrfs subvol
 /// - `rd.systemd.unit=*` — stay out of initrd overrides
+///
+/// `root=` and `rootflags=` are deliberately retained. ComposeFS replaces the
+/// deployed root, but its object store and deployment state still live on the
+/// physical sysroot selected by those arguments. In particular, Anaconda-style
+/// Btrfs installs such as this Bazzite layout can put the sysroot in a named
+/// `root` subvolume while leaving the filesystem default at ID 5. Dropping
+/// `rootflags=subvol=root` makes the target initramfs mount ID 5 and then fail
+/// to find `/sysroot/composefs/images/<digest>`.
 pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
     let cmdline = fs::read_to_string("/proc/cmdline").context("failed to read /proc/cmdline")?;
     let mut options: Vec<String> = Vec::new();
@@ -42,6 +48,28 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
     for arg in discover_lvm_kernel_args() {
         if !options.contains(&arg) {
             options.push(arg);
+        }
+    }
+
+    // bootc assembles composefs /var from /sysroot/state/os/default/var. If
+    // the source has a dedicated filesystem or direct Btrfs subvolume there,
+    // mount it at that path in the initrd before bootc-root-setup runs.
+    //
+    // This must live in the BLS command line, not only in a rebuilt initrd:
+    // composefs upgrades copy the current command line while replacing the
+    // image-provided initrd, so the mount remains effective on future kernels.
+    if let Some(var) = super::detect_separate_var()? {
+        let mount_arg = super::stateroot_var_mount_kernel_arg(&var);
+        let already_present = options.iter().any(|option| {
+            option.starts_with("rd.systemd.mount-extra=")
+                && option.contains(":/sysroot/state/os/default/var:")
+        });
+        if !already_present {
+            println!(
+                "[phase5] preserving dedicated /var through composefs upgrades ({}, UUID={}, options={})",
+                var.fstype, var.uuid, var.options
+            );
+            options.push(mount_arg);
         }
     }
 
@@ -80,12 +108,6 @@ fn should_filter(word: &str) -> bool {
         || word.starts_with("initrd=")
         || word.starts_with("rd.systemd.unit=")
     {
-        return true;
-    }
-    // Only filter rootflags that contain subvol= — btrfs-specific subvolume
-    // assignments are meaningless on composefs. Non-subvol rootflags (e.g.
-    // XFS mount options passed by the initramfs) are preserved.
-    if word.starts_with("rootflags=") && word.contains("subvol=") {
         return true;
     }
     // Also filter anything starting with "ostree." — belt and suspenders.
@@ -218,19 +240,24 @@ mod tests {
     }
 
     #[test]
-    fn filters_rootflags_subvol() {
-        // rootflags containing subvol= (btrfs-specific) are filtered.
-        let result = build_options("rootflags=subvol=root quiet rw", "ab01cd23ef45");
-        assert!(!result.contains("rootflags="));
-        assert!(result.contains("quiet"));
-    }
-
-    #[test]
-    fn preserves_rootflags_without_subvol() {
-        // rootflags without subvol= (e.g. XFS, ext4 mount options) are kept.
-        let result = build_options("rootflags=defaults quiet rw", "ab01cd23ef45");
-        assert!(result.contains("rootflags=defaults"));
-        assert!(result.contains("quiet"));
+    fn preserves_sysroot_mount_flags() {
+        // ComposeFS metadata remains on the physical sysroot, so every form of
+        // rootflags must reach the target initramfs. The named-subvolume cases
+        // reproduce Anaconda/Bazzite layouts whose Btrfs default remains ID 5.
+        let cases = [
+            "rootflags=subvol=root",
+            "rootflags=subvol=/root",
+            "rootflags=subvolid=256",
+            "rootflags=subvol=root,compress=zstd:1",
+            "rootflags=defaults",
+        ];
+        for rootflags in cases {
+            let result = build_options(&format!("{rootflags} quiet rw"), "ab01cd23ef45");
+            assert!(
+                result.contains(rootflags),
+                "{rootflags} must be retained in: {result}"
+            );
+        }
     }
 
     #[test]
@@ -333,10 +360,10 @@ mod tests {
         assert!(!result.contains("ostree="));
         assert!(!result.contains("ostree."));
         assert!(!result.contains("BOOT_IMAGE"));
-        assert!(!result.contains("rootflags="));
         assert!(!result.contains("rd.systemd.unit="));
         // Must contain (root= is preserved per spec §4.2):
         assert!(result.contains("root=UUID=abcd-1234"));
+        assert!(result.contains("rootflags=subvol=root"));
         assert!(result.contains("rw"));
         assert!(result.contains("quiet"));
         assert!(result.contains("console=ttyS0"));

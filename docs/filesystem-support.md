@@ -133,12 +133,12 @@ from the OSTree fallback entry.
 
 ---
 
-## Dedicated `/var` volume (separate partition or LV)
+## Dedicated `/var` volume or Btrfs subvolume
 
 Anaconda's default partitioning — and many real-world installs — put `/var` on
-its **own filesystem** (a separate partition or LVM logical volume), mounted via
-an `/etc/fstab` entry, distinct from the root volume. This is orthogonal to
-btrfs-vs-XFS: it can occur on either.
+its **own filesystem** (a separate partition or LVM logical volume) or in a
+directly-mounted Btrfs subvolume such as `subvol=/var`. Both layouts are
+load-bearing: composefs must expose that existing data at its stateroot `/var`.
 
 ### The problem
 
@@ -169,23 +169,57 @@ activates them before their mounts run.
 Activation alone isn't enough, because bootc still binds the stateroot var onto
 `/var` and ignores fstab. `phase5_setup_bootloader` therefore:
 
-1. **`detect_separate_var()`** — uses `findmnt -o SOURCE,FSTYPE,FSROOT /var`; a
-   dedicated volume has `FSROOT == "/"` (a whole filesystem), versus a subtree
-   bind (btrfs `subvol=` or the ostree `…/var` bind) whose FSROOT is a subpath.
-   Returns the volume's `(uuid, fstype)`.
+1. **`detect_separate_var()`** — uses
+   `findmnt -o TARGET,SOURCE,FSTYPE,FSROOT,OPTIONS /var`. It accepts either a
+   whole filesystem (`FSROOT == "/"`) or a direct Btrfs subvolume whose
+   `subvol=` option matches `FSROOT`. Arbitrary OSTree/bind subtrees are
+   rejected. It returns the volume's UUID, filesystem type, and mount options.
 
-2. **`prepare_stateroot_var_include(uuid, fstype)`** — injects a
-   `sysroot-state-os-default-var.mount` unit into the rebuilt initrd (via
-   `dracut --include`, mirroring the composefs loopback mount). It mounts the
-   dedicated volume at `/sysroot/state/os/default/var`, ordered
-   `After=sysroot.mount Before=bootc-root-setup.service`.
+2. The generated BLS entry carries an initrd-only
+   `rd.systemd.mount-extra=...:/sysroot/state/os/default/var:...` argument with
+   explicit `Before=` and `RequiredBy=` dependencies on
+   `bootc-root-setup.service`. This mounts the existing filesystem/subvolume at
+   the composefs stateroot before bootc assembles the deployment.
+
+   Keeping the mount specification in the BLS arguments is intentional:
+   composefs `bootc upgrade` copies the current arguments to the upgraded
+   deployment while installing that image's new initrd. A unit injected only
+   into the migration's first initrd would be lost on the first upgrade.
+
+3. If an initrd rebuild is already required for LVM/DM or XFS, the tool also
+   injects the equivalent `sysroot-state-os-default-var.mount` unit as a
+   redundant compatibility path.
 
 `bootc-root-setup` then binds **that path** (now the real `/var` volume) onto
 `/var`, so the user's data appears at `/var` as expected.
 
+For a direct Btrfs `subvol=/var` layout, the subvolume is reused in place. It
+does not need to be moved to top-level subvolume ID 5, and retaining the BLS
+mount argument is compatible with later `bootc upgrade` deployments.
+
 This path is exercised by the `xfs+lvm+crypt` e2e scenario (LVM-on-LUKS with
 separate `root` + `var` LVs); its `/var`-persistence assertions verify the
 dedicated volume's data survives the migration.
+
+## OSTree `/var/home` to native `/home`
+
+OSTree systems commonly expose `/home` as a symlink to `/var/home`. A native
+ComposeFS target can instead ship distinct, real `/home` and `/var/home`
+directories. Mounting a preserved home subvolume at `/home` keeps the data, but
+absolute paths stored in symlinks, script shebangs, desktop settings, and user
+services still point at `/var/home` and become dangling.
+
+Phase 4 detects this cross-layout transition and adds one ordered bind mount to
+the staged `/etc/fstab`:
+
+- If the preserved fstab mounts a dedicated filesystem or subvolume at
+  `/home`, `/home` is canonical and is also bound at `/var/home`.
+- Otherwise home data remains inside the preserved `/var/home`, which is also
+  bound at `/home`.
+
+No home files or symlinks are rewritten. Both path spellings resolve to the same
+data, and the fstab entry remains in the deployment `/etc` across later
+`bootc upgrade` deployments.
 
 ---
 
@@ -220,5 +254,6 @@ bootc-migrate \
 | initrd rebuild needed     | no                         | yes — dracut --add "lvm dm"      |
 | dracut on source system   | not present                | present (CentOS Stream 10 base)  |
 
-Dedicated `/var` (separate partition/LV) is handled independently of the root
-filesystem type — see [Dedicated `/var` volume](#dedicated-var-volume-separate-partition-or-lv).
+Dedicated `/var` (separate filesystem/LV or direct Btrfs subvolume) is handled
+independently of the root filesystem type — see
+[Dedicated `/var` volume or Btrfs subvolume](#dedicated-var-volume-or-btrfs-subvolume).

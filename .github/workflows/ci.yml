@@ -25,7 +25,7 @@ concurrency:
 jobs:
   # Linting, formatting, and unit tests — everything `just check` runs.
   validate:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +41,7 @@ jobs:
   # that delete or bypass meaningful test coverage — it is NOT a target.
   # Raise the floor as milestones add tests; never lower it to merge.
   coverage:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,7 +64,7 @@ jobs:
   # Workflow-file lint: catches broken expressions/needs/inputs in the CI
   # definitions themselves before they bite at dispatch time.
   actionlint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Style-level shellcheck findings stay advisory, matching the repo's
     # `shellcheck --severity=warning` convention (justfile lint-shell).
     env:
@@ -78,7 +78,7 @@ jobs:
 
   # Dependency license and source policy (deny.toml).
   cargo-deny:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -99,7 +99,7 @@ jobs:
   required-checks:
     if: always()
     needs: [validate, cargo-deny, coverage, actionlint, e2e-gate]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Check all jobs succeeded
         env:
@@ -112,10 +112,11 @@ jobs:
           fi
 
   # Gate PRs on E2E passing. This job waits for the e2e-tests.yml workflow
-  # (which runs in parallel) and blocks merge if any scenario failed.
+  # (which runs in parallel) and blocks merge if any scenario failed. A run
+  # whose whole matrix skipped (KVM_E2E_ENABLED unset) is treated as a pass.
   e2e-gate:
     if: github.event_name == 'pull_request'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: [validate]
     steps:
       - name: Wait for E2E workflow
@@ -141,6 +142,13 @@ jobs:
                 if (e2eRun.status === 'completed') {
                   if (e2eRun.conclusion === 'success') {
                     core.info(`E2E passed: ${e2eRun.html_url}`);
+                    return;
+                  } else if (e2eRun.conclusion === 'skipped') {
+                    // The whole matrix is gated on vars.KVM_E2E_ENABLED (the
+                    // scenarios need hardware KVM, which GitHub-hosted runners
+                    // don't provide). With the var unset every job skips and
+                    // the run concludes 'skipped' — that is not a failure.
+                    core.warning(`E2E skipped (KVM_E2E_ENABLED unset): ${e2eRun.html_url}`);
                     return;
                   } else {
                     core.setFailed(`E2E failed (${e2eRun.conclusion}): ${e2eRun.html_url}`);
