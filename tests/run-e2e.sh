@@ -1009,6 +1009,15 @@ mkdir -p /var/home/realuser
 echo "real-home-data" > /var/home/realuser/home-marker.txt
 chown -R realuser:realuser /var/home/realuser
 
+# Persist absolute legacy paths like real OSTree user state does. A native
+# /home target must keep these working without rewriting the user's files.
+mkdir -p /var/home/realuser/.config/legacy-home /var/home/realuser/.local/bin
+ln -s /var/home/realuser/home-marker.txt /var/home/realuser/.config/legacy-home/marker.link
+ln -s /bin/sh /var/home/realuser/.local/bin/legacy-home-shell
+printf '#!/var/home/realuser/.local/bin/legacy-home-shell\necho legacy-home-exec\n' \
+    > /var/home/realuser/.local/bin/legacy-home-script
+chmod 755 /var/home/realuser/.local/bin/legacy-home-script
+
 # Full-fat /etc config drift (#23): realistic per-machine edits a desktop
 # user makes which the migration MUST preserve.
 mkdir -p /etc/sudoers.d
@@ -1400,13 +1409,24 @@ if [ "$ETC_LINK" != "marker.conf" ]; then
 fi
 echo "OK: /etc symlinks preserved."
 
-# /home resolution (symlink to /var/home on bootc/ostree systems)
+# /home resolution, including persisted absolute /var/home paths when the
+# target uses a native /home directory.
 HOME_DATA=$(ssh $SSH_OPTS root@localhost "cat /home/realuser/home-marker.txt 2>/dev/null || echo MISSING")
 if [ "$HOME_DATA" != "real-home-data" ]; then
     echo "FAIL: /home/<user> data was not accessible after migration! (Found: $HOME_DATA)"
     exit 1
 fi
-echo "OK: /home/<user> resolves and content preserved."
+LEGACY_HOME_LINK=$(ssh $SSH_OPTS root@localhost "cat /home/realuser/.config/legacy-home/marker.link 2>/dev/null || echo MISSING")
+if [ "$LEGACY_HOME_LINK" != "real-home-data" ]; then
+    echo "FAIL: absolute /var/home symlink did not resolve through /home! (Found: $LEGACY_HOME_LINK)"
+    exit 1
+fi
+LEGACY_HOME_EXEC=$(ssh $SSH_OPTS root@localhost "/home/realuser/.local/bin/legacy-home-script 2>/dev/null || echo MISSING")
+if [ "$LEGACY_HOME_EXEC" != "legacy-home-exec" ]; then
+    echo "FAIL: absolute /var/home shebang did not execute through /home! (Found: $LEGACY_HOME_EXEC)"
+    exit 1
+fi
+echo "OK: /home and legacy /var/home paths resolve to the preserved user data."
 
 # Real user account still exists
 REALUSER_ENT=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
