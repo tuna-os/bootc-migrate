@@ -15,6 +15,18 @@ build time (`bootc-migrate --version`).
   config into/out of a stash directory around a cross-DE re-base, plus a
   best-effort portable-preference extractor and a `pre-switch.d`/
   `post-switch.d` hook contract (#68).
+- Desktop-environment detection (`de_detect`): identifies GNOME, KDE, COSMIC,
+  niri, or XFCE in a target image by streaming its session files, session
+  binaries, and display-manager default session out of the registry (no
+  `podman pull`), and the same decision function classifies the running host.
+  An image shipping several desktops is reported as ambiguous rather than
+  guessed at (#68).
+- `bootc-rebase rebase --de-migrate` — wires that detection into the live
+  re-base: when the target ships a different desktop than this host, every
+  human account's outgoing DE config is stashed before staging and any stash
+  from a previous re-base in the other direction is re-exposed afterwards,
+  with the `pre-switch.d`/`post-switch.d` hooks run around each. **Off by
+  default**; `--dry-run` previews the whole step (#68).
 - `bootc-rebase boot-entries` — read-only UEFI boot-entry audit: classifies
   entries as dead, generic-label, duplicate, or firmware-managed (#31).
 - `bootc-migrate etc-drift` — computes the factory-vs-live `/etc`

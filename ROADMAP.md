@@ -127,13 +127,20 @@ CI run can't demonstrate a checklist UI works, and #31's remaining scope
 class of risk as #65.
 
 - [#68](https://github.com/tuna-os/bootc-migrate-composefs/issues/68) — DE
-  config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma/…),
-  a best-effort portable-preference extractor, and the
+  config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma,
+  COSMIC, niri, XFCE), a best-effort portable-preference extractor, and the
   `pre-switch.d`/`post-switch.d` hook contract are done, unit-tested, and
   exposed as `bootc-rebase de-migrate stash|restore`. Target-image DE
-  *detection* (needs registry streaming, and realistically needs M3's
-  cross-base hardening landed first since cross-DE is usually also
-  cross-image) and wiring into the live `rebase` flow are not implemented.
+  detection now streams session files, session binaries, and any
+  display-manager default session out of the registry (`de_detect`), the
+  same decision function classifies the running host, and `rebase
+  --de-migrate` (off by default) stashes every human account's outgoing DE
+  config before staging and restores a matching stash on the way back. The
+  decision logic is table-driven-tested offline; what has *not* run is a
+  cross-DE E2E cell (Bluefin GNOME → an Aurora/KDE image) asserting the
+  stash exists on a real system and survives the reboot — that and the
+  portable subset actually being applied by a hook still need live
+  validation.
 - [#15](https://github.com/tuna-os/bootc-migrate-composefs/issues/15) — the
   factory-vs-live `/etc` diff computation is done, exposed as
   `bootc-migrate etc-drift` (table or JSON). The interactive checklist UI
