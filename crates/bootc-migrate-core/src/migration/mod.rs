@@ -823,6 +823,11 @@ fn rebuild_initrd_with_lvm_if_needed(
 }
 
 /// Main migration entry point. Orchestrates all 5 phases.
+///
+/// `etc_overrides` carries the interactive Config Drift Review's per-path
+/// decisions (issue #15's "Phase 0.5"), if the caller ran that review; pass
+/// `None` to fall back to the default 3-way `/etc` merge behavior
+/// unconditionally.
 pub fn run_migration(
     report: &PreflightReport,
     target_image: &str,
@@ -830,6 +835,7 @@ pub fn run_migration(
     skip_import: bool,
     bootloader: &str,
     force: bool,
+    etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
 ) -> Result<()> {
     // Acquire exclusive lock.
     let _lock = if !dry_run {
@@ -921,6 +927,7 @@ pub fn run_migration(
         &sealed_config,
         dry_run,
         force,
+        etc_overrides,
     )?;
 
     // ---- Phase 5: Setup bootloader ----

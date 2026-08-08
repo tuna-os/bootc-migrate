@@ -136,9 +136,13 @@ class of risk as #65.
   cross-image) and wiring into the live `rebase` flow are not implemented.
 - [#15](https://github.com/tuna-os/bootc-migrate-composefs/issues/15) — the
   factory-vs-live `/etc` diff computation is done, exposed as
-  `bootc-migrate etc-drift` (table or JSON). The interactive
-  checklist UI and its wiring into Phase 4's merge decision are not
-  implemented.
+  `bootc-migrate etc-drift` (table or JSON). The interactive checklist UI
+  (`etc-drift --interactive`, or `--review-drift` as "Phase 0.5" ahead of a
+  live migration) and its wiring into Phase 4's merge decision
+  (`EtcDriftManifest` / `merge_etc_files_with_overrides`, unit-tested) are
+  now implemented. The checklist's terminal event loop itself is the one
+  piece that can't be proven by compile+unit-test — same as this project's
+  other interactive-only work — and needs manual/corral-VM validation.
 - [#31](https://github.com/tuna-os/bootc-migrate-composefs/issues/31) — the
   UEFI boot-entry audit (dead/generic-label/duplicate/firmware-managed
   classification) is done, read-only, exposed as `bootc-rebase boot-entries`.
@@ -167,7 +171,7 @@ graph TD
   M1 --> GAP80["#80 identity-DB merge gap — confirmed, tracked separately"]
   M1 --> M4["M4 NativeStore selection / retire legacy builder — not started"]
   M1 --> M5A["M5 #68 DE stash/restore — skeleton done, detection+wiring deferred"]
-  M1 --> M5B["M5 #15 etc-drift report — done, TUI deferred"]
+  M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI needs manual validation"]
   M1 --> M5C["M5 #31 boot-entry audit — done, cleanup+branding deferred"]
 ```
 

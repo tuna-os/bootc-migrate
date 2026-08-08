@@ -20,6 +20,12 @@ build time (`bootc-migrate --version`).
 - `bootc-migrate etc-drift` — computes the factory-vs-live `/etc`
   diff (Added/Modified/Removed/TypeChanged) as a table or JSON, ahead of a
   migration (#15).
+- `bootc-migrate etc-drift --interactive` and `--review-drift` (Phase 0.5) —
+  an interactive ratatui checklist over the `/etc` config drift; unchecked
+  entries take the target's new default instead of the live version. The
+  resulting decisions manifest wires into Phase 4's 3-way `/etc` merge via
+  `merge_etc_files_with_overrides`, preserving any overridden user content
+  as a `.rebase-old` sidecar (#15).
 - `bootc-rebase scan` capability probe extended with transient-root/etc,
   fs-verity-required, initramfs composefs-module presence, filesystem
   expectation, and a `Compatible: YES/NO` verdict with reasons (#24).

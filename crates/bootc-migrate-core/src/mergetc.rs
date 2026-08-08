@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -36,6 +36,26 @@ pub fn merge_etc_files(
     current_dir: &Path,
     new_default_dir: &Path,
     output_dir: &Path,
+) -> Result<()> {
+    merge_etc_files_with_overrides(
+        old_default_dir,
+        current_dir,
+        new_default_dir,
+        output_dir,
+        None,
+    )
+}
+
+/// Same as [`merge_etc_files`], but accepts per-path override decisions from
+/// an interactive Config Drift Review (issue #15). See [`EtcDriftManifest`]
+/// for the override semantics; `merge_etc_files` is just this function
+/// called with `overrides: None`.
+pub fn merge_etc_files_with_overrides(
+    old_default_dir: &Path,
+    current_dir: &Path,
+    new_default_dir: &Path,
+    output_dir: &Path,
+    overrides: Option<&EtcDriftManifest>,
 ) -> Result<()> {
     fs::create_dir_all(output_dir)?;
 
@@ -74,8 +94,28 @@ pub fn merge_etc_files(
             (None, None) => false,
         };
 
-        // Pick the entry we're materializing: cur if user modified, else new.
-        let chosen_entry: Option<&DirEntry> = if user_modified { cur_entry } else { new_entry };
+        // A drift-review decision for this path overrides the default rule:
+        // `Some(false)` forces the target's new default even if the user
+        // modified the path (`forced_default`); `Some(true)` forces keeping
+        // current. `None` (no decision, or an identity-DB path — see
+        // `EtcDriftManifest::decision_for`) falls back to `user_modified`.
+        let decision = overrides.and_then(|m| m.decision_for(rel_path));
+        let (chosen_entry, forced_default): (Option<&DirEntry>, bool) = match decision {
+            Some(true) => (cur_entry, false),
+            Some(false) => (new_entry, true),
+            None => (if user_modified { cur_entry } else { new_entry }, false),
+        };
+
+        // When a path the user genuinely changed is force-defaulted, keep
+        // their version around instead of silently discarding it — mirrors
+        // the `.rebase-old` sidecar convention already documented for
+        // cross-base /etc conflicts (see ROADMAP.md's decision log).
+        if forced_default
+            && user_modified
+            && let Some(cur) = cur_entry
+        {
+            write_rebase_old_sidecar(cur, current_dir, output_dir, rel_path)?;
+        }
 
         match (chosen_entry, cur_entry, new_entry) {
             (Some(DirEntry::Symlink(target)), _, _) => {
@@ -97,7 +137,14 @@ pub fn merge_etc_files(
                 let cur = read_file_at(current_dir, rel_path);
                 let new = read_file_at(new_default_dir, rel_path);
 
-                let chosen = if is_identity_db(rel_path) {
+                let chosen = if forced_default {
+                    // Drift-review override: take the target's new default
+                    // outright, bypassing the normal 3-way rule. Identity-DB
+                    // paths never reach this branch (`decision_for` excludes
+                    // them), so the union-merge safety net below still
+                    // applies to them unconditionally.
+                    new.clone()
+                } else if is_identity_db(rel_path) {
                     // Line-merge identity DBs (passwd/shadow/group/gshadow/sub{uid,gid}):
                     // start with the source's live file (preserves accumulated user
                     // state), then append entries from the target whose first colon-
@@ -129,8 +176,12 @@ pub fn merge_etc_files(
                     })?;
 
                     // Preserve xattrs and permissions from the best available source.
-                    // Prefer current, then new_default, then old_default.
-                    let xattr_src = if current_dir.join(rel_path).exists() {
+                    // A forced-default path prefers the target's own metadata over
+                    // the user's stale file; otherwise prefer current, then
+                    // new_default, then old_default.
+                    let xattr_src = if forced_default && new_default_dir.join(rel_path).exists() {
+                        new_default_dir.join(rel_path)
+                    } else if current_dir.join(rel_path).exists() {
                         current_dir.join(rel_path)
                     } else if new_default_dir.join(rel_path).exists() {
                         new_default_dir.join(rel_path)
@@ -143,11 +194,55 @@ pub fn merge_etc_files(
             (None, _, _) => {
                 // Dropped on purpose: 3-way result is "absent" (e.g. user
                 // didn't modify and new image doesn't ship it; or user
-                // deleted and image agreed).
+                // deleted and image agreed; or a forced-default override and
+                // the target doesn't ship this path either).
             }
         }
     }
 
+    Ok(())
+}
+
+/// Preserve the user's pre-override version of `rel_path` as a
+/// `<rel_path>.rebase-old` sidecar in `output_dir`, before a drift-review
+/// override replaces the merged result with the target's default. Mirrors
+/// the `.rebase-old` convention already documented for cross-base /etc
+/// conflicts (ROADMAP.md's decision log: "target defaults win, user value
+/// kept as `.rebase-old` sidecar").
+fn write_rebase_old_sidecar(
+    cur_entry: &DirEntry,
+    current_dir: &Path,
+    output_dir: &Path,
+    rel_path: &str,
+) -> Result<()> {
+    let sidecar_rel = format!("{rel_path}.rebase-old");
+    let dest = output_dir.join(&sidecar_rel);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match cur_entry {
+        DirEntry::Symlink(target) => {
+            if dest.exists() || dest.is_symlink() {
+                let _ = fs::remove_file(&dest);
+            }
+            std::os::unix::fs::symlink(target, &dest).with_context(|| {
+                format!(
+                    "failed to write .rebase-old symlink sidecar: {}",
+                    dest.display()
+                )
+            })?;
+        }
+        DirEntry::File => {
+            let src = current_dir.join(rel_path);
+            let content = fs::read(&src).with_context(|| {
+                format!("failed to read {} for .rebase-old sidecar", src.display())
+            })?;
+            fs::write(&dest, &content).with_context(|| {
+                format!("failed to write .rebase-old sidecar: {}", dest.display())
+            })?;
+            copy_file_metadata(&src, &dest)?;
+        }
+    }
     Ok(())
 }
 
@@ -173,6 +268,68 @@ pub enum DriftKind {
 pub struct EtcDriftEntry {
     pub path: String,
     pub kind: DriftKind,
+}
+
+/// Per-path override decisions produced by the interactive "Config Drift
+/// Review" checklist (issue #15). Maps a path relative to `/etc` (matching
+/// [`EtcDriftEntry::path`]) to the user's decision for that path:
+///
+/// - `true`  — keep the current (live) version. This is a no-op relative to
+///   `merge_etc_files`'s normal 3-way rule for a path the user actually
+///   modified, but for a path the user did *not* modify it pins the current
+///   version instead of upgrading to the target's new default.
+/// - `false` — take the target image's new default instead, even if the
+///   normal 3-way rule would otherwise have kept the user's version. If the
+///   user's version genuinely differed, it is preserved next to the merged
+///   output as a `<path>.rebase-old` sidecar instead of being discarded.
+///
+/// Paths absent from `decisions` are not overridden: `merge_etc_files`
+/// falls back to its normal rule for them, so an empty or missing manifest
+/// reproduces today's default behavior exactly (see `default_for_drift`).
+///
+/// Identity-DB files (passwd/shadow/group/gshadow/sub{uid,gid}/machine-id)
+/// are never overridden even if present in `decisions` — see
+/// [`EtcDriftManifest::decision_for`]. Replacing them outright with a
+/// target's factory copy can strand local accounts, so they always go
+/// through `merge_identity_db`'s union-merge regardless of the drift-review
+/// choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EtcDriftManifest {
+    pub decisions: HashMap<String, bool>,
+}
+
+impl EtcDriftManifest {
+    /// Build the manifest matching today's default merge behavior: every
+    /// drift entry pre-selected "keep current" (checked). Applying this
+    /// manifest without the user changing anything is a no-op relative to
+    /// not supplying a manifest at all — matching issue #15's requirement
+    /// that behavior doesn't silently change for anyone who doesn't
+    /// interact with the review screen.
+    pub fn default_for_drift(drift: &[EtcDriftEntry]) -> Self {
+        let decisions = drift.iter().map(|e| (e.path.clone(), true)).collect();
+        Self { decisions }
+    }
+
+    /// Parse a manifest from its JSON representation. Pure — no I/O; callers
+    /// do their own file reading (see `bootc-migrate`'s CLI wiring).
+    pub fn parse(json: &str) -> Result<Self> {
+        serde_json::from_str(json).context("failed to parse etc-drift manifest JSON")
+    }
+
+    /// Serialize to pretty JSON.
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).context("failed to serialize etc-drift manifest")
+    }
+
+    /// The effective override decision for `rel_path`, or `None` if the
+    /// path isn't in the manifest or is an identity-DB file (see the struct
+    /// docs — those are never overridden).
+    fn decision_for(&self, rel_path: &str) -> Option<bool> {
+        if is_identity_db(rel_path) {
+            return None;
+        }
+        self.decisions.get(rel_path).copied()
+    }
 }
 
 /// Diff the OSTree factory default `/etc` against live `/etc` (issue #15).
@@ -1119,5 +1276,204 @@ mod tests {
         let drift = diff_etc_factory_vs_live(factory.path(), live.path()).unwrap();
         let paths: Vec<&str> = drift.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, vec!["aaa.conf", "zzz.conf"]);
+    }
+
+    // Config Drift Review manifest (issue #15): EtcDriftManifest.
+
+    #[test]
+    fn drift_manifest_json_round_trip() {
+        let cases: Vec<(&str, EtcDriftManifest)> = vec![
+            ("empty", EtcDriftManifest::default()),
+            (
+                "mixed",
+                EtcDriftManifest {
+                    decisions: HashMap::from([
+                        ("sshd_config".to_string(), false),
+                        ("motd".to_string(), true),
+                    ]),
+                },
+            ),
+        ];
+        for (name, manifest) in cases {
+            let json = manifest.to_json().unwrap();
+            let parsed = EtcDriftManifest::parse(&json).unwrap();
+            assert_eq!(parsed, manifest, "case {name}: round trip mismatch");
+        }
+    }
+
+    #[test]
+    fn drift_manifest_parse_rejects_malformed_json() {
+        assert!(EtcDriftManifest::parse("not json").is_err());
+    }
+
+    #[test]
+    fn drift_manifest_default_for_drift_keeps_everything_checked() {
+        let drift = vec![
+            EtcDriftEntry {
+                path: "a.conf".to_string(),
+                kind: DriftKind::Added,
+            },
+            EtcDriftEntry {
+                path: "b.conf".to_string(),
+                kind: DriftKind::Modified,
+            },
+            EtcDriftEntry {
+                path: "c.conf".to_string(),
+                kind: DriftKind::Removed,
+            },
+        ];
+        let manifest = EtcDriftManifest::default_for_drift(&drift);
+        for entry in &drift {
+            assert_eq!(
+                manifest.decisions.get(&entry.path),
+                Some(&true),
+                "{} should default to keep-current",
+                entry.path
+            );
+        }
+    }
+
+    // Config Drift Review override wiring into the 3-way merge (issue #15).
+
+    struct OverrideCase {
+        name: &'static str,
+        rel_path: &'static str,
+        old: Option<&'static [u8]>,
+        cur: Option<&'static [u8]>,
+        new: Option<&'static [u8]>,
+        decision: Option<bool>,
+        expect_content: Option<&'static [u8]>,
+        expect_sidecar: bool,
+    }
+
+    #[test]
+    fn merge_honors_drift_review_overrides() {
+        let cases = vec![
+            OverrideCase {
+                name: "override_take_default_replaces_user_change",
+                rel_path: "sshd_config",
+                old: Some(b"orig"),
+                cur: Some(b"user-edit"),
+                new: Some(b"target-default"),
+                decision: Some(false),
+                expect_content: Some(b"target-default"),
+                expect_sidecar: true,
+            },
+            OverrideCase {
+                name: "no_override_keeps_default_merge_behavior",
+                rel_path: "other.conf",
+                old: Some(b"orig"),
+                cur: Some(b"user-edit"),
+                new: Some(b"target-default"),
+                decision: None,
+                expect_content: Some(b"user-edit"),
+                expect_sidecar: false,
+            },
+            OverrideCase {
+                name: "override_keep_current_is_noop_when_user_modified",
+                rel_path: "keep.conf",
+                old: Some(b"orig"),
+                cur: Some(b"user-edit"),
+                new: Some(b"target-default"),
+                decision: Some(true),
+                expect_content: Some(b"user-edit"),
+                expect_sidecar: false,
+            },
+            OverrideCase {
+                name: "override_take_default_when_unchanged_writes_no_sidecar",
+                rel_path: "unchanged.conf",
+                old: Some(b"same"),
+                cur: Some(b"same"),
+                new: Some(b"target-default"),
+                decision: Some(false),
+                expect_content: Some(b"target-default"),
+                expect_sidecar: false,
+            },
+            OverrideCase {
+                name: "override_take_default_on_user_added_file_drops_it",
+                rel_path: "user-added.conf",
+                old: None,
+                cur: Some(b"unit-file"),
+                new: None,
+                decision: Some(false),
+                expect_content: None,
+                expect_sidecar: true,
+            },
+            OverrideCase {
+                name: "override_take_default_on_identity_db_is_ignored",
+                rel_path: "passwd",
+                old: Some(b"root:x:0:0::/root:/bin/bash\n"),
+                cur: Some(
+                    b"root:x:0:0::/root:/bin/bash\nuser1:x:1000:1000::/home/user1:/bin/bash\n",
+                ),
+                new: Some(b"root:x:0:0::/root:/bin/bash\n"),
+                decision: Some(false),
+                expect_content: Some(
+                    b"root:x:0:0::/root:/bin/bash\nuser1:x:1000:1000::/home/user1:/bin/bash\n",
+                ),
+                expect_sidecar: false,
+            },
+        ];
+
+        for case in cases {
+            let old_dir = tempdir().unwrap();
+            let cur_dir = tempdir().unwrap();
+            let new_dir = tempdir().unwrap();
+            let out_dir = tempdir().unwrap();
+
+            if let Some(content) = case.old {
+                fs::write(old_dir.path().join(case.rel_path), content).unwrap();
+            }
+            if let Some(content) = case.cur {
+                fs::write(cur_dir.path().join(case.rel_path), content).unwrap();
+            }
+            if let Some(content) = case.new {
+                fs::write(new_dir.path().join(case.rel_path), content).unwrap();
+            }
+
+            let manifest = case.decision.map(|decision| EtcDriftManifest {
+                decisions: HashMap::from([(case.rel_path.to_string(), decision)]),
+            });
+
+            merge_etc_files_with_overrides(
+                old_dir.path(),
+                cur_dir.path(),
+                new_dir.path(),
+                out_dir.path(),
+                manifest.as_ref(),
+            )
+            .unwrap_or_else(|e| panic!("case {}: merge failed: {e:#}", case.name));
+
+            let out_path = out_dir.path().join(case.rel_path);
+            match case.expect_content {
+                Some(expected) => assert_eq!(
+                    fs::read(&out_path).unwrap(),
+                    expected,
+                    "case {}: merged content mismatch",
+                    case.name
+                ),
+                None => assert!(
+                    !out_path.exists(),
+                    "case {}: expected no output file, found one",
+                    case.name
+                ),
+            }
+
+            let sidecar = out_dir.path().join(format!("{}.rebase-old", case.rel_path));
+            assert_eq!(
+                sidecar.exists(),
+                case.expect_sidecar,
+                "case {}: .rebase-old sidecar presence mismatch",
+                case.name
+            );
+            if case.expect_sidecar {
+                assert_eq!(
+                    fs::read(&sidecar).unwrap(),
+                    case.cur.unwrap(),
+                    "case {}: .rebase-old sidecar content mismatch",
+                    case.name
+                );
+            }
+        }
     }
 }

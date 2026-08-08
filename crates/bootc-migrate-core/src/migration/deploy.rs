@@ -10,6 +10,7 @@ pub fn phase4_stage_deploy(
     sealed_config: &str,
     dry_run: bool,
     force: bool,
+    etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
 ) -> Result<PathBuf> {
     println!("=== Phase 4: Staging Deployment State ===");
 
@@ -73,7 +74,13 @@ pub fn phase4_stage_deploy(
 
     // 3-way /etc merge
     println!("Performing 3-way /etc merge...");
-    if let Err(e) = perform_etc_merge(content_image, sealed_config, &etc_dir) {
+    if let Some(overrides) = etc_overrides {
+        println!(
+            "[phase4] applying {} Config Drift Review decision(s) to the /etc merge",
+            overrides.decisions.len()
+        );
+    }
+    if let Err(e) = perform_etc_merge(content_image, sealed_config, &etc_dir, etc_overrides) {
         eprintln!(
             "3-way /etc merge failed ({}), falling back to flat /etc copy.",
             e
@@ -614,7 +621,12 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
 }
 
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
-fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) -> Result<()> {
+fn perform_etc_merge(
+    target_image: &str,
+    sealed_config: &str,
+    etc_dir: &Path,
+    etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
+) -> Result<()> {
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mut mount_path = temp_mount.path().to_path_buf();
@@ -682,8 +694,14 @@ fn perform_etc_merge(target_image: &str, sealed_config: &str, etc_dir: &Path) ->
         registry_etc
     };
 
-    crate::mergetc::merge_etc_files(&old_default_etc, current_etc, &new_default_etc, etc_dir)
-        .context("3-way /etc merge failed")?;
+    crate::mergetc::merge_etc_files_with_overrides(
+        &old_default_etc,
+        current_etc,
+        &new_default_etc,
+        etc_dir,
+        etc_overrides,
+    )
+    .context("3-way /etc merge failed")?;
 
     match apply_target_gbm_backend_compat(target_image, &mount_path, etc_dir) {
         Ok(true) => println!(
@@ -851,9 +869,11 @@ fn apply_legacy_var_home_compat(
 /// image's `/etc` at all, since this is specifically about the user's own
 /// drift, independent of migration target.
 ///
-/// This is the computation half of #15's proposal; presenting it as an
-/// interactive checkbox TUI and feeding selections into Phase 4 as an
-/// include/exclude manifest is not implemented yet.
+/// This is the computation half of #15's proposal. The interactive checkbox
+/// TUI lives in `bootc-migrate`'s `drift_review` module (it needs a real
+/// terminal, so it can't live in this crate); its resulting
+/// [`crate::mergetc::EtcDriftManifest`] is threaded through
+/// [`phase4_stage_deploy`] as `etc_overrides`.
 pub fn compute_etc_drift() -> Result<Vec<crate::mergetc::EtcDriftEntry>> {
     let factory_etc = find_ostree_etc_default()?;
     crate::mergetc::diff_etc_factory_vs_live(&factory_etc, Path::new("/etc"))
