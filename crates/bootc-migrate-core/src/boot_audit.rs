@@ -11,11 +11,16 @@
 //! deliberately does not attempt — see the crate's CLI for where the
 //! read-only audit is exposed.
 
-use serde::Serialize;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// One UEFI boot entry, as parsed from `efibootmgr -v`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// `Deserialize` is implemented so an NVRAM snapshot taken before a
+/// destructive cleanup can be read back (see
+/// [`crate::boot_cleanup`]); nothing else round-trips these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootEntry {
     /// 4-hex-digit id, e.g. `"0001"` (from `Boot0001`).
     pub id: String,
@@ -87,6 +92,24 @@ const FIRMWARE_LABEL_MARKERS: &[&str] = &[
 /// unbranded names issue #31 wants replaced with the real `PRETTY_NAME`.
 const GENERIC_LABEL_MARKERS: &[&str] =
     &["linux", "fedora", "uefi os", "rhel", "centos", "opensuse"];
+
+/// Run `efibootmgr -v` and return its stdout. Kept separate from
+/// [`parse_efibootmgr_entries`] so the parser stays free of process I/O
+/// (REVIEW.md's parsing/I-O split), and shared so every caller reports the
+/// same failure the same way.
+pub fn read_efibootmgr_verbose() -> Result<String> {
+    let out = std::process::Command::new("efibootmgr")
+        .arg("-v")
+        .output()
+        .context("failed to execute efibootmgr -v")?;
+    if !out.status.success() {
+        bail!(
+            "efibootmgr -v failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
 
 /// Parse `efibootmgr -v` output into structured entries. Malformed lines
 /// (not matching `BootXXXX[*] label\t...`) are skipped — an audit must not

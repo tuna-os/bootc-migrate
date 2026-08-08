@@ -51,8 +51,29 @@ pub fn verify_rollback_prerequisites() -> Result<()> {
     Ok(())
 }
 
+/// Substrings that identify the pre-migration OSTree/GRUB boot entry — the
+/// rollback escape hatch this module exists to restore. Matched
+/// case-insensitively against an entry's label and its loader path.
+///
+/// Shared with [`crate::boot_cleanup`], which must never let a boot-entry
+/// cleanup delete the very entry `run_rollback` would re-order back to the
+/// front; both therefore have to agree on what "the rollback entry" is.
+pub const OSTREE_ROLLBACK_MARKERS: &[&str] = &["fedora", "shim", "efi\\fedora", "grub"];
+
+/// Whether an entry's label (and loader path, when it has one) identifies
+/// it as the OSTree/GRUB rollback entry.
+pub fn is_ostree_rollback_entry(label: &str, loader_path: Option<&str>) -> bool {
+    let haystack = match loader_path {
+        Some(p) => format!("{label} {p}"),
+        None => label.to_string(),
+    }
+    .to_ascii_lowercase();
+    OSTREE_ROLLBACK_MARKERS.iter().any(|m| haystack.contains(m))
+}
+
 /// Parse output of `efibootmgr` or `efibootmgr -v` to locate the OSTree/Fedora boot entry ID.
-/// Searches for lines starting with `BootXXXX` matching "Fedora", "shim", "EFI\fedora", or "GRUB".
+/// Searches for lines starting with `BootXXXX` matching any of
+/// [`OSTREE_ROLLBACK_MARKERS`].
 pub fn parse_ostree_boot_entry_id(efibootmgr_output: &str) -> Option<String> {
     for line in efibootmgr_output.lines() {
         let line_trim = line.trim();
@@ -61,12 +82,10 @@ pub fn parse_ostree_boot_entry_id(efibootmgr_output: &str) -> Option<String> {
             && rest[..4].chars().all(|c| c.is_ascii_hexdigit())
         {
             let id = &rest[..4];
-            let rest_line = &line_trim[8..];
-            let line_lower = rest_line.to_ascii_lowercase();
-            if line_lower.contains("fedora")
-                || line_lower.contains("shim")
-                || line_lower.contains("efi\\fedora")
-                || line_lower.contains("grub")
+            let line_lower = line_trim[8..].to_ascii_lowercase();
+            if OSTREE_ROLLBACK_MARKERS
+                .iter()
+                .any(|m| line_lower.contains(m))
             {
                 return Some(id.to_string());
             }
@@ -77,10 +96,20 @@ pub fn parse_ostree_boot_entry_id(efibootmgr_output: &str) -> Option<String> {
 
 /// Parse current `BootOrder: XXXX,YYYY,...` line from `efibootmgr` output.
 pub fn parse_boot_order(efibootmgr_output: &str) -> Option<String> {
+    parse_nvram_scalar(efibootmgr_output, "BootOrder:")
+}
+
+/// Parse the `BootCurrent: XXXX` line from `efibootmgr` output — the entry
+/// the running system actually booted from, which no cleanup may delete.
+pub fn parse_boot_current(efibootmgr_output: &str) -> Option<String> {
+    parse_nvram_scalar(efibootmgr_output, "BootCurrent:")
+}
+
+fn parse_nvram_scalar(efibootmgr_output: &str, key: &str) -> Option<String> {
     for line in efibootmgr_output.lines() {
         let line_trim = line.trim();
-        if let Some(order) = line_trim.strip_prefix("BootOrder:") {
-            return Some(order.trim().to_string());
+        if let Some(value) = line_trim.strip_prefix(key) {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -219,6 +248,17 @@ BootOrder: 0001,0000,0002\n\
     }
 
     #[test]
+    fn test_parse_boot_current() {
+        let sample = "\
+BootCurrent: 0001\n\
+Timeout: 1 seconds\n\
+BootOrder: 0001,0000,0002\n\
+";
+        assert_eq!(parse_boot_current(sample), Some("0001".to_string()));
+        assert_eq!(parse_boot_current("BootOrder: 0001\n"), None);
+    }
+
+    #[test]
     fn test_build_new_boot_order() {
         assert_eq!(
             build_new_boot_order("0001,0000,0002", "0000"),
@@ -226,5 +266,41 @@ BootOrder: 0001,0000,0002\n\
         );
         assert_eq!(build_new_boot_order("0000,0001", "0000"), "0000,0001");
         assert_eq!(build_new_boot_order("", "0000"), "0000");
+    }
+
+    #[test]
+    fn is_ostree_rollback_entry_cases() {
+        // (label, loader_path, expected) — the rollback entry has to be
+        // recognizable from either half, since firmware labels vary.
+        let cases: &[(&str, Option<&str>, bool)] = &[
+            ("Fedora", Some("\\EFI\\fedora\\shimx64.efi"), true),
+            // Label alone is generic, but the loader path names shim.
+            ("UEFI OS", Some("\\EFI\\fedora\\shimx64.efi"), true),
+            // Loader path alone is generic, but the label names GRUB.
+            ("GRUB2 bootloader", Some("\\EFI\\BOOT\\BOOTX64.EFI"), true),
+            // No loader path at all: label still decides.
+            ("Fedora", None, true),
+            // systemd-boot is the *migrated* entry, never the rollback one.
+            (
+                "Linux Boot Manager",
+                Some("\\EFI\\systemd\\systemd-bootx64.efi"),
+                false,
+            ),
+            (
+                "Windows Boot Manager",
+                Some("\\EFI\\Microsoft\\Boot\\bootmgfw.efi"),
+                false,
+            ),
+            ("UEFI OS", Some("\\EFI\\BOOT\\BOOTX64.EFI"), false),
+            // Case-insensitive on both halves.
+            ("FEDORA LINUX", None, true),
+        ];
+        for (label, loader, expected) in cases {
+            assert_eq!(
+                is_ostree_rollback_entry(label, *loader),
+                *expected,
+                "label={label} loader={loader:?}"
+            );
+        }
     }
 }

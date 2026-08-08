@@ -301,17 +301,7 @@ fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
 fn run_boot_entries_audit(args: &BootEntriesArgs) -> Result<()> {
     use bootc_migrate_core::boot_audit::{self, AuditFlag};
 
-    let out = std::process::Command::new("efibootmgr")
-        .arg("-v")
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to execute efibootmgr -v: {e}"))?;
-    if !out.status.success() {
-        bail!(
-            "efibootmgr -v failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = boot_audit::read_efibootmgr_verbose()?;
     let entries = boot_audit::parse_efibootmgr_entries(&stdout);
 
     let esp_root = migration::boot::find_esp_or_mount()
