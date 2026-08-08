@@ -5,6 +5,7 @@ use std::process;
 
 use bootc_migrate_core::{migration, preflight, transaction};
 
+mod drift_review;
 mod tui;
 
 #[derive(Parser, Debug)]
@@ -38,6 +39,19 @@ struct Args {
     /// Skip Phase 1 (OSTree object import)
     #[arg(long)]
     skip_import: bool,
+
+    /// Interactively review /etc config drift before migration begins
+    /// ("Phase 0.5", issue #15). Checked entries keep the user's live
+    /// version (today's default); unchecked entries take the target's new
+    /// default. Mutually exclusive with --etc-drift-manifest.
+    #[arg(long)]
+    review_drift: bool,
+
+    /// Load a previously-saved Config Drift Review manifest (see
+    /// `etc-drift --interactive --output <path>`) instead of prompting
+    /// interactively. Mutually exclusive with --review-drift.
+    #[arg(long)]
+    etc_drift_manifest: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,15 +101,23 @@ enum Command {
     Tui,
     /// Show config drift between the OSTree factory default /etc and live
     /// /etc — the "Config Drift Review" step (issue #15). Read-only;
-    /// independent of any migration target. Interactive selection feeding
-    /// into Phase 4 is not implemented yet — this reports the same
-    /// Added/Modified/Removed/TypeChanged categorization that would drive
-    /// it.
+    /// independent of any migration target. Reports the
+    /// Added/Modified/Removed/TypeChanged categorization that also drives
+    /// the interactive review (`--interactive`) and Phase 4's `/etc` merge.
     #[command(name = "etc-drift")]
     EtcDrift {
         /// Output as machine-readable JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Launch the interactive checklist instead of printing a static
+        /// report, and write the resulting decisions manifest to --output.
+        #[arg(long)]
+        interactive: bool,
+        /// Where to write the decisions manifest when --interactive is
+        /// used. Consumed later via `--etc-drift-manifest` on a migration
+        /// run.
+        #[arg(long, default_value = "/var/tmp/bootc-migrate-etc-drift.json")]
+        output: PathBuf,
     },
     /// Move a system Steam library and user settings into Flatpak Steam.
     ///
@@ -265,8 +287,17 @@ fn main() {
     }
 
     // Handle `etc-drift` subcommand
-    if let Some(Command::EtcDrift { json }) = args.command {
-        let result = run_etc_drift(json);
+    if let Some(Command::EtcDrift {
+        json,
+        interactive,
+        output,
+    }) = args.command
+    {
+        let result = if interactive {
+            run_etc_drift_interactive(&output)
+        } else {
+            run_etc_drift(json)
+        };
         if let Err(e) = result {
             eprintln!("Error: {}", e);
             exit_flushed!(1);
@@ -389,6 +420,48 @@ fn main() {
         }
     }
 
+    // ---- Phase 0.5: Config Drift Review (issue #15) ----
+    // Read-only and before any mutation below this point: preflight above
+    // only inspects the system, and run_migration is the first thing that
+    // remounts /sysroot and /boot read-write.
+    if args.review_drift && args.etc_drift_manifest.is_some() {
+        eprintln!("Error: --review-drift and --etc-drift-manifest are mutually exclusive.");
+        exit_flushed!(1);
+    }
+
+    let mut etc_overrides: Option<bootc_migrate_core::mergetc::EtcDriftManifest> = None;
+
+    if args.review_drift {
+        println!("=== Phase 0.5: Config Drift Review ===");
+        match migration::deploy::compute_etc_drift() {
+            Ok(drift) => match drift_review::run_review(drift) {
+                Ok(Some(manifest)) => etc_overrides = Some(manifest),
+                Ok(None) => {
+                    println!("Config Drift Review cancelled; aborting migration.");
+                    exit_flushed!(0);
+                }
+                Err(e) => {
+                    eprintln!("Error running Config Drift Review: {:#}", e);
+                    exit_flushed!(1);
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to compute /etc config drift ({:#}); skipping review.",
+                    e
+                );
+            }
+        }
+    } else if let Some(path) = &args.etc_drift_manifest {
+        match read_etc_drift_manifest(path) {
+            Ok(manifest) => etc_overrides = Some(manifest),
+            Err(e) => {
+                eprintln!("Error: {:#}", e);
+                exit_flushed!(1);
+            }
+        }
+    }
+
     println!("Starting migration to OCI image: {}...", target_image);
     if let Err(e) = migration::run_migration(
         &report,
@@ -397,6 +470,7 @@ fn main() {
         args.skip_import,
         &args.bootloader,
         args.force,
+        etc_overrides.as_ref(),
     ) {
         eprintln!("\nMigration Failed: {:#}", e);
         exit_flushed!(1);
@@ -446,6 +520,51 @@ fn run_etc_drift(json: bool) -> Result<()> {
         println!("  {:<50} [{}]", format!("/etc/{}", entry.path), kind);
     }
     Ok(())
+}
+
+/// Run the interactive Config Drift Review checklist and write the
+/// resulting manifest to `output` (issue #15).
+fn run_etc_drift_interactive(output: &std::path::Path) -> Result<()> {
+    let drift = migration::deploy::compute_etc_drift()?;
+    match drift_review::run_review(drift)? {
+        Some(manifest) => {
+            write_etc_drift_manifest(output, &manifest)?;
+            println!(
+                "Wrote Config Drift Review manifest ({} decision(s)) to {}",
+                manifest.decisions.len(),
+                output.display()
+            );
+            Ok(())
+        }
+        None => {
+            println!("Config Drift Review cancelled; no manifest written.");
+            Ok(())
+        }
+    }
+}
+
+/// Serialize `manifest` and write it to `path` (I/O; parsing itself is
+/// `EtcDriftManifest::to_json`, kept pure and unit-tested in
+/// `bootc-migrate-core`).
+fn write_etc_drift_manifest(
+    path: &std::path::Path,
+    manifest: &bootc_migrate_core::mergetc::EtcDriftManifest,
+) -> Result<()> {
+    let json = manifest.to_json()?;
+    std::fs::write(path, json)
+        .with_context(|| format!("failed to write etc-drift manifest to {}", path.display()))?;
+    Ok(())
+}
+
+/// Read and parse a previously-saved Config Drift Review manifest (I/O;
+/// parsing itself is `EtcDriftManifest::parse`, kept pure and unit-tested in
+/// `bootc-migrate-core`).
+fn read_etc_drift_manifest(
+    path: &std::path::Path,
+) -> Result<bootc_migrate_core::mergetc::EtcDriftManifest> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read etc-drift manifest {}", path.display()))?;
+    bootc_migrate_core::mergetc::EtcDriftManifest::parse(&contents)
 }
 
 fn run_system_to_flatpak_steam(dry_run: bool) -> Result<()> {

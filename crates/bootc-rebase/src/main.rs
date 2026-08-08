@@ -524,6 +524,9 @@ fn run_core_migration(args: &Args) -> Result<()> {
     }
 
     println!("Starting migration to OCI image: {}...", args.target_image);
+    // bootc-rebase has no interactive Config Drift Review wiring yet
+    // (issue #15's TUI lives in the `bootc-migrate` binary); always fall
+    // back to the default 3-way /etc merge.
     migration::run_migration(
         &report,
         &args.target_image,
@@ -531,6 +534,7 @@ fn run_core_migration(args: &Args) -> Result<()> {
         args.skip_import,
         &args.bootloader,
         args.force,
+        None,
     )
 }
 
