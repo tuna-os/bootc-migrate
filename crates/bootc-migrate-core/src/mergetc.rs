@@ -5,6 +5,14 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
+/// Suffix appended to a path whose user-modified value is being displaced by
+/// the target image's default, so the displaced value is preserved beside it
+/// rather than discarded (ROADMAP.md's decision log: "target defaults win,
+/// user value kept as `.rebase-old` sidecar"). Shared with
+/// [`crate::etc_conflict`], which applies the same convention on the
+/// `bootc switch` route.
+pub const REBASE_OLD_SUFFIX: &str = ".rebase-old";
+
 /// Result of reading a file for 3-way merge. None means the file does not exist
 /// in that version.
 #[derive(Debug)]
@@ -215,7 +223,7 @@ fn write_rebase_old_sidecar(
     output_dir: &Path,
     rel_path: &str,
 ) -> Result<()> {
-    let sidecar_rel = format!("{rel_path}.rebase-old");
+    let sidecar_rel = format!("{rel_path}{REBASE_OLD_SUFFIX}");
     let dest = output_dir.join(&sidecar_rel);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -427,7 +435,11 @@ fn merge_identity_db(
 
 /// Identity-database files whose contents accumulate system state and must
 /// never be replaced by the target image's factory copy during /etc merge.
-fn is_identity_db(rel_path: &str) -> bool {
+///
+/// Public so [`crate::etc_conflict`] can hold the same paths exempt on the
+/// `bootc switch` route, where no union-merge is available to rescue them
+/// (see issue #80) — one list, so the two routes cannot drift apart.
+pub fn is_identity_db(rel_path: &str) -> bool {
     matches!(
         rel_path,
         "passwd"
