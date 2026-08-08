@@ -930,7 +930,7 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
     }
 
     // Try common mount points first.
-    for path in ["/boot/efi", "/efi"] {
+    for path in STANDARD_ESP_MOUNTS.iter().copied() {
         if Path::new(path).exists() && Path::new(path).join("EFI").exists() {
             return Ok(path.to_string());
         }
@@ -964,13 +964,20 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
     anyhow::bail!("Cannot find or mount ESP. Use --bootloader=grub2 to use GRUB2 instead.")
 }
 
+/// The conventional ESP mount points, probed in this order.
+pub const STANDARD_ESP_MOUNTS: &[&str] = &["/boot/efi", "/efi"];
+
+/// The mount point to assume when the ESP could not be located but a
+/// caller still needs some path to report a later failure against.
+pub const DEFAULT_ESP_MOUNT: &str = STANDARD_ESP_MOUNTS[0];
+
 /// Find the ESP partition and return its mount point, auto-mounting it
 /// under /var/tmp/esp-migration if it is not already mounted. Does not
 /// require a PreflightReport — use from the commit/cleanup path where
 /// the preflight context is not available.
 pub fn find_esp_or_mount() -> Result<String> {
     // Check standard mount points first.
-    for path in ["/boot/efi", "/efi"] {
+    for path in STANDARD_ESP_MOUNTS.iter().copied() {
         if Path::new(path).exists() && Path::new(path).join("EFI").exists() {
             return Ok(path.to_string());
         }

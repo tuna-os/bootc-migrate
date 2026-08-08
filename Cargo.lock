@@ -205,6 +205,8 @@ dependencies = [
  "anyhow",
  "bootc-migrate-core",
  "clap",
+ "crossterm",
+ "ratatui",
  "rustix",
  "serde_json",
  "tempfile",
