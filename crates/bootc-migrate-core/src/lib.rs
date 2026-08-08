@@ -5,6 +5,8 @@
 //! bootc re-base engine) can compose their own migration pipelines:
 //!
 //! - [`boot_audit`] — UEFI boot-entry enumeration + dead/generic/duplicate/firmware classification
+//! - [`boot_cleanup`] — the destructive half of that audit: a pure planner for
+//!   entry removal/branding-rename, and the `efibootmgr` executor it authorizes
 //! - [`de_detect`] — desktop-environment detection for a target image (registry-streamed) or the live host
 //! - [`de_migrate`] — cross-DE config stash/restore, portable-subset extraction, hook contract
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
@@ -20,6 +22,7 @@
 //! - [`types`] — shared types such as [`VerityDigest`]
 
 pub mod boot_audit;
+pub mod boot_cleanup;
 pub mod composefs;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
