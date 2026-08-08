@@ -8,26 +8,37 @@
 //! "portable subset" of preferences (wallpaper, dark-mode, locale, keyboard
 //! layout), and running third-party hook scripts around the switch.
 //!
-//! What this module deliberately does **not** do: detect the target image's
-//! default DE (that needs registry streaming + the cross-base hardening work
-//! this issue is gated behind — see #68's "Depends on" section) or actually
-//! apply the portable subset to the target DE (translation is opinionated
-//! and explicitly meant to live in hook scripts, not the engine — this
-//! module only computes the best-effort mapping as data for a hook to use).
+//! Which DE a given image or host actually ships is [`crate::de_detect`]'s
+//! job. What this module deliberately does **not** do is apply the portable
+//! subset to the target DE: translation is opinionated and explicitly meant
+//! to live in hook scripts, not the engine — this module only computes the
+//! best-effort mapping as data for a hook to use.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::fmt;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A desktop environment this module knows how to stash/restore config for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// A desktop environment this module knows how to stash/restore config for,
+/// and that [`crate::de_detect`] knows how to identify in an image or on a
+/// live root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopEnvironment {
     Gnome,
     Kde,
+    Cosmic,
+    Niri,
+    Xfce,
+}
+
+impl fmt::Display for DesktopEnvironment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(de_dir_name(*self))
+    }
 }
 
 /// Per-user config paths (relative to `$HOME`) considered part of a DE's
@@ -47,10 +58,26 @@ const KDE_STASH_PATHS: &[&str] = &[
     ".local/share/plasma",
 ];
 
+/// COSMIC keeps each component's settings as RON files under
+/// `~/.config/cosmic/<component>/` and its window/workspace state under
+/// `~/.local/state/cosmic` — no single rc file to stash.
+const COSMIC_STASH_PATHS: &[&str] = &[".config/cosmic", ".local/state/cosmic"];
+
+/// niri is configured by a single KDL file in its own directory.
+const NIRI_STASH_PATHS: &[&str] = &[".config/niri"];
+
+/// XFCE's settings live in xfconf channel XML under `~/.config/xfce4`, with
+/// the file manager keeping its own directory and the panel/session caches
+/// under `~/.local/share/xfce4`.
+const XFCE_STASH_PATHS: &[&str] = &[".config/xfce4", ".config/Thunar", ".local/share/xfce4"];
+
 fn stash_paths(de: DesktopEnvironment) -> &'static [&'static str] {
     match de {
         DesktopEnvironment::Gnome => GNOME_STASH_PATHS,
         DesktopEnvironment::Kde => KDE_STASH_PATHS,
+        DesktopEnvironment::Cosmic => COSMIC_STASH_PATHS,
+        DesktopEnvironment::Niri => NIRI_STASH_PATHS,
+        DesktopEnvironment::Xfce => XFCE_STASH_PATHS,
     }
 }
 
@@ -88,11 +115,99 @@ pub fn compute_restore_plan(de: DesktopEnvironment, stash_root: &Path) -> Vec<Pl
         .collect()
 }
 
+/// The stash sub-directory (and hook-contract `REBASE_*_DE` value) for a DE.
+/// Also what [`DesktopEnvironment`]'s [`fmt::Display`] renders, so the CLI,
+/// the hook env, and the on-disk layout can never drift apart.
 fn de_dir_name(de: DesktopEnvironment) -> &'static str {
     match de {
         DesktopEnvironment::Gnome => "gnome",
         DesktopEnvironment::Kde => "kde",
+        DesktopEnvironment::Cosmic => "cosmic",
+        DesktopEnvironment::Niri => "niri",
+        DesktopEnvironment::Xfce => "xfce",
     }
+}
+
+/// Parse a [`DesktopEnvironment`] from its [`de_dir_name`] spelling
+/// (case-insensitively) — the inverse of [`fmt::Display`], used by the CLI's
+/// `--from-de`/`--to-de` and by display-manager session mapping.
+pub fn parse_desktop_environment(name: &str) -> Option<DesktopEnvironment> {
+    let lower = name.trim().to_ascii_lowercase();
+    [
+        DesktopEnvironment::Gnome,
+        DesktopEnvironment::Kde,
+        DesktopEnvironment::Cosmic,
+        DesktopEnvironment::Niri,
+        DesktopEnvironment::Xfce,
+    ]
+    .into_iter()
+    .find(|de| de_dir_name(*de) == lower)
+}
+
+/// One human account whose per-user DE config a re-base should stash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UserHome {
+    pub name: String,
+    pub uid: u32,
+    pub home: PathBuf,
+}
+
+/// Lowest uid treated as a human account. Matches `UID_MIN` in
+/// `/etc/login.defs` on the Fedora-family bases this tool targets; system
+/// accounts below it have no desktop config to move.
+const FIRST_HUMAN_UID: u32 = 1000;
+
+/// `nobody` — inside the human uid range on modern Fedora (systemd moved it
+/// to 65534), but never an account with a real home directory.
+const NOBODY_UID: u32 = 65534;
+
+/// Login shells that mean "this account cannot log in", so it has no
+/// desktop session and no DE config, whatever its uid.
+const NOLOGIN_SHELLS: &[&str] = &[
+    "/sbin/nologin",
+    "/usr/sbin/nologin",
+    "/bin/false",
+    "/usr/bin/false",
+];
+
+/// Parse `/etc/passwd` content into the human accounts a cross-DE re-base
+/// should stash config for: uid at or above [`FIRST_HUMAN_UID`], not
+/// `nobody`, a real login shell, and an absolute home that isn't `/`.
+///
+/// Pure — the caller reads `/etc/passwd` (or a fixture) and hands the
+/// content in. `crate::remap::parse_passwd` deliberately drops the home and
+/// shell fields (it only needs ids), so this parses its own.
+pub fn parse_user_homes(passwd_content: &str) -> Vec<UserHome> {
+    passwd_content
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split(':');
+            let name = f.next()?.trim();
+            if name.is_empty() || name.starts_with('#') {
+                return None;
+            }
+            let _password = f.next()?;
+            let uid: u32 = f.next()?.trim().parse().ok()?;
+            let _gid = f.next()?;
+            let _gecos = f.next()?;
+            let home = f.next()?.trim();
+            let shell = f.next().unwrap_or("").trim();
+            if uid < FIRST_HUMAN_UID || uid == NOBODY_UID {
+                return None;
+            }
+            if NOLOGIN_SHELLS.contains(&shell) {
+                return None;
+            }
+            if home.is_empty() || home == "/" || !home.starts_with('/') {
+                return None;
+            }
+            Some(UserHome {
+                name: name.to_string(),
+                uid,
+                home: PathBuf::from(home),
+            })
+        })
+        .collect()
 }
 
 /// Move `home`'s config for `de` under `stash_root/<de>/`, per the plan from
@@ -473,6 +588,99 @@ mod tests {
 
         let moved = stash(DesktopEnvironment::Kde, &home, &stash_root, false).unwrap();
         assert!(moved.is_empty());
+    }
+
+    #[test]
+    fn every_desktop_environment_has_stash_paths_and_a_round_tripping_name() {
+        for de in [
+            DesktopEnvironment::Gnome,
+            DesktopEnvironment::Kde,
+            DesktopEnvironment::Cosmic,
+            DesktopEnvironment::Niri,
+            DesktopEnvironment::Xfce,
+        ] {
+            let paths = stash_paths(de);
+            assert!(!paths.is_empty(), "{de} has no stash paths");
+            assert!(
+                paths
+                    .iter()
+                    .all(|p| p.starts_with('.') && !p.contains("..")),
+                "{de} stash paths must be dotfile paths relative to $HOME: {paths:?}"
+            );
+            assert_eq!(parse_desktop_environment(&de.to_string()), Some(de));
+            assert_eq!(
+                parse_desktop_environment(&de.to_string().to_uppercase()),
+                Some(de)
+            );
+        }
+        assert_eq!(parse_desktop_environment("mate"), None);
+    }
+
+    #[test]
+    fn parse_user_homes_selects_only_loginable_human_accounts() {
+        let passwd = "\
+root:x:0:0:root:/root:/bin/bash
+bin:x:1:1:bin:/bin:/sbin/nologin
+nobody:x:65534:65534:Kernel Overflow User:/:/sbin/nologin
+systemd-oom:x:999:999:systemd Userspace OOM Killer:/:/usr/sbin/nologin
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+bob:x:1001:1001:Bob:/var/home/bob:/usr/bin/zsh
+locked:x:1002:1002:Locked:/home/locked:/usr/sbin/nologin
+rootless:x:1003:1003:No Home::/bin/bash
+# comment:x:1004:1004::/home/nope:/bin/bash
+malformed-line-without-fields
+";
+        let homes = parse_user_homes(passwd);
+        assert_eq!(
+            homes,
+            vec![
+                UserHome {
+                    name: "alice".to_string(),
+                    uid: 1000,
+                    home: PathBuf::from("/home/alice"),
+                },
+                UserHome {
+                    name: "bob".to_string(),
+                    uid: 1001,
+                    home: PathBuf::from("/var/home/bob"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stash_and_restore_round_trip_for_every_desktop_environment() {
+        for de in [
+            DesktopEnvironment::Gnome,
+            DesktopEnvironment::Kde,
+            DesktopEnvironment::Cosmic,
+            DesktopEnvironment::Niri,
+            DesktopEnvironment::Xfce,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().join("home");
+            let stash_root = tmp.path().join("stash");
+            // Populate the DE's first stash path as a file with known content.
+            let first = stash_paths(de)[0];
+            write_file(&home.join(first), &format!("{de} config"));
+
+            let moved = stash(de, &home, &stash_root, false).unwrap();
+            assert_eq!(moved, vec![first.to_string()], "stash plan for {de}");
+            assert!(!home.join(first).exists(), "{de}: source must have moved");
+            assert_eq!(
+                fs::read_to_string(stash_root.join(de.to_string()).join(first)).unwrap(),
+                format!("{de} config"),
+                "{de}: stash must land under its own directory"
+            );
+
+            let restored = restore(de, &home, &stash_root, false).unwrap();
+            assert_eq!(restored, vec![first.to_string()], "restore plan for {de}");
+            assert_eq!(
+                fs::read_to_string(home.join(first)).unwrap(),
+                format!("{de} config"),
+                "{de}: restore must put the content back"
+            );
+        }
     }
 
     #[test]
