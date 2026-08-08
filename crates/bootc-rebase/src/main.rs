@@ -50,10 +50,12 @@ enum Commands {
     /// branding-rename are not implemented yet.
     BootEntries(BootEntriesArgs),
     /// Stash or restore a user's DE config around a cross-DE re-base (issue
-    /// #68). Off by default: only runs when this subcommand is invoked
-    /// explicitly. NOT wired into `rebase`/`scan` yet — target-image DE
-    /// detection needs the cross-base hardening this issue is gated behind,
-    /// so callers currently pass `--from-de`/`--to-de` explicitly.
+    /// #68), for one explicitly-named DE and one explicitly-named home. The
+    /// `rebase` flow does this automatically for every human account when
+    /// `--de-migrate` is passed and the target image ships a different DE;
+    /// this subcommand is the manual escape hatch for the cases detection
+    /// deliberately refuses to guess at (an image shipping several desktops,
+    /// or one this tool does not recognize).
     DeMigrate(DeMigrateArgs),
 }
 
@@ -190,6 +192,14 @@ struct Args {
     /// report so the blast radius is visible first.
     #[arg(long)]
     accept_cross_base: bool,
+
+    /// When the target image ships a different desktop environment than this
+    /// host, move each human account's outgoing DE config into a stash and
+    /// re-expose any stash left by a previous re-base in the other direction
+    /// (#68). Off by default — a re-base never touches per-user desktop
+    /// state unless asked to.
+    #[arg(long)]
+    de_migrate: bool,
 }
 
 fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabilities) {
@@ -349,12 +359,12 @@ fn run_boot_entries_audit(args: &BootEntriesArgs) -> Result<()> {
 }
 
 fn parse_de(name: &str) -> Result<bootc_migrate_core::de_migrate::DesktopEnvironment> {
-    use bootc_migrate_core::de_migrate::DesktopEnvironment;
-    match name.to_ascii_lowercase().as_str() {
-        "gnome" => Ok(DesktopEnvironment::Gnome),
-        "kde" => Ok(DesktopEnvironment::Kde),
-        other => bail!("unknown desktop environment '{other}' (expected \"gnome\" or \"kde\")"),
-    }
+    bootc_migrate_core::de_migrate::parse_desktop_environment(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown desktop environment '{name}' \
+             (expected gnome, kde, cosmic, niri, or xfce)"
+        )
+    })
 }
 
 fn run_de_migrate(args: &DeMigrateArgs) -> Result<()> {
@@ -437,6 +447,171 @@ fn run_de_migrate(args: &DeMigrateArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Where a user's stash lives, relative to their home. Same value as the
+/// `de-migrate stash|restore --stash-dir` default, so a stash written by the
+/// standalone subcommand is found by the `rebase` flow and vice versa.
+const DE_STASH_SUBDIR: &str = ".local/share/de-migrate";
+
+/// What the DE step of a re-base will do, decided before anything is staged.
+#[derive(Debug)]
+struct DesktopMigrationPlan {
+    from: bootc_migrate_core::de_migrate::DesktopEnvironment,
+    to: bootc_migrate_core::de_migrate::DesktopEnvironment,
+    users: Vec<bootc_migrate_core::de_migrate::UserHome>,
+}
+
+/// Decide whether this re-base needs a DE config stash/restore (#68), always
+/// saying out loud why it does not: a silent no-op here looks identical to a
+/// broken `--de-migrate`.
+///
+/// Every way this can come up short — the flag off, an ambiguous or
+/// unrecognized desktop on either side, an unreachable registry, no human
+/// accounts — degrades to "do nothing" rather than failing the re-base, but
+/// none of them degrade quietly. Errors are reported once, here, so the
+/// stash/restore functions themselves can propagate normally: a *failed*
+/// half-move of a user's config must abort, unlike a decision not to move
+/// anything at all.
+fn plan_desktop_migration(args: &Args) -> Option<DesktopMigrationPlan> {
+    match try_plan_desktop_migration(args) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("Warning: DE migration skipped — {e:#}");
+            None
+        }
+    }
+}
+
+fn try_plan_desktop_migration(args: &Args) -> Result<Option<DesktopMigrationPlan>> {
+    use bootc_migrate_core::{de_detect, de_migrate};
+
+    if !args.de_migrate {
+        println!(
+            "DE migration: skipped (--de-migrate not passed); per-user desktop config is \
+             left exactly as it is."
+        );
+        return Ok(None);
+    }
+
+    let host = de_detect::detect_host_desktop().context("detecting this host's desktop")?;
+    let target = de_detect::detect_image_desktop(&args.target_image)
+        .with_context(|| format!("detecting the desktop shipped by {}", args.target_image))?;
+
+    let Some((from, to)) = de_detect::cross_desktop_pair(&host, &target) else {
+        println!(
+            "DE migration: nothing to do (this host: {host}, {}: {target}).",
+            args.target_image
+        );
+        return Ok(None);
+    };
+
+    let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
+    let users = de_migrate::parse_user_homes(&passwd);
+    if users.is_empty() {
+        println!("DE migration: {from} -> {to}, but /etc/passwd has no human accounts to stash.");
+        return Ok(None);
+    }
+
+    Ok(Some(DesktopMigrationPlan { from, to, users }))
+}
+
+/// Stash the outgoing DE's config for every planned user and run the
+/// `pre-switch.d` hooks, before the target is staged. Hook ordering matches
+/// `de-migrate stash --run-hooks`: the stash is in place by the time a hook
+/// runs, so a hook can read what was moved out of the way.
+///
+/// A failure here aborts the re-base before anything is staged, which is the
+/// point of running it first: a half-moved home is worse than no re-base.
+fn run_pre_switch_desktop_migration(plan: &DesktopMigrationPlan, dry_run: bool) -> Result<()> {
+    use bootc_migrate_core::de_migrate;
+
+    println!(
+        "DE migration: {} -> {} for {} user(s){}.",
+        plan.from,
+        plan.to,
+        plan.users.len(),
+        if dry_run { " [DRY RUN]" } else { "" }
+    );
+    let hooks = de_migrate::discover_hooks(Path::new(de_migrate::PRE_SWITCH_HOOK_DIR))
+        .context("discovering pre-switch hooks")?;
+
+    for user in &plan.users {
+        let stash_dir = user.home.join(DE_STASH_SUBDIR);
+        let moved = de_migrate::stash(plan.from, &user.home, &stash_dir, dry_run)
+            .with_context(|| format!("stashing {} config for {}", plan.from, user.name))?;
+        if moved.is_empty() {
+            println!("  {}: no {} config to stash.", user.name, plan.from);
+        } else {
+            println!(
+                "  {}: stashed {} path(s) into {}",
+                user.name,
+                moved.len(),
+                stash_dir.display()
+            );
+            for p in &moved {
+                println!("    {p}");
+            }
+        }
+        // No hooks installed is the common case; don't print an empty
+        // "no hooks" block once per user for it.
+        if !hooks.is_empty() {
+            let env = de_migrate::build_hook_env(plan.from, plan.to, &stash_dir, &user.home);
+            let results = de_migrate::run_hooks(&hooks, &env, dry_run)
+                .with_context(|| format!("running pre-switch hooks for {}", user.name))?;
+            print_hook_results(&results);
+        }
+    }
+    Ok(())
+}
+
+/// Re-expose the incoming DE's stash — the one a previous re-base in the
+/// other direction left behind — and run the `post-switch.d` hooks, after
+/// the target is staged. A first-time switch to a DE simply has no stash to
+/// restore, which is reported, not treated as an error.
+fn run_post_switch_desktop_migration(plan: &DesktopMigrationPlan, dry_run: bool) -> Result<()> {
+    use bootc_migrate_core::de_migrate;
+
+    let hooks = de_migrate::discover_hooks(Path::new(de_migrate::POST_SWITCH_HOOK_DIR))
+        .context("discovering post-switch hooks")?;
+
+    println!(
+        "DE migration: re-exposing any previous {} stash{}.",
+        plan.to,
+        if dry_run { " [DRY RUN]" } else { "" }
+    );
+    for user in &plan.users {
+        let stash_dir = user.home.join(DE_STASH_SUBDIR);
+        let restored = de_migrate::restore(plan.to, &user.home, &stash_dir, dry_run)
+            .with_context(|| format!("restoring {} config for {}", plan.to, user.name))?;
+        if restored.is_empty() {
+            println!(
+                "  {}: no previous {} stash to restore (first switch to it).",
+                user.name, plan.to
+            );
+        } else {
+            println!(
+                "  {}: restored {} previously-stashed {} path(s).",
+                user.name,
+                restored.len(),
+                plan.to
+            );
+        }
+        if !hooks.is_empty() {
+            let env = de_migrate::build_hook_env(plan.from, plan.to, &stash_dir, &user.home);
+            let results = de_migrate::run_hooks(&hooks, &env, dry_run)
+                .with_context(|| format!("running post-switch hooks for {}", user.name))?;
+            print_hook_results(&results);
+        }
+    }
+    Ok(())
+}
+
+/// Run both halves against a plan without staging anything, so `--dry-run`
+/// prints the whole DE step instead of only the part that precedes staging.
+fn preview_desktop_migration(plan: &DesktopMigrationPlan) -> Result<()> {
+    run_pre_switch_desktop_migration(plan, true)?;
+    run_post_switch_desktop_migration(plan, true)
 }
 
 fn print_hook_results(results: &[bootc_migrate_core::de_migrate::HookResult]) {
@@ -523,6 +698,17 @@ fn run_core_migration(args: &Args) -> Result<()> {
         }
     }
 
+    // #68: decide the DE step before the pipeline runs so a --dry-run shows
+    // it too, and stash before anything is staged.
+    let de_plan = plan_desktop_migration(args);
+    if args.dry_run {
+        if let Some(plan) = &de_plan {
+            preview_desktop_migration(plan)?;
+        }
+    } else if let Some(plan) = &de_plan {
+        run_pre_switch_desktop_migration(plan, false)?;
+    }
+
     println!("Starting migration to OCI image: {}...", args.target_image);
     // bootc-rebase has no interactive Config Drift Review wiring yet
     // (issue #15's TUI lives in the `bootc-migrate` binary); always fall
@@ -535,7 +721,14 @@ fn run_core_migration(args: &Args) -> Result<()> {
         &args.bootloader,
         args.force,
         None,
-    )
+    )?;
+
+    if !args.dry_run
+        && let Some(plan) = &de_plan
+    {
+        run_post_switch_desktop_migration(plan, false)?;
+    }
+    Ok(())
 }
 
 fn execute_rebase(args: &Args) -> Result<()> {
@@ -696,7 +889,13 @@ fn run_image_swap(args: &Args) -> Result<()> {
         );
     }
 
+    // #68: decide the DE step before staging so a --dry-run shows it too.
+    let de_plan = plan_desktop_migration(args);
+
     if args.dry_run {
+        if let Some(plan) = &de_plan {
+            preview_desktop_migration(plan)?;
+        }
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
     }
@@ -705,7 +904,15 @@ fn run_image_swap(args: &Args) -> Result<()> {
         "bootc image swap in progress",
     ));
 
+    if let Some(plan) = &de_plan {
+        run_pre_switch_desktop_migration(plan, false)?;
+    }
+
     stage_via_bootc_switch(&args.target_image)?;
+
+    if let Some(plan) = &de_plan {
+        run_post_switch_desktop_migration(plan, false)?;
+    }
 
     println!(
         "Image swap staged. Reboot to enter the new deployment; the previous \
@@ -1009,7 +1216,13 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     // (the motivating case — Bluefin GNOME → Aurora KDE — is same-base).
     warn_identity_merge_gap(&args.target_image);
 
+    // #68: decide the DE step before staging so a --dry-run shows it too.
+    let de_plan = plan_desktop_migration(args);
+
     if args.dry_run {
+        if let Some(plan) = &de_plan {
+            preview_desktop_migration(plan)?;
+        }
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
     }
@@ -1018,10 +1231,18 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
         "bootc ostree re-base in progress",
     ));
 
+    if let Some(plan) = &de_plan {
+        run_pre_switch_desktop_migration(plan, false)?;
+    }
+
     stage_via_bootc_switch(&args.target_image)?;
 
     if let Some(plan) = &cross_base_plan {
         apply_cross_base_remap(plan)?;
+    }
+
+    if let Some(plan) = &de_plan {
+        run_post_switch_desktop_migration(plan, false)?;
     }
 
     println!(
@@ -1141,6 +1362,58 @@ mod tests {
 
         let cli = Cli::parse_from(["bootc-rebase", "-t", "ghcr.io/projectbluefin/dakota:stable"]);
         assert!(!cli.rebase_args.accept_cross_base);
+    }
+
+    #[test]
+    fn de_migrate_flag_is_off_by_default_on_every_rebase_entry_point() {
+        // Bare invocation, `rebase` subcommand, and the flag itself — #68
+        // requires the DE step to be opt-in on all of them.
+        let bare = Cli::parse_from(["bootc-rebase", "-t", "ghcr.io/projectbluefin/dakota:stable"]);
+        assert!(!bare.rebase_args.de_migrate);
+
+        let sub = Cli::parse_from([
+            "bootc-rebase",
+            "rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+        ]);
+        match sub.command {
+            Some(Commands::Rebase(args)) => assert!(!args.de_migrate),
+            other => panic!("expected Commands::Rebase, got {other:?}"),
+        }
+
+        let opted_in = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--de-migrate",
+        ]);
+        assert!(opted_in.rebase_args.de_migrate);
+    }
+
+    #[test]
+    fn parse_de_accepts_every_known_desktop_and_rejects_others() {
+        use bootc_migrate_core::de_migrate::DesktopEnvironment;
+        let cases: &[(&str, Option<DesktopEnvironment>)] = &[
+            ("gnome", Some(DesktopEnvironment::Gnome)),
+            ("GNOME", Some(DesktopEnvironment::Gnome)),
+            ("kde", Some(DesktopEnvironment::Kde)),
+            ("cosmic", Some(DesktopEnvironment::Cosmic)),
+            ("niri", Some(DesktopEnvironment::Niri)),
+            ("xfce", Some(DesktopEnvironment::Xfce)),
+            ("plasma", None),
+            ("", None),
+        ];
+        for (input, expected) in cases {
+            match (parse_de(input), expected) {
+                (Ok(de), Some(want)) => assert_eq!(de, *want, "parsing {input:?}"),
+                (Err(e), None) => assert!(
+                    e.to_string().contains("unknown desktop environment"),
+                    "parsing {input:?}: unexpected error {e}"
+                ),
+                (got, want) => panic!("parsing {input:?}: got {got:?}, wanted {want:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1296,12 +1569,6 @@ mod tests {
             },
             _ => panic!("expected Commands::DeMigrate"),
         }
-    }
-
-    #[test]
-    fn parse_de_rejects_unknown_names() {
-        assert!(parse_de("xfce").is_err());
-        assert!(parse_de("GNOME").is_ok());
     }
 
     #[test]

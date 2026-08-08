@@ -5,6 +5,7 @@
 //! bootc re-base engine) can compose their own migration pipelines:
 //!
 //! - [`boot_audit`] — UEFI boot-entry enumeration + dead/generic/duplicate/firmware classification
+//! - [`de_detect`] — desktop-environment detection for a target image (registry-streamed) or the live host
 //! - [`de_migrate`] — cross-DE config stash/restore, portable-subset extraction, hook contract
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
 //! - [`reflink`] — CoW-aware file copy (FICLONE with fallback)
@@ -22,6 +23,7 @@ pub mod boot_audit;
 pub mod composefs;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
+pub mod de_detect;
 pub mod de_migrate;
 pub mod mergetc;
 pub mod migration;
