@@ -117,14 +117,16 @@ generation, and retiring the pinned legacy builder, have not been picked up.
 bootc anywhere (host, target, builder); `BMC_CFS_BUILDER` becomes a no-op
 escape hatch.
 
-### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed, interactive/live pieces deferred**
+### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed; the interactive/live pieces exist but are unvalidated**
 
-Three issues, same shape: the pure/reusable core shipped; the interactive
-TUI and (for #31) live NVRAM mutation did not, because neither is
-exercisable by this project's build/clippy/test/fmt + E2E loop — a passing
-CI run can't demonstrate a checklist UI works, and #31's remaining scope
-(deleting/renaming boot entries) is the same unvalidatable-boot-mutation
-class of risk as #65.
+Three issues, same shape: the pure/reusable core shipped first and is
+unit-tested. The interactive checklists (#15, #31) and #31's live NVRAM
+mutation have since been built on top, but neither is exercisable by this
+project's build/clippy/test/fmt + E2E loop — a passing CI run cannot
+demonstrate that a checklist UI works, and no E2E cell mutates NVRAM. Both
+carry that caveat in their module docs and need manual/corral-VM
+validation; #31's `efibootmgr` path is the same class of risk as #65 and
+should not be trusted until it has been run on a real UEFI system.
 
 - [#68](https://github.com/tuna-os/bootc-migrate-composefs/issues/68) — DE
   config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma,
@@ -153,8 +155,19 @@ class of risk as #65.
 - [#31](https://github.com/tuna-os/bootc-migrate-composefs/issues/31) — the
   UEFI boot-entry audit (dead/generic-label/duplicate/firmware-managed
   classification) is done, read-only, exposed as `bootc-rebase boot-entries`.
-  Interactive selection, live entry removal, and branding-rename (which is a
-  delete+recreate, so the same NVRAM-mutation risk) are not implemented.
+  Interactive selection, live entry removal, and branding-rename are now
+  implemented too, taken on with explicit sign-off on the NVRAM-mutation
+  risk rather than deferred again. The split follows the mitigation below:
+  the whole decision — which entries may be deleted or renamed, and which
+  refusals stop a plan — is a pure, table-tested planner
+  (`boot_cleanup::plan`), and the `efibootmgr` executor
+  (`boot_cleanup::live`) only performs what the planner approved. Dry-run
+  is the default; `--apply` requires a typed confirmation and writes a
+  restorable NVRAM snapshot first; `--undo` replays it. What has **not**
+  run is the `efibootmgr` path itself: no E2E cell mutates NVRAM, so entry
+  deletion, the create-before-delete rename, and `--undo` need a real UEFI
+  machine or a corral VM before they are trusted — as does the checklist's
+  terminal event loop, like this project's other interactive-only work.
 
 **Exit criteria (not yet met)**: bluefin↔aurora-style switch preserves user
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
@@ -179,7 +192,7 @@ graph TD
   M1 --> M4["M4 NativeStore selection / retire legacy builder — not started"]
   M1 --> M5A["M5 #68 DE stash/restore — skeleton done, detection+wiring deferred"]
   M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI needs manual validation"]
-  M1 --> M5C["M5 #31 boot-entry audit — done, cleanup+branding deferred"]
+  M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
 ```
 
 ## Risks & standing mitigations
@@ -220,3 +233,8 @@ graph TD
 - DE settings: **stash/restore, never translate** (#68)
 - Boot-critical or UI-only remaining scope gets a documented plan on its
   issue, not a best-effort implementation without validation (#65, #31, #15)
+- When boot-critical scope *is* taken on (#31's cleanup): split the
+  decision from the execution, so every safety rule is a pure unit test and
+  the executor holds no policy; back up before mutating; make the
+  destructive step opt-in and human-gated; and never remove the path back
+  to a bootable state (#31)

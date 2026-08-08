@@ -29,6 +29,18 @@ build time (`bootc-migrate --version`).
   default**; `--dry-run` previews the whole step (#68).
 - `bootc-rebase boot-entries` — read-only UEFI boot-entry audit: classifies
   entries as dead, generic-label, duplicate, or firmware-managed (#31).
+- `bootc-rebase boot-entries --interactive|--rename-branding|--apply|--undo`
+  — the destructive half of that audit: a ratatui checklist (same
+  keybindings as the `/etc` drift review) for choosing entries to remove,
+  a branding rename of the booted entry to `PRETTY_NAME`, and an `--undo`
+  that restores from the NVRAM snapshot taken before any change. **Dry-run
+  by default**: without `--apply` nothing is written, and `--apply` asks
+  for a typed confirmation. Firmware-managed entries, the entry the system
+  booted from, and the rollback path are unselectable; a plan that would
+  delete the last resolvable loader, or that is built on an audit where
+  *every* entry looks dead (evidence of a mis-resolved ESP), is refused.
+  The `efibootmgr` mutation path itself has no automated coverage — it
+  needs real-hardware/VM UEFI validation (#31).
 - `bootc-migrate etc-drift` — computes the factory-vs-live `/etc`
   diff (Added/Modified/Removed/TypeChanged) as a table or JSON, ahead of a
   migration (#15).
