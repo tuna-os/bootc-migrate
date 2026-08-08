@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail};
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
-use bootc_migrate_core::{registry, remap, scan};
+use bootc_migrate_core::{etc_conflict, registry, remap, scan};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -1420,13 +1420,9 @@ fn warn_identity_merge_gap(target_image: &str) {
     );
 }
 
-/// The staged deployment's root directory under `/ostree/deploy/<stateroot>`,
-/// found via `ostree admin status`: exactly two deployments exist right
-/// after `bootc switch` stages a target (booted + staged), and the booted
-/// one is marked with a leading `*` — so the other line is unambiguously the
-/// staged deployment. Mirrors the parsing tests/run-e2e.sh's ostree-rebase
-/// cell already relies on for its own post-merge fixture injection.
-fn staged_deployment_root() -> Result<PathBuf> {
+/// `ostree admin status` stdout, or an error naming why it could not be
+/// obtained.
+fn ostree_admin_status() -> Result<String> {
     let out = std::process::Command::new("ostree")
         .args(["admin", "status"])
         .output()
@@ -1437,7 +1433,40 @@ fn staged_deployment_root() -> Result<PathBuf> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    parse_staged_deployment_root(&String::from_utf8_lossy(&out.stdout))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The staged deployment's root directory under `/ostree/deploy/<stateroot>`,
+/// found via `ostree admin status`: exactly two deployments exist right
+/// after `bootc switch` stages a target (booted + staged), and the booted
+/// one is marked with a leading `*` — so the other line is unambiguously the
+/// staged deployment. Mirrors the parsing tests/run-e2e.sh's ostree-rebase
+/// cell already relies on for its own post-merge fixture injection.
+fn staged_deployment_root() -> Result<PathBuf> {
+    parse_staged_deployment_root(&ostree_admin_status()?)
+}
+
+/// The booted deployment's root directory — the `*`-marked line. Needed by
+/// the cross-base `/etc` policy, whose "what did the source image ship"
+/// input is that deployment's `usr/etc`.
+fn booted_deployment_root() -> Result<PathBuf> {
+    parse_booted_deployment_root(&ostree_admin_status()?)
+}
+
+/// Build a deployment root from one `ostree admin status` deployment line
+/// (`* dakota abc123.0`, or the same without the booted marker).
+fn deployment_root_from_line(line: &str) -> Result<PathBuf> {
+    let mut fields = line.split_whitespace().filter(|f| *f != "*");
+    let stateroot = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("malformed ostree admin status line: {line}"))?;
+    let checksum_serial = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("malformed ostree admin status line: {line}"))?;
+    Ok(PathBuf::from("/ostree/deploy")
+        .join(stateroot)
+        .join("deploy")
+        .join(checksum_serial))
 }
 
 /// Testable core of [`staged_deployment_root`]: find the non-booted
@@ -1449,35 +1478,94 @@ fn parse_staged_deployment_root(admin_status_stdout: &str) -> Result<PathBuf> {
         .ok_or_else(|| {
             anyhow::anyhow!("no staged (non-booted) deployment found in ostree admin status")
         })?;
-    let mut fields = deploy_line.split_whitespace();
-    let stateroot = fields
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("malformed ostree admin status line: {deploy_line}"))?;
-    let checksum_serial = fields
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("malformed ostree admin status line: {deploy_line}"))?;
-    Ok(PathBuf::from("/ostree/deploy")
-        .join(stateroot)
-        .join("deploy")
-        .join(checksum_serial))
+    deployment_root_from_line(deploy_line)
+}
+
+/// Testable core of [`booted_deployment_root`].
+fn parse_booted_deployment_root(admin_status_stdout: &str) -> Result<PathBuf> {
+    let deploy_line = admin_status_stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with('*'))
+        .ok_or_else(|| anyhow::anyhow!("no booted deployment found in ostree admin status"))?;
+    deployment_root_from_line(deploy_line)
 }
 
 /// Apply the cross-base remap plan (chown /var + preserved /etc in the
 /// staged deployment to the target's ids) after `bootc switch` has staged
 /// it. No-op when `plan` is empty (same-base re-base, or no accounts
 /// diverged even though the bases differ).
-fn apply_cross_base_remap(plan: &remap::RemapPlan) -> Result<()> {
+fn apply_cross_base_remap(staged_root: &Path, plan: &remap::RemapPlan) -> Result<()> {
     if plan.is_empty() {
         return Ok(());
     }
-    let staged_root = staged_deployment_root()
-        .context("failed to locate staged deployment for cross-base remap")?;
-    let changed = remap::apply_remap_plan(&staged_root, plan)
+    let changed = remap::apply_remap_plan(staged_root, plan)
         .context("failed to apply cross-base UID/GID remap")?;
     println!(
         "Cross-base remap applied: {changed} file(s)/dir(s) rechowned under {}",
         staged_root.display()
     );
+    Ok(())
+}
+
+/// The user's live `/etc` — the middle input of the cross-base three-way
+/// conflict check, and the same tree `bootc switch` merged from.
+const LIVE_ETC: &str = "/etc";
+
+/// #67 part 2: reconcile the `/etc` paths where the target image ships a
+/// different default *and* this host had modified the source's. `bootc
+/// switch`'s native merge keeps the local value for every one of them,
+/// which is right within one base lineage and wrong across two — see
+/// [`etc_conflict`]'s module docs for the seam and the policy.
+///
+/// Runs after [`apply_cross_base_remap`] on purpose: the defaults this
+/// writes already carry the target image's numeric ownership, and a chown
+/// pass running afterwards could mistake one of those ids for a stale
+/// source id and renumber it a second time.
+///
+/// Degrades to a warning rather than an error when one of the three trees
+/// is missing: the re-base is already staged and sound by this point, and
+/// the only consequence of skipping is that the local value stays in place
+/// — exactly the pre-#67 behavior.
+fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
+    let booted_root = booted_deployment_root()
+        .context("failed to locate the booted deployment for the cross-base /etc policy")?;
+    let source_defaults = etc_conflict::vendor_etc_dir(&booted_root);
+    let target_defaults = etc_conflict::vendor_etc_dir(staged_root);
+    let staged_etc = staged_root.join("etc");
+    let current = Path::new(LIVE_ETC);
+
+    for (label, dir) in [
+        ("source image /etc defaults", source_defaults.as_path()),
+        ("target image /etc defaults", target_defaults.as_path()),
+        ("staged /etc", staged_etc.as_path()),
+    ] {
+        if !dir.is_dir() {
+            eprintln!(
+                "Warning: {label} not found at {} — skipping the cross-base /etc conflict \
+                 policy (#67). The staged deployment keeps `bootc switch`'s own merge result, \
+                 so any target default this host had locally modified stays overridden by the \
+                 local value.",
+                dir.display()
+            );
+            return Ok(());
+        }
+    }
+
+    let triples = etc_conflict::collect_etc_triples(&source_defaults, current, &target_defaults)
+        .context("failed to read the three /etc trees for the cross-base conflict policy")?;
+    let plan = etc_conflict::plan_etc_conflicts(&triples);
+    print!("{}", etc_conflict::render_report(&plan));
+
+    let rewritten =
+        etc_conflict::apply_etc_conflict_plan(&staged_etc, current, &target_defaults, &plan)
+            .context("failed to apply the cross-base /etc conflict policy")?;
+    if rewritten > 0 {
+        println!(
+            "Cross-base /etc policy applied: {rewritten} path(s) under {} now hold the \
+             target image's default; the displaced value is beside each one.",
+            staged_etc.display()
+        );
+    }
     Ok(())
 }
 
@@ -1487,6 +1575,10 @@ fn apply_cross_base_remap(plan: &remap::RemapPlan) -> Result<()> {
 /// merge and shared /var — so this route is preflight + gating + `bootc
 /// switch` + verification. The previous deployment stays as the rollback
 /// entry, matching the engine's two-phase contract.
+///
+/// The one place that merge is second-guessed is a cross-base re-base, where
+/// "keep the user's value" is the wrong answer for a path whose vendor
+/// default also moved — see [`apply_cross_base_etc_policy`].
 ///
 /// Bootloader: per the decision on issue #64, this route will migrate to
 /// systemd-boot when the system is ready — wired in once #65's audited
@@ -1553,7 +1645,10 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     stage_via_bootc_switch(&args.target_image)?;
 
     if let Some(plan) = &cross_base_plan {
-        apply_cross_base_remap(plan)?;
+        let staged_root = staged_deployment_root()
+            .context("failed to locate the staged deployment for cross-base post-processing")?;
+        apply_cross_base_remap(&staged_root, plan)?;
+        apply_cross_base_etc_policy(&staged_root)?;
     }
 
     if let Some(plan) = &de_plan {
@@ -1663,6 +1758,27 @@ mod tests {
     fn staged_deployment_root_errors_on_malformed_line() {
         let malformed = "* dakota abc123.0\nonly-one-field\n";
         assert!(parse_staged_deployment_root(malformed).is_err());
+    }
+
+    #[test]
+    fn booted_deployment_root_picks_the_starred_line() {
+        // The staged deployment is listed first; the booted one carries the
+        // '*' marker wherever it appears.
+        let status = "  bluefin def456.1\n* dakota abc123.0\n";
+        assert_eq!(
+            parse_booted_deployment_root(status).unwrap(),
+            PathBuf::from("/ostree/deploy/dakota/deploy/abc123.0")
+        );
+        assert_eq!(
+            parse_staged_deployment_root(status).unwrap(),
+            PathBuf::from("/ostree/deploy/bluefin/deploy/def456.1")
+        );
+    }
+
+    #[test]
+    fn booted_deployment_root_errors_when_nothing_is_booted() {
+        assert!(parse_booted_deployment_root("  bluefin def456.1\n").is_err());
+        assert!(parse_booted_deployment_root("* only-one-field\n").is_err());
     }
 
     #[test]

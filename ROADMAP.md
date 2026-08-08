@@ -28,9 +28,11 @@ covers every proposed probe.
 
 **In progress, with an explicit boundary between what's landed and what's
 deliberately deferred** — each of M2, M3, and M5 shipped a pure/unit-testable
-"skeleton" slice, then stopped before the part that needs either boot-critical
-live-system mutation or an interactive UI this codebase can't yet validate in
-CI. See each milestone below for the specific line and why.
+"skeleton" slice first. M2 stopped there, ahead of boot-critical live-system
+mutation CI cannot validate; M3 and M5 have since grown their live halves,
+but those run on paths no CI cell reaches (no cross-base E2E cell, no NVRAM
+mutation, no TUI assertions), so they are landed-but-unproven rather than
+done. See each milestone below for the specific line and why.
 
 ## Milestones
 
@@ -78,26 +80,48 @@ E2E-iteration budget and explicit sign-off on the risk.
 **Exit criteria (not yet met)**: a GRUB2 bluefin VM re-bases, boots via
 sd-boot, survives a kernel update, and `--undo` restores GRUB cleanly.
 
-### M3 — Cross-base re-base (scenario C) — **part 1 done, part 2 blocked**
+### M3 — Cross-base re-base (scenario C) — **both parts landed, neither exercised by CI**
 
 [#67](https://github.com/tuna-os/bootc-migrate-composefs/issues/67) part 1
 (remap planner + apply walk over the staged deployment) is done and wired
 into `OstreeDeploy`, gated by `is_cross_base` + `--accept-cross-base`.
 
-Part 2 (a `mergetc`-style `/etc` merge conflict policy for cross-base
-re-bases) is **blocked, not merely deferred**: `OstreeDeploy` and `ImageSwap`
-both delegate `/etc` merging to `bootc switch`'s native OSTree merge, not to
-`mergetc`, so there is no live caller for a `mergetc` cross-base extension
-yet. Revisit once either route grows its own `/etc`-merge seam.
+Part 2 (the cross-base `/etc` conflict policy) was previously recorded here
+as *blocked*: `OstreeDeploy` and `ImageSwap` delegate `/etc` merging to
+`bootc switch`, not to `mergetc`, so there was no caller for a `mergetc`
+cross-base extension. That is still true of `mergetc` — and it turned out to
+be the wrong question. The blocker was stated in terms of the *call site*;
+the *inputs* were never missing. `bootc switch` stages without rebooting, so
+afterwards the source's defaults (`<booted>/usr/etc`), the user's live
+`/etc`, and the target's defaults (`<staged>/usr/etc`) all still sit on disk
+beside the merge's own output (`<staged>/etc`).
+
+So the policy landed as `bootc-migrate-core::etc_conflict`: a narrow
+**post-merge reconciliation pass**, not a second merge. It rewrites only the
+paths where all three inputs disagree — the conflict class the native merge
+cannot reason about, because within one base lineage "keep the user's value"
+is the right answer and across two it is not — and leaves every other path
+exactly as `bootc switch` produced it. Target defaults win; the displaced
+value is preserved as a `.rebase-old` sidecar (the same convention #15
+introduced in `mergetc`); machine-describing paths and the identity DBs are
+reported but never replaced. This is the same "adjust the staged deployment
+before first boot" seam part 1's remap already uses.
+
+**What is not proven**: no CI cell is cross-base — all four E2E scenarios are
+Fedora-family → Fedora-family, so `is_cross_base` is false and neither part 1
+nor part 2 executes in CI at all. Both are unit-tested (planning, exemptions,
+sidecar naming, report/JSON, and a collect→plan→apply round trip over real
+trees) and neither has run on a real cross-base system.
 
 Related: [#80](https://github.com/tuna-os/bootc-migrate-composefs/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)
 that `bootc switch`'s native merge does plain whole-*file* 3-way merge with
 **no** identity-DB (`passwd`/`group`/etc.) key-level reconciliation — the
-exact class of problem `mergetc`'s union-merge exists to prevent. This is a
-real gap in the `OstreeDeploy` route, tracked separately since fixing it
-means either an upstream ostree/bootc change or new compensating logic, not a
-`mergetc` cross-base extension.
+exact class of problem `mergetc`'s union-merge exists to prevent. The
+`etc_conflict` pass deliberately does **not** close that gap: it holds the
+identity DBs exempt (it has no union-merge to rescue them either) and keeps
+the existing advisory warning. #80 still needs either an upstream
+ostree/bootc change or its own compensating logic.
 
 **Exit criteria (not yet met)**: fedora-family → centos-family E2E cell with
 a populated `/var`: correct ownership after reboot, report lists every
@@ -187,7 +211,7 @@ graph TD
   M0["M0 MVP hardening — done"] --> M1["M1 same-backend engine — done"]
   M1 --> M2["M2 #65 migrate-bootloader — skeleton done, live mutation deferred"]
   M1 --> M3P1["M3 #67 pt1 remap — done, wired into OstreeDeploy"]
-  M3P1 --> M3P2["M3 #67 pt2 mergetc cross-base — blocked, no live caller"]
+  M3P1 --> M3P2["M3 #67 pt2 /etc conflict policy — landed post-switch, no cross-base E2E cell"]
   M1 --> GAP80["#80 identity-DB merge gap — confirmed, tracked separately"]
   M1 --> M4["M4 NativeStore selection / retire legacy builder — not started"]
   M1 --> M5A["M5 #68 DE stash/restore — skeleton done, detection+wiring deferred"]

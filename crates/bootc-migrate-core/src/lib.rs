@@ -10,6 +10,8 @@
 //! - [`de_detect`] — desktop-environment detection for a target image (registry-streamed) or the live host
 //! - [`de_migrate`] — cross-DE config stash/restore, portable-subset extraction, hook contract
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
+//! - [`etc_conflict`] — cross-base /etc conflict policy applied to a deployment
+//!   already staged by `bootc switch` (target defaults win, `.rebase-old` sidecars)
 //! - [`reflink`] — CoW-aware file copy (FICLONE with fallback)
 //! - [`xattr`] — xattr-preserving copy helpers
 //! - [`ostree`] — OSTree object scanning and hashing
@@ -28,6 +30,7 @@ pub mod composefs;
 pub mod composefs_native;
 pub mod de_detect;
 pub mod de_migrate;
+pub mod etc_conflict;
 pub mod mergetc;
 pub mod migration;
 pub mod motd;

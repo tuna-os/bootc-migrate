@@ -55,6 +55,17 @@ build time (`bootc-migrate --version`).
   expectation, and a `Compatible: YES/NO` verdict with reasons (#24).
 - Cross-base UID/GID remap (`bootc-rebase --accept-cross-base`) now applies
   to the staged `OstreeDeploy` deployment, not just the report (#67 part 1).
+- Cross-base `/etc` conflict policy (#67 part 2): on an `--accept-cross-base`
+  `OstreeDeploy` re-base, any `/etc` path where the target image ships a
+  different default *and* this host had modified the source's now takes the
+  target's default, with the displaced value preserved as a `.rebase-old`
+  sidecar and a summary printed. Applied as a reconciliation pass over the
+  deployment `bootc switch` already staged — its native merge keeps the local
+  value for every such path, which is correct within one base lineage and
+  wrong across two. Machine-describing paths (`fstab`, `crypttab`,
+  `mdadm.conf`, `lvm/`, `multipath/`, ssh host keys, `hostname`) and the
+  identity databases are reported but never replaced. Same-base re-bases are
+  unaffected; no CI cell is cross-base, so this path is unit-tested only.
 - E2E: dbus/logind health assertions after the `ostree-rebase` cell, guarding
   against identity-DB regressions in `bootc switch`'s native `/etc` merge.
 - `bootc-rebase migrate-bootloader` subcommand shape and its pure BLS-entry/
