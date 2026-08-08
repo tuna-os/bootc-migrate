@@ -1,4 +1,4 @@
-FROM ghcr.io/projectbluefin/dakota:stable
+FROM ghcr.io/projectbluefin/dakota@sha256:2aa538b4fd31454820ef271fd911291bae5aeed68957faa4cff3f4389c0dd00b
 
 # Install dracut (modules already present, just need the binary)
 RUN rpm-ostree install --apply-live --allow-inactive dracut

@@ -1,3 +1,3 @@
-FROM ghcr.io/projectbluefin/dakota:stable
+FROM ghcr.io/projectbluefin/dakota@sha256:2aa538b4fd31454820ef271fd911291bae5aeed68957faa4cff3f4389c0dd00b
 RUN echo 'add_dracutmodules+=" lvm "' > /etc/dracut.conf.d/50-lvm.conf && \
     dracut --regenerate-all --force
