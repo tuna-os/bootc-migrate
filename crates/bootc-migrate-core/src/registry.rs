@@ -14,6 +14,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Where layer blobs are staged while they are being unpacked. `/var/tmp` is
+/// disk-backed (unlike `/tmp`, which is a tmpfs on bootc systems and far too
+/// small for a multi-hundred-MB layer).
+const LAYER_SCRATCH_DIR: &str = "/var/tmp";
+
 pub fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> Result<()> {
     let endpoint = RegistryEndpoint::resolve(image_ref)?;
     let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
@@ -54,7 +59,7 @@ pub fn extract_files_via_registry(image_ref: &str, files: &[(&Path, &Path)]) -> 
 
     let scratch = tempfile::Builder::new()
         .prefix("bootc-migrate-extract-")
-        .tempdir_in("/var/tmp")
+        .tempdir_in(LAYER_SCRATCH_DIR)
         .context("failed to create /var/tmp scratch dir for layer streaming")?;
 
     let mut remaining: Vec<(&Path, &Path)> = files.to_vec();
@@ -135,7 +140,7 @@ pub fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Pa
 
     let scratch = tempfile::Builder::new()
         .prefix("bootc-migrate-subtree-")
-        .tempdir_in("/var/tmp")
+        .tempdir_in(LAYER_SCRATCH_DIR)
         .context("failed to create /var/tmp scratch dir for subtree streaming")?;
 
     fs::create_dir_all(dst_dir)
@@ -182,8 +187,19 @@ pub fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Pa
     Ok(())
 }
 
-/// Stream probe files for the target image from the registry without pulling full layers.
-pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::ProbeFiles> {
+/// Stream `image_ref`'s layers oldest → newest, extracting each of `paths`
+/// (archive-relative, e.g. `usr/share/xsessions` — a file or a whole
+/// directory) into `dst_root` with its full path preserved, so a caller
+/// finds it back at `dst_root/<path>`.
+///
+/// Later layers overwrite earlier ones (`--overwrite`), matching the overlay
+/// semantics of an OCI image. A path that is absent from a layer is not an
+/// error — tar simply produces nothing — and a layer whose blob cannot be
+/// fetched is skipped with a warning rather than aborting: this is a
+/// best-effort inventory of a possibly-large image, and one unreachable blob
+/// should degrade the result, not sink the whole probe. The caller decides
+/// what a missing path means.
+pub fn extract_paths_into_dir(image_ref: &str, paths: &[&str], dst_root: &Path) -> Result<()> {
     let endpoint = RegistryEndpoint::resolve(image_ref)?;
     let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
     let layers_manifest = endpoint.arch_layers_manifest(manifest_json)?;
@@ -192,54 +208,72 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
 
+    fs::create_dir_all(dst_root).with_context(|| {
+        format!(
+            "failed to create extract destination {}",
+            dst_root.display()
+        )
+    })?;
     let scratch = tempfile::Builder::new()
-        .prefix("bootc-migrate-scan-")
-        .tempdir_in("/var/tmp")
-        .context("failed to create /var/tmp scratch dir for registry scan")?;
+        .prefix("bootc-migrate-paths-")
+        .tempdir_in(LAYER_SCRATCH_DIR)
+        .context("failed to create /var/tmp scratch dir for layer streaming")?;
     let blob_path = scratch.path().join("layer.blob");
 
-    let probe_paths = [
-        "usr/lib/os-release",
-        "etc/os-release",
-        "usr/lib/ostree/prepare-root.conf",
-        "usr/lib/sysusers.d",
-        "usr/share/xsessions",
-        "usr/share/wayland-sessions",
-        "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
-        "usr/bin/bootc",
-        "usr/lib/bootc",
-        "usr/lib/dracut/modules.d",
-        "usr/lib/bootc/install",
-    ];
-
     for layer in layers.iter() {
-        let digest = match layer.get("digest").and_then(|v| v.as_str()) {
-            Some(d) => d,
-            None => continue,
+        let Some(digest) = layer.get("digest").and_then(|v| v.as_str()) else {
+            eprintln!("Warning: skipping a layer of {image_ref} with no digest in its manifest");
+            continue;
         };
-
-        if endpoint.download_blob(digest, &blob_path).is_err() {
+        if let Err(e) = endpoint.download_blob(digest, &blob_path) {
+            eprintln!("Warning: skipping layer {digest} of {image_ref}: {e:#}");
             continue;
         }
 
-        for path in &probe_paths {
-            for candidate in [format!("./{path}"), path.to_string()] {
+        for path in paths {
+            // OCI layer tarballs store paths with or without a leading `./`;
+            // try both. tar exits non-zero when the member is absent from
+            // this layer, which is the common case, so its status is
+            // deliberately not checked here.
+            for candidate in [format!("./{path}"), (*path).to_string()] {
                 let _ = Command::new("tar")
-                    .args([
-                        "-xaf",
-                        blob_path.to_str().unwrap_or_default(),
-                        "-C",
-                        scratch.path().to_str().unwrap_or_default(),
-                        "--overwrite",
-                        "--no-same-owner",
-                        &candidate,
-                    ])
+                    .arg("-xaf")
+                    .arg(&blob_path)
+                    .arg("-C")
+                    .arg(dst_root)
+                    .args(["--overwrite", "--no-same-owner"])
+                    .arg(&candidate)
                     .stderr(std::process::Stdio::null())
                     .status();
             }
         }
         let _ = fs::remove_file(&blob_path);
     }
+    Ok(())
+}
+
+/// Probe paths [`fetch_probe_files_via_registry`] pulls out of a target image.
+const PROBE_PATHS: &[&str] = &[
+    "usr/lib/os-release",
+    "etc/os-release",
+    "usr/lib/ostree/prepare-root.conf",
+    "usr/lib/sysusers.d",
+    "usr/share/xsessions",
+    "usr/share/wayland-sessions",
+    "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+    "usr/bin/bootc",
+    "usr/lib/bootc",
+    "usr/lib/dracut/modules.d",
+    "usr/lib/bootc/install",
+];
+
+/// Stream probe files for the target image from the registry without pulling full layers.
+pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::ProbeFiles> {
+    let scratch = tempfile::Builder::new()
+        .prefix("bootc-migrate-scan-")
+        .tempdir_in(LAYER_SCRATCH_DIR)
+        .context("failed to create /var/tmp scratch dir for registry scan")?;
+    extract_paths_into_dir(image_ref, PROBE_PATHS, scratch.path())?;
 
     let mut probe = crate::scan::ProbeFiles::default();
 
@@ -343,7 +377,7 @@ pub fn extract_kernel_modules_via_registry(
 
     let scratch = tempfile::Builder::new()
         .prefix("bootc-migrate-kmods-")
-        .tempdir_in("/var/tmp")
+        .tempdir_in(LAYER_SCRATCH_DIR)
         .context("failed to create /var/tmp scratch dir for kernel module streaming")?;
     let blob_path = scratch.path().join("layer.blob");
     let want = format!("usr/lib/modules/{kver}");
