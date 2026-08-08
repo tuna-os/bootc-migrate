@@ -25,4 +25,5 @@
 //! build/clippy/test loop and has no E2E cell. It needs real UEFI
 //! hardware or a corral VM (see AGENTS.md) before it should be trusted.
 
+pub mod live;
 pub mod plan;
