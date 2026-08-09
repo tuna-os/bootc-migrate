@@ -18,12 +18,17 @@ concurrency:
 # The scenarios boot full VMs via QEMU and need hardware KVM acceleration.
 # GitHub-hosted runners (including larger runners) do NOT expose /dev/kvm, so
 # these jobs gate on a KVM-capable self-hosted runner (kanpur) via the
-# KVM_E2E_ENABLED org variable. While the var is unset the matrix is skipped
-# and e2e-gate/required-checks pass trivially. To re-enable: register kanpur
-# as an org runner labelled "kvm" and set KVM_E2E_ENABLED=true.
+# KVM_E2E_ENABLED org variable. Fork pull requests are deliberately excluded:
+# this job runs privileged containers and QEMU on the runner host. While the
+# var is unset the matrix is skipped and e2e-gate/required-checks pass
+# trivially. To re-enable: register kanpur as an org runner labelled "kvm" and
+# set KVM_E2E_ENABLED=true.
 jobs:
   e2e:
-    if: ${{ vars.KVM_E2E_ENABLED == 'true' }}
+    if: >-
+      vars.KVM_E2E_ENABLED == 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     name: ${{ matrix.scenario.name }}
     runs-on: [self-hosted, kvm]
     timeout-minutes: 45
