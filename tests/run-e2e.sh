@@ -988,6 +988,194 @@ REBASECHECK
     exit 0
 fi
 
+# GRUB2 -> systemd-boot conversion (#65), standalone of any backend re-base.
+# No target image is involved — this converts the booted deployment's own
+# bootloader. The load-bearing assertion here (per the issue's own spec) is
+# NOT just "did it boot via sd-boot once" but "does the kernel-install
+# resync hook actually keep the ESP in sync on a kernel update" — without
+# it a flipped system silently boots a stale kernel after the next update,
+# which a single successful boot would never catch.
+if [ "$E2E_MODE" = "migrate-bootloader" ]; then
+    step "=== migrate-bootloader: copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+
+    step "=== migrate-bootloader: confirming the VM is currently on GRUB ==="
+    ssh $SSH_OPTS root@localhost bash <<'PRECHECK'
+set -e
+bootctl status 2>&1 | grep -qi 'systemd-boot' && { echo "FAIL: VM is already on systemd-boot before migrate-bootloader ran"; exit 1; }
+echo "OK: VM is not yet on systemd-boot (GRUB baseline confirmed)."
+PRECHECK
+
+    # This cell reaches its first network-dependent operation (the
+    # --from-image registry fetch) much earlier in wall-clock-since-boot
+    # than the composefs-migrate cells do (they have several preceding
+    # local steps — copying the migration utility, injecting fixtures —
+    # that incidentally give the guest's own outbound network extra time to
+    # come up before their first registry pull). Wait for it explicitly
+    # here instead of relying on that same incidental buffer, which
+    # migrate-bootloader's shorter path doesn't have.
+    # Diagnosed via a previous run's captured curl -v output: the guest's
+    # network, DNS, and TLS to ghcr.io were fine the whole time (a clean
+    # HTTP/2 401 + Www-Authenticate challenge came back in under a second)
+    # -- the real bug was RegistryEndpoint::resolve silently swallowing
+    # probe_v2's actual error (fixed to surface it). This wait step is kept
+    # only as a correct, fast sanity probe (a registry's /v2/ legitimately
+    # 401s an anonymous request -- that is success, not failure, unlike the
+    # earlier version of this probe which used curl --fail and treated
+    # every 401 as unreachable).
+    step "=== migrate-bootloader: sanity-checking guest network reaches the registry ==="
+    NET_STATUS=$(ssh $SSH_OPTS root@localhost "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://ghcr.io/v2/" 2>&1) || true
+    case "$NET_STATUS" in
+        2??|401) step "OK: guest reaches ghcr.io (HTTP $NET_STATUS)." ;;
+        *)
+            step "WARNING: unexpected response probing ghcr.io/v2/ (got '$NET_STATUS') — proceeding anyway; migrate-bootloader's own error message will now include the real underlying cause if this is a genuine problem."
+            ssh $SSH_OPTS root@localhost "getent hosts ghcr.io; ip route show" 2>&1 || true
+            ;;
+    esac
+
+    # Most real GRUB2 deployments don't ship systemd-bootx64.efi locally
+    # (confirmed empirically: Bluefin stable doesn't) — --from-image pulls
+    # it from an image known to carry it. Reuses the scenario's target
+    # image (a composefs target, proven to ship it by every other cell in
+    # this matrix that installs systemd-boot from it).
+    step "=== migrate-bootloader: running bootc-rebase migrate-bootloader --to systemd-boot ==="
+    MIGRATE_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" 2>&1) || {
+        echo "FAIL: migrate-bootloader exited nonzero"
+        echo "$MIGRATE_OUT"
+        exit 1
+    }
+    echo "$MIGRATE_OUT" | sed 's/^/[migrate-bootloader] /'
+    echo "$MIGRATE_OUT" | grep -qi 'trial' || { echo "FAIL: migrate-bootloader did not report staging a trial boot"; exit 1; }
+
+    step "=== migrate-bootloader: rebooting to consume the BootNext trial ==="
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>&1; then
+            step "VM accessible via SSH after trial-boot reboot ($((SECONDS - WAIT_START))s)."
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for post-trial-boot SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "ERROR: VM did not boot back after the migrate-bootloader trial."
+        grep -E '\[FAILED\]|DEPEND\]' qemu.log | tail -40 || true
+        exit 1
+    fi
+
+    step "=== migrate-bootloader: confirming the trial boot actually used systemd-boot ==="
+    ssh $SSH_OPTS root@localhost bash <<'TRIALCHECK'
+set -e
+bootctl status 2>&1 | grep -qi 'systemd-boot' || { echo "FAIL: bootctl status does not report systemd-boot after the trial reboot"; bootctl status 2>&1 || true; exit 1; }
+echo "OK: trial boot used systemd-boot."
+TRIALCHECK
+
+    step "=== migrate-bootloader: promoting the trial to BootOrder ==="
+    PROMOTE_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase migrate-bootloader --promote" 2>&1) || {
+        echo "FAIL: migrate-bootloader --promote exited nonzero"
+        echo "$PROMOTE_OUT"
+        exit 1
+    }
+    echo "$PROMOTE_OUT" | sed 's/^/[promote] /'
+
+    # The load-bearing check: simulate a kernel update by re-running
+    # kernel-install for the current kernel, which invokes every script
+    # under /etc/kernel/install.d/ — including the resync hook this run
+    # installed. Record the ESP kernel/initrd's content before, trigger the
+    # update, and assert the hook actually re-wrote them (not just that the
+    # command exited zero, which would pass even if the hook silently
+    # no-op'd).
+    step "=== migrate-bootloader: simulating a kernel update to exercise the resync hook ==="
+    ssh $SSH_OPTS root@localhost bash <<'RESYNCCHECK'
+set -e
+STATE=/var/lib/bootc-rebase/migrate-bootloader-state.json
+[ -f "$STATE" ] || { echo "FAIL: no migrate-bootloader state file at $STATE"; exit 1; }
+ENTRY_TOKEN=$(python3 -c "import json; print(json.load(open('$STATE'))['entry_token'])")
+ESP=$(python3 -c "import json; print(json.load(open('$STATE'))['esp_path'])")
+KVER=$(uname -r)
+LINUX_PATH="$ESP/$ENTRY_TOKEN/$KVER/linux"
+INITRD_PATH="$ESP/$ENTRY_TOKEN/$KVER/initrd"
+[ -f "$LINUX_PATH" ] || { echo "FAIL: expected ESP kernel not found at $LINUX_PATH"; exit 1; }
+[ -f "$INITRD_PATH" ] || { echo "FAIL: expected ESP initrd not found at $INITRD_PATH"; exit 1; }
+
+[ -x /etc/kernel/install.d/95-bootc-rebase-esp-sync.install ] || { echo "FAIL: resync hook is not installed or not executable"; exit 1; }
+
+BEFORE_LINUX_SUM=$(sha256sum "$LINUX_PATH" | awk '{print $1}')
+BEFORE_INITRD_MTIME=$(stat -c %Y "$INITRD_PATH")
+# Corrupt the on-ESP initrd first so a successful resync is unambiguous —
+# if the hook silently no-op'd, this corrupted file would still be there
+# afterward instead of being overwritten with a freshly-built one.
+echo "corrupted-marker" > "$INITRD_PATH"
+
+kernel-install add "$KVER" "/usr/lib/modules/$KVER/vmlinuz" 2>&1 | sed 's/^/[kernel-install] /'
+
+[ -f "$LINUX_PATH" ] || { echo "FAIL: resync hook removed the ESP kernel instead of rewriting it"; exit 1; }
+AFTER_LINUX_SUM=$(sha256sum "$LINUX_PATH" | awk '{print $1}')
+[ "$AFTER_LINUX_SUM" = "$BEFORE_LINUX_SUM" ] || { echo "FAIL: resync hook wrote a different vmlinuz than the running kernel's own"; exit 1; }
+
+AFTER_INITRD_CONTENT=$(head -c 32 "$INITRD_PATH" | tr -d '\0')
+[ "$AFTER_INITRD_CONTENT" != "corrupted-marker" ] || { echo "FAIL: resync hook did not overwrite the corrupted initrd — hook did not actually run/rebuild it"; exit 1; }
+AFTER_INITRD_MTIME=$(stat -c %Y "$INITRD_PATH")
+[ "$AFTER_INITRD_MTIME" -gt "$BEFORE_INITRD_MTIME" ] || { echo "FAIL: ESP initrd mtime did not advance — resync hook did not rebuild it"; exit 1; }
+
+BLS_ENTRY="$ESP/loader/entries/bootc-rebase-${ENTRY_TOKEN}-${KVER}.conf"
+[ -f "$BLS_ENTRY" ] || { echo "FAIL: BLS entry missing after resync: $BLS_ENTRY"; exit 1; }
+grep -q "^version $KVER\$" "$BLS_ENTRY" || { echo "FAIL: resynced BLS entry does not name the current kernel version"; cat "$BLS_ENTRY"; exit 1; }
+
+echo "OK: resync hook rebuilt the initrd and left the BLS entry consistent for $KVER — the #65 load-bearing property holds."
+RESYNCCHECK
+
+    step "=== migrate-bootloader: rebooting again to confirm the resynced entry still boots ==="
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>&1; then
+            step "VM accessible via SSH after post-resync reboot ($((SECONDS - WAIT_START))s)."
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for post-resync SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "ERROR: VM did not boot back after the resync (the actual failure mode #65 exists to prevent)."
+        grep -E '\[FAILED\]|DEPEND\]' qemu.log | tail -40 || true
+        exit 1
+    fi
+    ssh $SSH_OPTS root@localhost bash <<'FINALCHECK'
+set -e
+bootctl status 2>&1 | grep -qi 'systemd-boot' || { echo "FAIL: post-resync boot did not use systemd-boot"; exit 1; }
+echo "OK: post-resync boot used systemd-boot — the promoted BootOrder entry and the resynced kernel both work."
+FINALCHECK
+
+    step "=== migrate-bootloader: undo ==="
+    UNDO_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase migrate-bootloader --undo" 2>&1) || {
+        echo "FAIL: migrate-bootloader --undo exited nonzero"
+        echo "$UNDO_OUT"
+        exit 1
+    }
+    echo "$UNDO_OUT" | sed 's/^/[undo] /'
+    ssh $SSH_OPTS root@localhost bash <<'UNDOCHECK'
+set -e
+[ -f /var/lib/bootc-rebase/migrate-bootloader-state.json ] && { echo "FAIL: state file still present after --undo"; exit 1; }
+[ -f /etc/kernel/install.d/95-bootc-rebase-esp-sync.install ] && { echo "FAIL: resync hook still installed after --undo"; exit 1; }
+echo "OK: --undo removed the state file and resync hook."
+UNDOCHECK
+
+    step "=== migrate-bootloader PASSED ==="
+    exit 0
+fi
+
 step "=== Copying migration utility to VM ==="
 scp $SCP_OPTS target/debug/bootc-migrate root@localhost:/var/tmp/bootc-migrate
 
