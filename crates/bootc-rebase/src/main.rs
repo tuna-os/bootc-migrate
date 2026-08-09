@@ -2201,7 +2201,10 @@ mod tests {
 
     #[test]
     fn parse_de_rejects_unknown_names() {
-        assert!(matches!(parse_de("xfce"), Ok(bootc_migrate_core::de_migrate::DesktopEnvironment::Xfce)));
+        assert!(matches!(
+            parse_de("xfce"),
+            Ok(bootc_migrate_core::de_migrate::DesktopEnvironment::Xfce)
+        ));
         assert!(parse_de("GNOME").is_ok());
     }
 
