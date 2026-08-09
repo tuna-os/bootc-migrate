@@ -40,6 +40,97 @@ pub struct BootcCliStore {
     delegate_image: OnceLock<Option<String>>,
 }
 
+/// The composefs store generation a target image expects at boot.
+///
+/// Store selection follows the **reader**, not the source host: a modern
+/// target uses composefs-rs' native format while a legacy target continues to
+/// use the legacy bootc CLI sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreGeneration {
+    LegacyCli,
+    Native,
+}
+
+fn generation_for_target(target_has_legacy_cli: bool) -> StoreGeneration {
+    if target_has_legacy_cli {
+        StoreGeneration::LegacyCli
+    } else {
+        StoreGeneration::Native
+    }
+}
+
+/// Selects and retains one store writer for the whole migration.  Selection is
+/// deliberately lazy: dry-run does not start a privileged podman probe, and
+/// the legacy writer's delegate state stays available to later create/seal
+/// phases after `pull_image` chose it.
+#[cfg(feature = "composefs-native")]
+#[derive(Debug)]
+pub struct TargetStore {
+    target_image: String,
+    selected: OnceLock<TargetStoreBackend>,
+}
+
+#[cfg(feature = "composefs-native")]
+#[derive(Debug)]
+enum TargetStoreBackend {
+    Legacy(BootcCliStore),
+    Native(crate::composefs_native::NativeStore),
+}
+
+#[cfg(feature = "composefs-native")]
+impl TargetStore {
+    pub fn new(target_image: impl Into<String>) -> Self {
+        Self {
+            target_image: target_image.into(),
+            selected: OnceLock::new(),
+        }
+    }
+
+    fn selected(&self) -> &TargetStoreBackend {
+        self.selected.get_or_init(|| match generation_for_target(image_cfs_is_legacy(&self.target_image)) {
+            StoreGeneration::LegacyCli => {
+                eprintln!("[cfs] target image uses the legacy cfs CLI; using the legacy store writer");
+                TargetStoreBackend::Legacy(BootcCliStore::default())
+            }
+            StoreGeneration::Native => {
+                eprintln!("[cfs] target image uses the native composefs generation; using composefs-rs directly");
+                TargetStoreBackend::Native(crate::composefs_native::NativeStore::system())
+            }
+        })
+    }
+}
+
+#[cfg(feature = "composefs-native")]
+impl ComposefsStore for TargetStore {
+    fn pull_image(&self, target_image: &str, image_ref: &str) -> Result<String> {
+        match self.selected() {
+            TargetStoreBackend::Legacy(store) => store.pull_image(target_image, image_ref),
+            TargetStoreBackend::Native(store) => store.pull_image(target_image, image_ref),
+        }
+    }
+
+    fn create_image(&self, target_image: &str, image_id: &str) -> Result<String> {
+        match self.selected() {
+            TargetStoreBackend::Legacy(store) => store.create_image(target_image, image_id),
+            TargetStoreBackend::Native(store) => store.create_image(target_image, image_id),
+        }
+    }
+
+    fn seal_image(&self, target_image: &str, image_id: &str) -> Result<String> {
+        match self.selected() {
+            TargetStoreBackend::Legacy(store) => store.seal_image(target_image, image_id),
+            TargetStoreBackend::Native(store) => store.seal_image(target_image, image_id),
+        }
+    }
+
+    fn verify_store_target_readable(&self, target_image: &str) -> Result<()> {
+        match self.selected() {
+            TargetStoreBackend::Legacy(store) => store.verify_store_target_readable(target_image),
+            TargetStoreBackend::Native(store) => store.verify_store_target_readable(target_image),
+        }
+    }
+}
+
 /// In-memory store for unit tests and dry-run pipelines: records every call
 /// and returns canned digests without touching the system.
 #[derive(Debug, Default)]
@@ -435,5 +526,19 @@ mod tests {
         assert!(!is_digest_pinned_image_ref(
             "ghcr.io/projectbluefin/dakota:testing"
         ));
+    }
+
+    #[test]
+    fn store_generation_follows_the_target_reader() {
+        assert_eq!(
+            generation_for_target(true),
+            StoreGeneration::LegacyCli,
+            "legacy target images must retain the CLI writer"
+        );
+        assert_eq!(
+            generation_for_target(false),
+            StoreGeneration::Native,
+            "modern target images must not need the pinned legacy builder"
+        );
     }
 }
