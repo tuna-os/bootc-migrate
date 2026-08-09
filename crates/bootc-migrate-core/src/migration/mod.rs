@@ -912,6 +912,13 @@ pub fn run_migration(
     }
 
     // ---- Phase 2: Pull OCI image ----
+    // The target bootc reads this store after reboot, so it chooses the
+    // writer generation. Modern targets use composefs-rs directly; legacy
+    // targets retain the CLI path. Keep the feature-off fallback for minimal
+    // downstream builds that intentionally opt out of the native backend.
+    #[cfg(feature = "composefs-native")]
+    let store = crate::composefs::TargetStore::new(target_image);
+    #[cfg(not(feature = "composefs-native"))]
     let store = crate::composefs::BootcCliStore::default();
     let pulled_image = phase2_pull_image(&store, target_image, dry_run)?;
 
