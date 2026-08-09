@@ -26,5 +26,7 @@ workspace = true
 [features]
 # Native composefs-rs store backend (issue #13): writes the store with the
 # composefs/composefs-oci crates instead of shelling out to `bootc internals
-# cfs`. Off by default — the MVP binary keeps the CLI-driven store.
+# cfs`. It is the default for modern target images; legacy targets are
+# selected back onto the CLI writer at runtime.
+default = ["composefs-native"]
 composefs-native = ["dep:composefs", "dep:composefs-oci", "dep:tokio"]
