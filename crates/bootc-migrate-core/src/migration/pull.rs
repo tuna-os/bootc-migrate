@@ -119,8 +119,7 @@ fn refresh_target_image(target_image: &str) -> Result<ResolvedTargetImage> {
     // A fallback still must refresh, rather than silently accepting a stale
     // local tag, so the rootfs, deployment metadata, and boot artifacts stay
     // pinned to one image generation.
-    let output = Command::new("podman")
-        .args(["pull", "--policy", "always", image])
+    let output = podman_command().args(["pull", "--policy", "always", image])
         .output()
         .context("failed to execute podman pull")?;
     if !output.status.success() {
@@ -205,8 +204,7 @@ pub(crate) fn parse_pull_digests(pull_output: &str) -> (Option<String>, Option<S
 /// Read the OCI manifest digest (`sha256:…`) of a locally-cached image via
 /// `podman image inspect`. Returns None if podman/the image is unavailable.
 fn podman_manifest_digest(image: &str) -> Option<String> {
-    let out = Command::new("podman")
-        .args(["image", "inspect", "--format", "{{.Digest}}", image])
+    let out = podman_command().args(["image", "inspect", "--format", "{{.Digest}}", image])
         .output()
         .ok()?;
     if !out.status.success() {
