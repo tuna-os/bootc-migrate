@@ -81,32 +81,64 @@ fn phase2_pull_image_with_resolver(
     })
 }
 
-/// Pull the mutable target tag with an explicit always policy, then resolve the
-/// exact platform manifest that podman selected. Failing here is intentional:
-/// using an older local tag after a failed refresh can create a rootfs from one
-/// image generation and boot artifacts from another.
+/// Resolve the mutable target tag to an exact platform manifest before import.
+///
+/// Prefer metadata-only inspection: a full Podman pull expands every layer in
+/// `/var/lib/containers`, which can fail on otherwise-supported hosts with a
+/// small dedicated `/var` (for example an LVM-on-LUKS layout). The ComposeFS
+/// importer downloads the selected content directly into its persistent store,
+/// so duplicating it in Podman storage is unnecessary. Keep the Podman path as
+/// a compatibility fallback for hosts without `skopeo`.
 fn refresh_target_image(target_image: &str) -> Result<ResolvedTargetImage> {
-    let podman_image = target_image
+    let image = target_image
         .strip_prefix("docker://")
         .unwrap_or(target_image);
+    let remote_ref = format!("docker://{image}");
+
+    let skopeo = Command::new("skopeo")
+        .args(["inspect", "--format", "{{.Digest}}", &remote_ref])
+        .output();
+
+    if let Ok(output) = skopeo
+        && output.status.success()
+    {
+        let manifest_digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if is_sha256_digest(&manifest_digest) {
+            let image_reference = pin_image_reference(image, &manifest_digest)?;
+            println!("Image manifest resolved from registry: {image_reference}");
+            return Ok(ResolvedTargetImage {
+                image_reference,
+                manifest_digest,
+            });
+        }
+        eprintln!(
+            "skopeo returned an invalid manifest digest for {image}; falling back to Podman"
+        );
+    } else {
+        eprintln!("skopeo metadata inspection unavailable; falling back to Podman");
+    }
+
+    // A fallback still must refresh, rather than silently accepting a stale
+    // local tag, so the rootfs, deployment metadata, and boot artifacts stay
+    // pinned to one image generation.
     let output = Command::new("podman")
-        .args(["pull", "--policy", "always", podman_image])
+        .args(["pull", "--policy", "always", image])
         .output()
         .context("failed to execute podman pull")?;
     if !output.status.success() {
         anyhow::bail!(
-            "podman could not refresh {podman_image}: {}. Refusing to use a \
-             potentially stale local image",
+            "could not refresh {image} with metadata inspection or podman: {}. \
+             Refusing to use a potentially stale local image",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
-    let manifest_digest = podman_manifest_digest(podman_image).ok_or_else(|| {
+    let manifest_digest = podman_manifest_digest(image).ok_or_else(|| {
         anyhow!(
-            "podman refreshed {podman_image}, but did not report a valid platform manifest digest"
+            "podman refreshed {image}, but did not report a valid platform manifest digest"
         )
     })?;
-    let image_reference = pin_image_reference(podman_image, &manifest_digest)?;
+    let image_reference = pin_image_reference(image, &manifest_digest)?;
     println!("Image refreshed in podman storage: {image_reference}");
     Ok(ResolvedTargetImage {
         image_reference,
