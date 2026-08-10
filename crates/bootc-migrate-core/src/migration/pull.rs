@@ -111,9 +111,7 @@ fn refresh_target_image(target_image: &str) -> Result<ResolvedTargetImage> {
                 manifest_digest,
             });
         }
-        eprintln!(
-            "skopeo returned an invalid manifest digest for {image}; falling back to Podman"
-        );
+        eprintln!("skopeo returned an invalid manifest digest for {image}; falling back to Podman");
     } else {
         eprintln!("skopeo metadata inspection unavailable; falling back to Podman");
     }
@@ -134,9 +132,7 @@ fn refresh_target_image(target_image: &str) -> Result<ResolvedTargetImage> {
     }
 
     let manifest_digest = podman_manifest_digest(image).ok_or_else(|| {
-        anyhow!(
-            "podman refreshed {image}, but did not report a valid platform manifest digest"
-        )
+        anyhow!("podman refreshed {image}, but did not report a valid platform manifest digest")
     })?;
     let image_reference = pin_image_reference(image, &manifest_digest)?;
     println!("Image refreshed in podman storage: {image_reference}");
