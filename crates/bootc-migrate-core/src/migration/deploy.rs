@@ -161,9 +161,11 @@ pub fn phase4_stage_deploy(
 }
 
 /// Install a systemd mount unit into the deployment's /etc so the booted system
-/// loop-mounts the composefs ext4 store at /sysroot/composefs. Idempotent with
-/// any mount that survives the initrd: systemd treats an already-mounted target
-/// as active.
+/// loop-mounts the composefs ext4 store read-write at `/sysroot/composefs`.
+/// The deployed root remains immutable, but bootc needs to write new objects
+/// into this persistent store during day-2 update checks and deployments.
+/// Idempotent with any mount that survives the initrd: systemd treats an
+/// already-mounted target as active.
 fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
     let unit_dir = etc_dir.join("systemd/system");
     fs::create_dir_all(&unit_dir)?;
@@ -179,7 +181,7 @@ fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
          What=/sysroot/composefs-loopback.ext4\n\
          Where=/sysroot/composefs\n\
          Type=ext4\n\
-         Options=loop,ro\n\
+         Options=loop,rw\n\
          \n\
          [Install]\n\
          WantedBy=local-fs.target\n",
