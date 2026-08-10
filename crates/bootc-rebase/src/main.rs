@@ -37,13 +37,12 @@ enum Commands {
     Rebase(Args),
     /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
     Rollback(RollbackArgs),
-    /// GRUB2 -> systemd-boot bootloader migration (issue #65). NOT YET
-    /// IMPLEMENTED: the ESP/NVRAM mutation and the kernel-install resync
-    /// hook (without which a flipped system would silently boot stale
-    /// kernels after the next update) don't exist yet. This subcommand
-    /// exists so the CLI shape and pure BLS-entry/karg-carry-over/
-    /// entry-token logic (`bootc_migrate_core::migration::bootloader::systemd_boot`)
-    /// can be reviewed ahead of the live mutation work.
+    /// GRUB2 -> systemd-boot bootloader migration (issue #65). Stages a
+    /// one-boot `BootNext` trial (BootOrder untouched, so a failed trial
+    /// falls back to the existing default) and installs a kernel-install
+    /// resync hook so future kernel updates keep the ESP entry current.
+    /// `--promote` moves the trial to the front of BootOrder after a human
+    /// confirms it booted correctly; `--undo` reverses everything.
     MigrateBootloader(MigrateBootloaderArgs),
     /// Audit and clean up UEFI boot entries (issue #31). A bare invocation
     /// is read-only: it reports which entries look
@@ -153,7 +152,7 @@ struct BootEntriesArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 struct MigrateBootloaderArgs {
-    /// Target bootloader (only "systemd-boot" is planned)
+    /// Target bootloader (only "systemd-boot" is implemented)
     #[arg(long, default_value = "systemd-boot")]
     to: String,
 
@@ -161,9 +160,44 @@ struct MigrateBootloaderArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Undo a previous migrate-bootloader run
+    /// Undo a previous migrate-bootloader run: removes the ESP entries,
+    /// resync hook, and NVRAM entry it created. GRUB is never touched by
+    /// this route, so nothing GRUB-side needs restoring.
     #[arg(long)]
     undo: bool,
+
+    /// Promote the one-boot BootNext trial to the front of BootOrder,
+    /// making it the permanent default. Run this only after confirming the
+    /// trial boot actually worked.
+    #[arg(long)]
+    promote: bool,
+
+    /// Internal: invoked by the installed kernel-install resync hook on
+    /// every `kernel-install add`, not meant for interactive use. Re-copies
+    /// the given kernel/initrd to the ESP and rewrites the BLS entry
+    /// without touching NVRAM.
+    #[arg(long, hide = true)]
+    resync: bool,
+
+    /// Entry token to resync under (only meaningful with --resync).
+    #[arg(long)]
+    entry_token: Option<String>,
+
+    /// Kernel version to resync (only meaningful with --resync).
+    #[arg(long)]
+    kernel_version: Option<String>,
+
+    /// BLS entry title to resync with (only meaningful with --resync).
+    #[arg(long)]
+    title: Option<String>,
+
+    /// OCI image to fetch systemd-bootx64.efi from when the current
+    /// deployment doesn't ship it locally — the common case in practice
+    /// (confirmed empirically: Bluefin stable's GRUB deployment doesn't).
+    /// Any image known to ship systemd-boot works, e.g. a composefs
+    /// sibling target image.
+    #[arg(long)]
+    from_image: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -320,18 +354,100 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
     }
 }
 
-/// Stub (issue #65): the pure BLS-entry/karg-carry-over/entry-token core
-/// lives in `bootc_migrate_core::migration::bootloader::systemd_boot` and is
-/// unit-tested, but the live ESP populate + NVRAM cutover + kernel-install
-/// resync hook aren't implemented — see the doc comment on
-/// `Commands::MigrateBootloader`. Refuses unconditionally so this can't be
-/// mistaken for a working migration.
-fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
-    bail!(
-        "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
-         kernel-install resync hook don't exist. See \
-         https://github.com/tuna-os/bootc-migrate/issues/65"
-    );
+/// GRUB2 → systemd-boot conversion (issue #65). Converts the *current*
+/// deployment's own bootloader — there's no target image involved, unlike
+/// `rebase`. Sequencing: `migrate-bootloader` stages a one-boot `BootNext`
+/// trial (BootOrder untouched, so a failed trial falls back to the
+/// existing default); `--promote` moves it to the front of BootOrder after
+/// a human confirms the trial boot worked; `--undo` reverses everything.
+/// `--resync` is the internal entry point the installed kernel-install
+/// hook calls on every kernel update.
+fn run_migrate_bootloader(args: &MigrateBootloaderArgs) -> Result<()> {
+    use bootc_migrate_core::migration::bootloader::live;
+
+    if args.to != "systemd-boot" {
+        bail!("migrate-bootloader only supports --to systemd-boot");
+    }
+
+    let state_path = Path::new(live::STATE_PATH);
+
+    if args.resync {
+        let entry_token = args
+            .entry_token
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--resync requires --entry-token"))?;
+        let kver = args
+            .kernel_version
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--resync requires --kernel-version"))?;
+        let title = args
+            .title
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--resync requires --title"))?;
+        check_root_privilege()?;
+        let esp_path =
+            migration::boot::find_esp_or_mount().context("failed to locate the ESP for resync")?;
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        live::resync_for_kernel_update(
+            Path::new(&esp_path),
+            entry_token,
+            kver,
+            cmdline.trim(),
+            title,
+        )
+        .context("resyncing ESP for kernel update")?;
+        println!("Resynced ESP for kernel {kver}.");
+        return Ok(());
+    }
+
+    if args.undo {
+        check_root_privilege()?;
+        live::run_undo(state_path)?;
+        return Ok(());
+    }
+
+    if args.promote {
+        check_root_privilege()?;
+        live::run_promote(state_path)?;
+        return Ok(());
+    }
+
+    check_root_privilege()?;
+
+    let esp_path = migration::boot::find_esp_or_mount()
+        .context("failed to locate the ESP for migrate-bootloader")?;
+    let os_release = bootc_migrate_core::migration::os_release::read_os_release(Path::new("/"))
+        .context("failed to read /etc/os-release")?;
+    let title = if os_release.pretty_name.is_empty() {
+        os_release.name.clone()
+    } else {
+        os_release.pretty_name.clone()
+    };
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let machine_id = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
+    let entry_token_file = std::fs::read_to_string("/etc/kernel/entry-token").ok();
+
+    if args.dry_run {
+        println!("*** DRY RUN MODE — no changes will be made ***");
+        println!(
+            "Would populate the ESP at {esp_path} with a systemd-boot entry titled {title:?}, \
+             install the kernel-install resync hook, and create a one-boot BootNext trial \
+             NVRAM entry. Nothing has been touched."
+        );
+        return Ok(());
+    }
+
+    let inputs = live::MigrateInputs {
+        esp_path: Path::new(&esp_path),
+        state_path,
+        title: &title,
+        cmdline: cmdline.trim(),
+        entry_token_file: entry_token_file.as_deref(),
+        machine_id: machine_id.trim(),
+        from_image: args.from_image.as_deref(),
+    };
+    live::run_migrate(&inputs)?;
+    Ok(())
 }
 
 /// The only answer accepted at the destructive-apply prompt. A full word,
@@ -2084,13 +2200,45 @@ mod tests {
     }
 
     #[test]
-    fn migrate_bootloader_stub_always_refuses() {
+    fn parse_de_rejects_unknown_names() {
+        assert!(matches!(
+            parse_de("xfce"),
+            Ok(bootc_migrate_core::de_migrate::DesktopEnvironment::Xfce)
+        ));
+        assert!(parse_de("GNOME").is_ok());
+    }
+
+    #[test]
+    fn migrate_bootloader_refuses_unsupported_target() {
+        let args = MigrateBootloaderArgs {
+            to: "grub2".into(),
+            dry_run: false,
+            undo: false,
+            promote: false,
+            resync: false,
+            entry_token: None,
+            kernel_version: None,
+            title: None,
+            from_image: None,
+        };
+        let err = run_migrate_bootloader(&args).unwrap_err();
+        assert!(err.to_string().contains("systemd-boot"));
+    }
+
+    #[test]
+    fn migrate_bootloader_resync_requires_its_args() {
         let args = MigrateBootloaderArgs {
             to: "systemd-boot".into(),
             dry_run: false,
             undo: false,
+            promote: false,
+            resync: true,
+            entry_token: None,
+            kernel_version: None,
+            title: None,
+            from_image: None,
         };
         let err = run_migrate_bootloader(&args).unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+        assert!(err.to_string().contains("--entry-token"));
     }
 }
