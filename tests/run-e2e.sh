@@ -399,11 +399,10 @@ SFDISK
         echo "LVM: creating PV/VG ($LVM_VG) with separate root + var LVs inside LUKS..."
         sudo pvcreate -ff -y "/dev/mapper/$LUKS_MAPPER"
         sudo vgcreate "$LVM_VG" "/dev/mapper/$LUKS_MAPPER"
-        # /var only holds small test fixtures, so give it a fixed 4G and let root
-        # take the rest — the migration needs ample root space for the Dakota
-        # composefs object store + ext4 verity loopback (XFS path). Separate
-        # volumes is the whole point: /var lives on its own LV.
-        sudo lvcreate -y -L 4G -n var "$LVM_VG"
+        # Keep the dedicated /var fixture realistic, but provide enough space for
+        # Podman to unpack the target image during migration. Root retains ample
+        # space for the ComposeFS object store and ext4 verity loopback.
+        sudo lvcreate -y -L 12G -n var "$LVM_VG"
         sudo lvcreate -y -l 100%FREE -n root "$LVM_VG"
         sudo vgchange -ay "$LVM_VG"
         sudo udevadm settle 2>/dev/null || true
