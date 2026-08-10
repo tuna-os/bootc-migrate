@@ -130,46 +130,11 @@ impl Drop for SleepGuard {
 }
 
 
-/// Transient Podman storage used while migration reads target-image content.
-///
-// A dedicated /var can be intentionally small. Keep the temporary expanded
-// image outside /var/lib/containers; the composefs store remains the durable
-// post-migration image source.
-const PODMAN_TRANSIENT_ROOT: &str = "/sysroot/.bootc-migrate-podman";
-const PODMAN_TRANSIENT_RUNROOT: &str = "/run/bootc-migrate-podman";
-
-pub(crate) fn podman_command() -> Command {
-    let mut command = Command::new("podman");
-    if Path::new("/sysroot").is_dir() {
-        command.args([
-            "--root",
-            PODMAN_TRANSIENT_ROOT,
-            "--runroot",
-            PODMAN_TRANSIENT_RUNROOT,
-        ]);
-    }
-    command
-}
-
-fn cleanup_transient_podman_storage() {
-    if !Path::new("/sysroot").is_dir() {
-        return;
-    }
-    if let Err(e) = podman_command().args(["system", "reset", "--force"]).status() {
-        eprintln!("[cleanup] warning: failed to reset transient Podman storage: {e}");
-    }
-    if let Err(e) = fs::remove_dir_all(PODMAN_TRANSIENT_ROOT) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("[cleanup] warning: failed to remove transient Podman storage: {e}");
-        }
-    }
-}
-
 /// RAII guard around `podman image mount`. Mounts a locally-cached OCI image and
 /// exposes its merged rootfs at `path`, unmounting on drop. Used as the Phase 5
 /// fallback when the composefs overlay mount yields no usable content (bootc
 /// mounts in a private namespace that does not persist to our process). Because
-/// Phase 2 refreshes the image in transient Podman storage, this needs no network.
+/// Phase 2 also `podman pull`s the image, this needs no network.
 struct PodmanImageMount {
     image: String,
     path: PathBuf,
@@ -177,7 +142,8 @@ struct PodmanImageMount {
 
 impl PodmanImageMount {
     fn new(image: &str) -> Result<Self> {
-        let out = podman_command().args(["image", "mount", image])
+        let out = Command::new("podman")
+            .args(["image", "mount", image])
             .output()
             .context("failed to execute podman image mount")?;
         if !out.status.success() {
@@ -203,7 +169,8 @@ impl PodmanImageMount {
 
 impl Drop for PodmanImageMount {
     fn drop(&mut self) {
-        let _ = podman_command().args(["image", "unmount", &self.image])
+        let _ = Command::new("podman")
+            .args(["image", "unmount", &self.image])
             .status();
     }
 }
@@ -975,9 +942,6 @@ pub fn run_migration(
         force,
     )?;
 
-    if !dry_run {
-        cleanup_transient_podman_storage();
-    }
 
     println!("\n=== MIGRATION COMPLETED ===");
     println!("Staged ComposeFS deployment: {}", verity.as_hex());
