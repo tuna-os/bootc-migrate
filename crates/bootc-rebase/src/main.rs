@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 mod boot_entry_review;
 mod routing;
 
-use routing::{Backend, Strategy, route};
+use routing::{Backend, Strategy, plan, route};
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
@@ -1057,6 +1057,7 @@ fn execute_rebase(args: &Args) -> Result<()> {
     let Some(r) = route(from, to) else {
         bail!("no route from {from} to {to}");
     };
+    let phase_plan = plan(from, to).expect("every route has a phase plan");
 
     println!(
         "Route: {from} -> {to} via {:?} ({})",
@@ -1067,6 +1068,8 @@ fn execute_rebase(args: &Args) -> Result<()> {
             "planned, not yet implemented"
         }
     );
+    println!("Phases: {}", phase_plan.phase_names());
+    println!("Bootloader policy: {:?}", phase_plan.bootloader);
 
     if args.plan {
         return Ok(());

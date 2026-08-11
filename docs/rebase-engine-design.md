@@ -1,6 +1,6 @@
 # Re-base Engine Design
 
-**Status**: DRAFT — architect design for [RFC #30]
+**Status**: accepted design; phase selection landed in `bootc-rebase` for [RFC #30]
 **Scope**: target architecture for generalizing `bootc-migrate` from a
 composefs-only migrator into a bootc image re-base / migration engine.
 This document is the design counterpart to the RFC; it does not change
@@ -114,6 +114,12 @@ the pipeline; it is a mode that omits `seal` and pins `bootloader=keep`.
 `migrate-bootloader` (B) reuses `phase5_setup_bootloader` with a plan whose
 only phase is bootloader — no new code path.
 
+The executable counterpart is `crates/bootc-rebase/src/routing.rs::plan`.
+`bootc-rebase --plan` prints the selected phases and bootloader policy without
+touching the host. The planner is pure and tested across all four backend
+pairs; strategy execution remains behind the existing protected paths until
+the phase trait extraction below lands.
+
 ## 5. Decision policies (RFC open questions 1–3)
 
 ### 5.1 Bootloader (Q1)
@@ -211,6 +217,7 @@ Anything that does not fit a phase or a policy belongs in a new module, not in
 
 ---
 
-*Drafted by the architect agent as the design counterpart to RFC #30.
-Reviewed against `docs/architecture.md` (lessons) and the #111/#123 God-file
-findings; deliberately a docs-only change.*
+*Drafted by the architect agent as the design counterpart to RFC #30 and
+reviewed against `docs/architecture.md` (lessons) and the #111/#123 God-file
+findings. Phase selection is now executable; destructive phase extraction is
+still deliberately staged behind the protected MVP.*

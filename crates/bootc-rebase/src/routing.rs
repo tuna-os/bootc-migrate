@@ -40,6 +40,54 @@ pub enum Strategy {
     OstreeDeploy,
 }
 
+/// A phase selected by the re-base planner. Keeping this list independent of
+/// the implementation functions lets `--plan` be truthful without running a
+/// destructive phase, and gives the future pipeline a stable seam for phase
+/// reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Preflight,
+    Import,
+    Pull,
+    Seal,
+    Deploy,
+    Bootloader,
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Preflight => "preflight",
+            Self::Import => "import",
+            Self::Pull => "pull",
+            Self::Seal => "seal",
+            Self::Deploy => "deploy",
+            Self::Bootloader => "bootloader",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootloaderPolicy {
+    KeepSource,
+    Target,
+}
+
+/// An executable description of a transition. This is intentionally pure:
+/// creating a plan cannot inspect or modify the live system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebasePlan {
+    pub route: Route,
+    pub phases: Vec<Phase>,
+    pub bootloader: BootloaderPolicy,
+}
+
+impl RebasePlan {
+    pub fn phase_names(&self) -> String {
+        self.phases.iter().map(ToString::to_string).collect::<Vec<_>>().join(" -> ")
+    }
+}
+
 /// A supported (or planned) transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
@@ -87,6 +135,47 @@ pub fn route(from: Backend, to: Backend) -> Option<Route> {
         .find(|r| r.from == from && r.to == to)
 }
 
+/// Select phases from the backend pair. The phase order is the contract in
+/// docs/rebase-engine-design.md §4; execution still belongs to the existing
+/// strategy implementations until the pipeline extraction lands.
+pub fn plan(from: Backend, to: Backend) -> Option<RebasePlan> {
+    let route = route(from, to)?;
+    let (phases, bootloader) = match (from, to) {
+        (Backend::Ostree, Backend::Ostree) => (
+            vec![Phase::Preflight, Phase::Pull, Phase::Deploy],
+            BootloaderPolicy::KeepSource,
+        ),
+        (Backend::Ostree, Backend::Composefs) => (
+            vec![Phase::Preflight, Phase::Import, Phase::Pull, Phase::Seal, Phase::Deploy, Phase::Bootloader],
+            BootloaderPolicy::Target,
+        ),
+        (Backend::Composefs, Backend::Composefs) => (
+            vec![Phase::Preflight, Phase::Pull, Phase::Deploy],
+            BootloaderPolicy::KeepSource,
+        ),
+        (Backend::Composefs, Backend::Ostree) => (
+            vec![Phase::Preflight, Phase::Pull, Phase::Deploy, Phase::Bootloader],
+            BootloaderPolicy::Target,
+        ),
+    };
+    Some(RebasePlan { route, phases, bootloader })
+}
+
+/// Standalone bootloader migration is a one-phase plan. The live operation
+/// remains gated behind issue #65's ESP/NVRAM implementation.
+pub fn bootloader_plan() -> RebasePlan {
+    RebasePlan {
+        route: Route {
+            from: Backend::Ostree,
+            to: Backend::Composefs,
+            strategy: Strategy::CoreMigration,
+            implemented: false,
+        },
+        phases: vec![Phase::Bootloader],
+        bootloader: BootloaderPolicy::Target,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +217,38 @@ mod tests {
                 .unwrap()
                 .implemented
         );
+    }
+
+    #[test]
+    fn planner_skips_composefs_phases_for_ostree_rebase() {
+        let p = plan(Backend::Ostree, Backend::Ostree).unwrap();
+        assert_eq!(p.phase_names(), "preflight -> pull -> deploy");
+        assert_eq!(p.bootloader, BootloaderPolicy::KeepSource);
+        assert!(!p.phases.contains(&Phase::Seal));
+    }
+
+    #[test]
+    fn planner_selects_full_conversion_pipeline() {
+        let p = plan(Backend::Ostree, Backend::Composefs).unwrap();
+        assert_eq!(p.phase_names(), "preflight -> import -> pull -> seal -> deploy -> bootloader");
+        assert_eq!(p.bootloader, BootloaderPolicy::Target);
+    }
+
+    #[test]
+    fn planner_covers_every_backend_pair() {
+        for from in [Backend::Ostree, Backend::Composefs] {
+            for to in [Backend::Ostree, Backend::Composefs] {
+                let p = plan(from, to).unwrap();
+                assert_eq!(p.phases.first(), Some(&Phase::Preflight));
+                assert!(matches!(p.phases.last(), Some(&Phase::Deploy) | Some(&Phase::Bootloader)));
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_bootloader_plan_does_not_select_rootfs_phases() {
+        let p = bootloader_plan();
+        assert_eq!(p.phases, vec![Phase::Bootloader]);
+        assert_eq!(p.bootloader, BootloaderPolicy::Target);
     }
 }
