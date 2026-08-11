@@ -1166,7 +1166,7 @@ fn enumerate_deployments() -> Result<Vec<BootDeployment>> {
             deps.push(BootDeployment {
                 root: path,
                 checksum: name,
-                kver,
+                kver: kver.clone(),
                 vmlinuz,
                 initrd: modules_dir.join(&kver).join("initramfs.img"),
                 is_composefs: true,
