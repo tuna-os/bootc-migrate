@@ -8,6 +8,7 @@ pub mod pull;
 pub mod rollback;
 pub mod seal;
 
+pub use boot::migrate_bootloader_standalone;
 pub use boot::phase5_setup_bootloader;
 pub use deploy::phase4_stage_deploy;
 pub use import::phase1_import_objects;
