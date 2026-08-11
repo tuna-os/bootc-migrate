@@ -182,15 +182,16 @@ mod tests {
 
     #[test]
     fn cross_base_same_family_via_id_like_is_clean() {
-        // Bluefin (fedora-derived) → Dakota (fedora-derived) is same-base.
+        // A target whose ID is in the host's ID_LIKE chain is same-base:
+        // bluefin (ID_LIKE=fedora) → fedora itself.
         let host = BaseInfo {
             id: "bluefin".into(),
             id_like: Some("fedora".into()),
             version_id: None,
         };
         let target = BaseInfo {
-            id: "dakota".into(),
-            id_like: Some("fedora".into()),
+            id: "fedora".into(),
+            id_like: None,
             version_id: None,
         };
         let readiness = cross_base(&host, &target);
