@@ -131,6 +131,30 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Convert the bootloader between GRUB2 and systemd-boot without
+    /// touching the rootfs backend (issue #65).
+    ///
+    /// Copies kernel/initrd for every existing deployment (OSTree or
+    /// composefs) onto the ESP (systemd-boot) or /boot (GRUB2), writes
+    /// BLS entries, and registers the bootloader in UEFI NVRAM. GRUB is
+    /// retained as a fallback entry.
+    #[command(name = "migrate-bootloader")]
+    MigrateBootloader {
+        /// Target bootloader: "systemd-boot" or "grub2".
+        #[arg(long, default_value = "systemd-boot")]
+        to: String,
+        /// Preview actions without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Force migration even if readiness checks fail.
+        #[arg(short, long)]
+        force: bool,
+        /// OCI image reference to extract systemd-boot from (when the
+        /// running system does not ship it). Streamed layer-by-layer from
+        /// the registry without pulling the full image.
+        #[arg(long)]
+        from_image: Option<String>,
+    },
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -278,6 +302,25 @@ fn main() {
         let result = run_rollback(reboot, dry_run);
         if let Err(e) = result {
             eprintln!("Error: {}", e);
+            exit_flushed!(1);
+        }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
+    // Handle `migrate-bootloader` subcommand
+    if let Some(Command::MigrateBootloader {
+        to,
+        dry_run,
+        force,
+        from_image,
+    }) = args.command
+    {
+        let result = run_migrate_bootloader(&to, dry_run, force, from_image.as_deref());
+        if let Err(e) = result {
+            eprintln!("Error: {:#}", e);
             exit_flushed!(1);
         }
         if let Some(g) = tee_guard.take() {
@@ -565,6 +608,16 @@ fn read_etc_drift_manifest(
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read etc-drift manifest {}", path.display()))?;
     bootc_migrate_core::mergetc::EtcDriftManifest::parse(&contents)
+}
+
+fn run_migrate_bootloader(
+    to: &str,
+    dry_run: bool,
+    force: bool,
+    from_image: Option<&str>,
+) -> Result<()> {
+    check_root_privilege()?;
+    migration::migrate_bootloader_standalone(to, dry_run, force, from_image)
 }
 
 fn run_system_to_flatpak_steam(dry_run: bool) -> Result<()> {
