@@ -40,6 +40,7 @@ pub mod reflink;
 pub mod registry;
 pub mod remap;
 pub mod scan;
+pub mod selinux;
 pub mod steam_flatpak;
 pub mod transaction;
 pub mod types;
