@@ -1148,8 +1148,7 @@ fn enumerate_deployments() -> Result<Vec<BootDeployment>> {
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             // Skip the state symlink and non-digest dirs.
-            if name == "state" || name.len() < 12 || !name.chars().all(|c| c.is_ascii_hexdigit())
-            {
+            if name == "state" || name.len() < 12 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
                 continue;
             }
             // Only include if it has an origin file (marks a real deployment).
@@ -1211,7 +1210,9 @@ pub fn migrate_bootloader_standalone(
             anyhow::bail!("System is not booted in UEFI mode; cannot migrate to systemd-boot.");
         }
         if !sys.nvram_writable {
-            anyhow::bail!("UEFI NVRAM is not writable; cannot register systemd-boot entry. Use --force to skip.");
+            anyhow::bail!(
+                "UEFI NVRAM is not writable; cannot register systemd-boot entry. Use --force to skip."
+            );
         }
         if !sys.esp_detected {
             anyhow::bail!(
@@ -1286,7 +1287,10 @@ fn migrate_to_systemd_boot(
             let sd_dst = sd_dir.join("systemd-bootx64.efi");
             crate::registry::extract_files_via_registry(
                 img,
-                &[(Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi"), &sd_dst)],
+                &[(
+                    Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
+                    &sd_dst,
+                )],
             )
             .context("failed to extract systemd-boot from image")?;
             fs::copy(&sd_dst, removable_dir.join("BOOTX64.EFI"))?;
@@ -1308,17 +1312,15 @@ fn migrate_to_systemd_boot(
     }
 
     // 2. Derive entry-token (for $BOOT/<token>/<version> layout).
-    let machine_id = fs::read_to_string("/etc/machine-id")
-        .context("failed to read /etc/machine-id")?;
+    let machine_id =
+        fs::read_to_string("/etc/machine-id").context("failed to read /etc/machine-id")?;
     let entry_token_file = fs::read_to_string("/etc/kernel/entry-token").ok();
-    let entry_token = bootloader::systemd_boot::derive_entry_token(
-        entry_token_file.as_deref(),
-        &machine_id,
-    );
+    let entry_token =
+        bootloader::systemd_boot::derive_entry_token(entry_token_file.as_deref(), &machine_id);
 
     // 3. Read live kernel cmdline for karg carry-over.
-    let live_cmdline = fs::read_to_string("/proc/cmdline")
-        .context("failed to read /proc/cmdline")?;
+    let live_cmdline =
+        fs::read_to_string("/proc/cmdline").context("failed to read /proc/cmdline")?;
 
     // 4. Copy kernel+initrd for each deployment to ESP, write BLS entries.
     let entries_dir = esp_path.join("loader/entries");
@@ -1330,13 +1332,12 @@ fn migrate_to_systemd_boot(
     let mut entries: Vec<bootloader::BlsEntry> = Vec::new();
 
     // Read os-release from the first deployment for naming.
-    let os = os_release::read_os_release(&deps[0].root)
-        .unwrap_or_else(|_| os_release::OsRelease {
-            id: "linux".into(),
-            version_id: String::new(),
-            name: String::new(),
-            pretty_name: String::new(),
-        });
+    let os = os_release::read_os_release(&deps[0].root).unwrap_or_else(|_| os_release::OsRelease {
+        id: "linux".into(),
+        version_id: String::new(),
+        name: String::new(),
+        pretty_name: String::new(),
+    });
 
     for (i, dep) in deps.iter().enumerate() {
         let priority = i as u32;
@@ -1345,7 +1346,8 @@ fn migrate_to_systemd_boot(
         } else {
             "ostree"
         };
-        let title = format!("{} ({}:{})",
+        let title = format!(
+            "{} ({}:{})",
             os_release::bls_entry_title(&os, kind),
             dep.checksum.get(..12).unwrap_or(&dep.checksum),
             priority
@@ -1365,10 +1367,7 @@ fn migrate_to_systemd_boot(
                 entry_token,
                 dep.kver
             );
-            println!(
-                "[DRY RUN] Would write BLS entry: {}",
-                filename
-            );
+            println!("[DRY RUN] Would write BLS entry: {}", filename);
             continue;
         }
 
@@ -1376,20 +1375,10 @@ fn migrate_to_systemd_boot(
         let esp_kernel_dir = esp_path.join(&entry_token).join(&dep.kver);
         fs::create_dir_all(&esp_kernel_dir)?;
         fs::copy(&dep.vmlinuz, esp_kernel_dir.join("linux"))
-            .with_context(|| {
-                format!(
-                    "copying kernel {} to ESP",
-                    dep.vmlinuz.display()
-                )
-            })?;
+            .with_context(|| format!("copying kernel {} to ESP", dep.vmlinuz.display()))?;
         if dep.initrd.exists() {
             fs::copy(&dep.initrd, esp_kernel_dir.join("initrd"))
-                .with_context(|| {
-                    format!(
-                        "copying initrd {} to ESP",
-                        dep.initrd.display()
-                    )
-                })?;
+                .with_context(|| format!("copying initrd {} to ESP", dep.initrd.display()))?;
         }
 
         // Carry over kargs, stripping composefs= for OSTree entries.
@@ -1427,15 +1416,12 @@ fn migrate_to_systemd_boot(
 
         // Write loader.conf: default to first entry, 3s timeout.
         let default_id = entries[0].filename.trim_end_matches(".conf");
-        let loader_conf =
-            format!("default {}\ntimeout 3\nconsole-mode keep\n", default_id);
+        let loader_conf = format!("default {}\ntimeout 3\nconsole-mode keep\n", default_id);
         fs::write(esp_path.join("loader/loader.conf"), loader_conf)
             .context("failed to write loader.conf")?;
 
         // Register NVRAM entry.
-        register_systemd_boot_nvram(
-            esp_path.to_str().unwrap_or("/boot/efi"),
-        );
+        register_systemd_boot_nvram(esp_path.to_str().unwrap_or("/boot/efi"));
 
         println!(
             "{} BLS entr{} written to ESP. GRUB retained as fallback.",
@@ -1448,11 +1434,7 @@ fn migrate_to_systemd_boot(
 }
 
 /// Migrate to GRUB2: copy kernel/initrd to /boot and write BLS Type 1 entries.
-fn migrate_to_grub2(
-    _sys: &SystemInfo,
-    deps: &[BootDeployment],
-    dry_run: bool,
-) -> Result<()> {
+fn migrate_to_grub2(_sys: &SystemInfo, deps: &[BootDeployment], dry_run: bool) -> Result<()> {
     println!("Migrating to GRUB2 (BLS Type 1)...");
 
     let entries_dir = Path::new("/boot/loader/entries");
@@ -1462,22 +1444,22 @@ fn migrate_to_grub2(
         fs::create_dir_all(entries_dir)?;
     }
 
-    let live_cmdline = fs::read_to_string("/proc/cmdline")
-        .context("failed to read /proc/cmdline")?;
+    let live_cmdline =
+        fs::read_to_string("/proc/cmdline").context("failed to read /proc/cmdline")?;
 
-    let os = os_release::read_os_release(&deps[0].root)
-        .unwrap_or_else(|_| os_release::OsRelease {
-            id: "linux".into(),
-            version_id: String::new(),
-            name: String::new(),
-            pretty_name: String::new(),
-        });
+    let os = os_release::read_os_release(&deps[0].root).unwrap_or_else(|_| os_release::OsRelease {
+        id: "linux".into(),
+        version_id: String::new(),
+        name: String::new(),
+        pretty_name: String::new(),
+    });
 
     let mut entries: Vec<bootloader::BlsEntry> = Vec::new();
 
     for (i, dep) in deps.iter().enumerate() {
         let priority = i as u32;
-        let boot_dir_name = format!("bootc-{}-{}",
+        let boot_dir_name = format!(
+            "bootc-{}-{}",
             dep.checksum.get(..12).unwrap_or(&dep.checksum),
             priority
         );
