@@ -146,9 +146,7 @@ mod tests {
 
     #[test]
     fn parse_quoted_values() {
-        let config = parse_selinux_config(
-            "SELINUX=\"permissive\"\nSELINUXTYPE='mls'\n",
-        );
+        let config = parse_selinux_config("SELINUX=\"permissive\"\nSELINUXTYPE='mls'\n");
         assert_eq!(config.selinux.as_deref(), Some("permissive"));
         assert_eq!(config.selinux_type.as_deref(), Some("mls"));
     }

@@ -1678,9 +1678,7 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
                  scheduled /.autorelabel in the staged deployment."
             ),
             Ok(false) => {}
-            Err(e) => eprintln!(
-                "Warning: failed to check SELinux policy compatibility: {e:#}"
-            ),
+            Err(e) => eprintln!("Warning: failed to check SELinux policy compatibility: {e:#}"),
         }
     }
 

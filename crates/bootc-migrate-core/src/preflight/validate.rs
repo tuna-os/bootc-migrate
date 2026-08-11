@@ -63,11 +63,7 @@ pub fn cross_base(host: &BaseInfo, target: &BaseInfo) -> CrossBaseReadiness {
     );
 
     if host.id != target.id {
-        warnings.push(format!(
-            "Base identity change: {} → {}",
-            host.id,
-            target.id
-        ));
+        warnings.push(format!("Base identity change: {} → {}", host.id, target.id));
     }
 
     CrossBaseReadiness {
@@ -213,5 +209,4 @@ mod tests {
         let _ = format!("{readiness:?}");
         let _ = readiness.clone();
     }
-
 }
