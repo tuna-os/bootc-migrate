@@ -90,7 +90,7 @@ $ SKIP_SETUP=1 just e2e-reboot-test
 
 ### Using Corral VMs for interactive testing
 
-[Corral](https://github.com/hanthor/corral) is a VM manager that provisions
+[Corral](https://github.com/tuna-os/corral) is a VM manager that provisions
 KubeVirt (or local QEMU) VMs from bootc container images. It's useful for
 interactive TUI testing and exploratory debugging where the scripted QEMU
 harness is too rigid.
