@@ -1295,8 +1295,8 @@ fn migrate_to_systemd_boot(
                 "Copying systemd-boot from running system: {}",
                 sd_src.display()
             );
-            fs::copy(&sd_src, sd_dir.join("systemd-bootx64.efi"))?;
-            fs::copy(&sd_src, removable_dir.join("BOOTX64.EFI"))?;
+            fs::copy(sd_src, sd_dir.join("systemd-bootx64.efi"))?;
+            fs::copy(sd_src, removable_dir.join("BOOTX64.EFI"))?;
         } else {
             anyhow::bail!(
                 "systemd-boot binary not found in the running system at {}. \
@@ -1535,7 +1535,7 @@ fn migrate_to_grub2(
 
     if !dry_run && !entries.is_empty() {
         // Write entries atomically.
-        fs::create_dir_all(&staged_dir)?;
+        fs::create_dir_all(staged_dir)?;
         for entry in &entries {
             fs::write(staged_dir.join(&entry.filename), entry.render())?;
             fs::rename(
