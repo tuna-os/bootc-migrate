@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail};
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
-use bootc_migrate_core::{etc_conflict, registry, remap, scan};
+use bootc_migrate_core::{etc_conflict, registry, remap, scan, selinux};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -1494,7 +1494,17 @@ fn parse_booted_deployment_root(admin_status_stdout: &str) -> Result<PathBuf> {
 /// staged deployment to the target's ids) after `bootc switch` has staged
 /// it. No-op when `plan` is empty (same-base re-base, or no accounts
 /// diverged even though the bases differ).
+/// File written to the staged deployment root recording the remap plan and
+/// its outcome, so the JSON twin of the printed report survives the reboot.
+const REMAP_REPORT_FILE: &str = "bootc-migrate-remap-report.json";
+
 fn apply_cross_base_remap(staged_root: &Path, plan: &remap::RemapPlan) -> Result<()> {
+    // Always write the JSON report so the plan is preserved across reboot,
+    // even when no remapping was needed (empty plan → empty report).
+    let report_path = staged_root.join(REMAP_REPORT_FILE);
+    std::fs::write(&report_path, plan.to_json())
+        .with_context(|| format!("failed to write remap report to {}", report_path.display()))?;
+
     if plan.is_empty() {
         return Ok(());
     }
@@ -1555,6 +1565,15 @@ fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
         .context("failed to read the three /etc trees for the cross-base conflict policy")?;
     let plan = etc_conflict::plan_etc_conflicts(&triples);
     print!("{}", etc_conflict::render_report(&plan));
+
+    // Write the JSON twin so the conflict record survives reboot.
+    let conflict_report_path = staged_root.join("bootc-migrate-etc-conflict-report.json");
+    std::fs::write(&conflict_report_path, plan.to_json()).with_context(|| {
+        format!(
+            "failed to write /etc conflict report to {}",
+            conflict_report_path.display()
+        )
+    })?;
 
     let rewritten =
         etc_conflict::apply_etc_conflict_plan(&staged_etc, current, &target_defaults, &plan)
@@ -1649,6 +1668,20 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
             .context("failed to locate the staged deployment for cross-base post-processing")?;
         apply_cross_base_remap(&staged_root, plan)?;
         apply_cross_base_etc_policy(&staged_root)?;
+
+        // #67: when the base family changes, the SELinux policy type may
+        // differ — schedule /.autorelabel so the target's policy is applied
+        // to every file on first boot.
+        match selinux::check_and_schedule_autorelabel(&staged_root) {
+            Ok(true) => println!(
+                "SELinux policy type changed for the cross-base target; \
+                 scheduled /.autorelabel in the staged deployment."
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "Warning: failed to check SELinux policy compatibility: {e:#}"
+            ),
+        }
     }
 
     if let Some(plan) = &de_plan {
