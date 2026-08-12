@@ -7,7 +7,7 @@ use super::*;
 
 // ── Failed ────────────────────────────────────────────────────────────────────
 
-fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
+pub fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " ✗ Migration Failed ",

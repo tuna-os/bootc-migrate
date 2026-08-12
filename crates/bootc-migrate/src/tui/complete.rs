@@ -7,7 +7,7 @@ use super::*;
 
 // ── Complete ──────────────────────────────────────────────────────────────────
 
-fn render_complete(f: &mut ratatui::Frame, area: Rect) {
+pub fn render_complete(f: &mut ratatui::Frame, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " ✓ Migration Complete! ",

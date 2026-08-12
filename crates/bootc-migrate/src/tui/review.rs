@@ -8,7 +8,7 @@ use super::*;
 
 // ── Review ────────────────────────────────────────────────────────────────────
 
-fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
+pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " Step 5 · Review & Run ",
