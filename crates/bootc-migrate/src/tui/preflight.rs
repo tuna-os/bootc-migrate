@@ -38,7 +38,7 @@ impl Readiness {
 /// Holds preflight data formatted for TUI display.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-struct PreflightTuiState {
+pub(crate) struct PreflightTuiState {
     /// OSTree repo size in bytes.
     ostree_repo_bytes: u64,
     /// Total space on the partition holding /sysroot (or /sysroot/composefs).
@@ -227,7 +227,7 @@ impl PreflightTuiState {
 
 // ── Preflight ─────────────────────────────────────────────────────────────────
 
-fn render_preflight(f: &mut ratatui::Frame, app: &App, area: Rect) {
+pub(crate) fn render_preflight(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " Step 2 · System Preflight ",

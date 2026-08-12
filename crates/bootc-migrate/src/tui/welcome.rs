@@ -8,7 +8,7 @@ use super::*;
 
 // ── Welcome ───────────────────────────────────────────────────────────────────
 
-fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
+pub(crate) fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(TEAL))
