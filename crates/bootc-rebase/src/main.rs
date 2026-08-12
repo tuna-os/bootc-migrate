@@ -225,6 +225,11 @@ struct Args {
     #[arg(long)]
     plan: bool,
 
+    /// Print the planned route as stable JSON for frontends and orchestration.
+    /// Implies --plan and never inspects or mutates the live system.
+    #[arg(long)]
+    plan_json: bool,
+
     /// Acknowledge a cross-base re-base (host and target disagree on
     /// ID/ID_LIKE) and proceed with its UID/GID remap (#67). Without this,
     /// a detected cross-base re-base is refused after printing the remap
@@ -1059,19 +1064,28 @@ fn execute_rebase(args: &Args) -> Result<()> {
     };
     let phase_plan = plan(from, to).expect("every route has a phase plan");
 
+    if args.plan_json {
+        let phases: Vec<String> = phase_plan.phases.iter().map(ToString::to_string).collect();
+        let value = serde_json::json!({
+            "from": from.to_string(),
+            "to": to.to_string(),
+            "strategy": format!("{:?}", r.strategy),
+            "implemented": r.implemented,
+            "phases": phases,
+            "bootloader": format!("{:?}", phase_plan.bootloader),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
     println!(
         "Route: {from} -> {to} via {:?} ({})",
         r.strategy,
-        if r.implemented {
-            "implemented"
-        } else {
-            "planned, not yet implemented"
-        }
+        if r.implemented { "implemented" } else { "planned, not yet implemented" }
     );
     println!("Phases: {}", phase_plan.phase_names());
     println!("Bootloader policy: {:?}", phase_plan.bootloader);
 
-    if args.plan {
+    if args.plan || args.plan_json {
         return Ok(());
     }
 
@@ -1920,6 +1934,14 @@ mod tests {
             "ghcr.io/projectbluefin/dakota:stable"
         );
         assert!(cli.rebase_args.plan);
+
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--plan-json",
+        ]);
+        assert!(cli.rebase_args.plan_json);
 
         let cli = Cli::parse_from([
             "bootc-rebase",

@@ -120,6 +120,13 @@ touching the host. The planner is pure and tested across all four backend
 pairs; strategy execution remains behind the existing protected paths until
 the phase trait extraction below lands.
 
+For frontends and orchestration, `bootc-rebase --plan-json` emits the same
+route as a single JSON object (`from`, `to`, `strategy`, `implemented`,
+`phases`, and `bootloader`). It implies `--plan`: no preflight, registry access,
+or filesystem mutation occurs. This keeps the route/phase contract consumable
+without scraping human-oriented output and makes unsupported reverse routes
+explicit before an apply attempt.
+
 ## 5. Decision policies (RFC open questions 1–3)
 
 ### 5.1 Bootloader (Q1)
