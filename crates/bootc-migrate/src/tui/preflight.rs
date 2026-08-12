@@ -66,7 +66,7 @@ pub(crate) struct PreflightTuiState {
 }
 
 impl PreflightTuiState {
-    fn from_report(report: &bootc_migrate_core::preflight::PreflightReport) -> Self {
+    pub(crate) fn from_report(report: &bootc_migrate_core::preflight::PreflightReport) -> Self {
         let multiplier: f64 = if report.supports_reflink { 1.1 } else { 1.5 };
         let composefs_needed = (report.ostree_repo_size_bytes as f64 * multiplier) as u64;
 
