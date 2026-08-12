@@ -215,4 +215,4 @@ major updates get a PR for human review. When reviewing Renovate PRs:
 ## License
 
 By contributing, you agree that your contributions are dual-licensed under the
-[MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE) licenses.
+[MIT](https://github.com/tuna-os/bootc-migrate/blob/main/LICENSE-MIT) and [Apache-2.0](https://github.com/tuna-os/bootc-migrate/blob/main/LICENSE-APACHE) licenses.
