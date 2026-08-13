@@ -5,13 +5,17 @@
 # can be pulled without hitting GitHub Release rate limits/auth, or referenced
 # from another Containerfile:
 #
-#   podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate:latest
-#   podman cp bmc-extract:/usr/local/bin/bootc-migrate .
+#   podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate-composefs:latest
+#   podman cp bmc-extract:/usr/local/bin/bootc-migrate-composefs .
 #   podman rm bmc-extract
 #
 #   # or, in another image's build:
-#   COPY --from=ghcr.io/tuna-os/bootc-migrate:latest \
-#       /usr/local/bin/bootc-migrate /usr/local/bin/
+#   COPY --from=ghcr.io/tuna-os/bootc-migrate-composefs:latest \
+#       /usr/local/bin/bootc-migrate-composefs /usr/local/bin/bootc-migrate
+#
+# Release-naming note: the repo was renamed from `bootc-migrate-composefs` to
+# `bootc-migrate` after the v0.2.0 release, and the published image and binary
+# still carry the old name until the next (post-rename) release.
 #
 # Built by CI (.github/workflows/release.yml) from the per-arch release
 # binaries — see ctx/linux/$TARGETARCH/ staged there before this build.
