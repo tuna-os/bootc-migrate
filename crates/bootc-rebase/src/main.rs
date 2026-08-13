@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 mod boot_entry_review;
 mod routing;
 
-use routing::{Backend, Strategy, route};
+use routing::{Backend, Strategy, bootloader_plan, plan, route};
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
@@ -225,6 +225,11 @@ struct Args {
     #[arg(long)]
     plan: bool,
 
+    /// Print the planned route as stable JSON for frontends and orchestration.
+    /// Implies --plan and never inspects or mutates the live system.
+    #[arg(long)]
+    plan_json: bool,
+
     /// Acknowledge a cross-base re-base (host and target disagree on
     /// ID/ID_LIKE) and proceed with its UID/GID remap (#67). Without this,
     /// a detected cross-base re-base is refused after printing the remap
@@ -327,6 +332,9 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
 /// `Commands::MigrateBootloader`. Refuses unconditionally so this can't be
 /// mistaken for a working migration.
 fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
+    let plan = bootloader_plan();
+    println!("Phases: {}", plan.phase_names());
+    println!("Bootloader policy: {:?}", plan.bootloader);
     bail!(
         "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
          kernel-install resync hook don't exist. See \
@@ -1057,7 +1065,21 @@ fn execute_rebase(args: &Args) -> Result<()> {
     let Some(r) = route(from, to) else {
         bail!("no route from {from} to {to}");
     };
+    let phase_plan = plan(from, to).expect("every route has a phase plan");
 
+    if args.plan_json {
+        let phases: Vec<String> = phase_plan.phases.iter().map(ToString::to_string).collect();
+        let value = serde_json::json!({
+            "from": from.to_string(),
+            "to": to.to_string(),
+            "strategy": format!("{:?}", r.strategy),
+            "implemented": r.implemented,
+            "phases": phases,
+            "bootloader": format!("{:?}", phase_plan.bootloader),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
     println!(
         "Route: {from} -> {to} via {:?} ({})",
         r.strategy,
@@ -1067,8 +1089,10 @@ fn execute_rebase(args: &Args) -> Result<()> {
             "planned, not yet implemented"
         }
     );
+    println!("Phases: {}", phase_plan.phase_names());
+    println!("Bootloader policy: {:?}", phase_plan.bootloader);
 
-    if args.plan {
+    if args.plan || args.plan_json {
         return Ok(());
     }
 
@@ -1917,6 +1941,14 @@ mod tests {
             "ghcr.io/projectbluefin/dakota:stable"
         );
         assert!(cli.rebase_args.plan);
+
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--plan-json",
+        ]);
+        assert!(cli.rebase_args.plan_json);
 
         let cli = Cli::parse_from([
             "bootc-rebase",
