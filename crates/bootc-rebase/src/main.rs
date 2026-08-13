@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 mod boot_entry_review;
 mod routing;
 
-use routing::{Backend, Strategy, plan, route};
+use routing::{Backend, Strategy, bootloader_plan, plan, route};
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
@@ -332,6 +332,9 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
 /// `Commands::MigrateBootloader`. Refuses unconditionally so this can't be
 /// mistaken for a working migration.
 fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
+    let plan = bootloader_plan();
+    println!("Phases: {}", plan.phase_names());
+    println!("Bootloader policy: {:?}", plan.bootloader);
     bail!(
         "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
          kernel-install resync hook don't exist. See \
@@ -1080,7 +1083,11 @@ fn execute_rebase(args: &Args) -> Result<()> {
     println!(
         "Route: {from} -> {to} via {:?} ({})",
         r.strategy,
-        if r.implemented { "implemented" } else { "planned, not yet implemented" }
+        if r.implemented {
+            "implemented"
+        } else {
+            "planned, not yet implemented"
+        }
     );
     println!("Phases: {}", phase_plan.phase_names());
     println!("Bootloader policy: {:?}", phase_plan.bootloader);

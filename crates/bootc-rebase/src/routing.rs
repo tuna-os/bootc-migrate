@@ -84,7 +84,11 @@ pub struct RebasePlan {
 
 impl RebasePlan {
     pub fn phase_names(&self) -> String {
-        self.phases.iter().map(ToString::to_string).collect::<Vec<_>>().join(" -> ")
+        self.phases
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" -> ")
     }
 }
 
@@ -146,7 +150,14 @@ pub fn plan(from: Backend, to: Backend) -> Option<RebasePlan> {
             BootloaderPolicy::KeepSource,
         ),
         (Backend::Ostree, Backend::Composefs) => (
-            vec![Phase::Preflight, Phase::Import, Phase::Pull, Phase::Seal, Phase::Deploy, Phase::Bootloader],
+            vec![
+                Phase::Preflight,
+                Phase::Import,
+                Phase::Pull,
+                Phase::Seal,
+                Phase::Deploy,
+                Phase::Bootloader,
+            ],
             BootloaderPolicy::Target,
         ),
         (Backend::Composefs, Backend::Composefs) => (
@@ -154,11 +165,20 @@ pub fn plan(from: Backend, to: Backend) -> Option<RebasePlan> {
             BootloaderPolicy::KeepSource,
         ),
         (Backend::Composefs, Backend::Ostree) => (
-            vec![Phase::Preflight, Phase::Pull, Phase::Deploy, Phase::Bootloader],
+            vec![
+                Phase::Preflight,
+                Phase::Pull,
+                Phase::Deploy,
+                Phase::Bootloader,
+            ],
             BootloaderPolicy::Target,
         ),
     };
-    Some(RebasePlan { route, phases, bootloader })
+    Some(RebasePlan {
+        route,
+        phases,
+        bootloader,
+    })
 }
 
 /// Standalone bootloader migration is a one-phase plan. The live operation
@@ -230,7 +250,10 @@ mod tests {
     #[test]
     fn planner_selects_full_conversion_pipeline() {
         let p = plan(Backend::Ostree, Backend::Composefs).unwrap();
-        assert_eq!(p.phase_names(), "preflight -> import -> pull -> seal -> deploy -> bootloader");
+        assert_eq!(
+            p.phase_names(),
+            "preflight -> import -> pull -> seal -> deploy -> bootloader"
+        );
         assert_eq!(p.bootloader, BootloaderPolicy::Target);
     }
 
@@ -240,7 +263,10 @@ mod tests {
             for to in [Backend::Ostree, Backend::Composefs] {
                 let p = plan(from, to).unwrap();
                 assert_eq!(p.phases.first(), Some(&Phase::Preflight));
-                assert!(matches!(p.phases.last(), Some(&Phase::Deploy) | Some(&Phase::Bootloader)));
+                assert!(matches!(
+                    p.phases.last(),
+                    Some(&Phase::Deploy) | Some(&Phase::Bootloader)
+                ));
             }
         }
     }
