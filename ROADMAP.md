@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-07-24. Living document; the issue tracker is authoritative
+Status date: 2026-08-13. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 ## Vision
@@ -197,6 +197,31 @@ should not be trusted until it has been run on a real UEFI system.
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
 request; non-experts can read what will happen before it happens.
 
+### Deferred extensions (raised on #30, not yet scoped into a milestone)
+
+Two directions came up in discussion on the [generalize-into-a-re-base-engine
+RFC](https://github.com/tuna-os/bootc-migrate-composefs/issues/30) but never
+got a milestone or an issue. Recorded here so they aren't lost, not because
+either is imminent:
+
+- **`composefs→ostree` (reverse backend switch)** — going back to an
+  OSTree-backed image from a composefs system that never had an OSTree
+  deployment. `bootc-rebase`'s routing table currently refuses this route
+  explicitly (see M1 above) rather than attempting it; `undo` only reverts a
+  migration this tool itself performed, which is a much narrower problem
+  (the prior OSTree deployment is already on disk). A general
+  `composefs→ostree` route needs to initialize an OSTree repo and bootstrap a
+  deployment from a pulled image with nothing to restore from — mechanically
+  the inverse of `Strategy::OstreeDeploy` (M1), not a variant of it.
+- **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch)** — M3's cross-base work
+  (#67) stays within the Fedora family, where `/etc` defaults, UID/GID
+  allocation, and the init/PAM stack share lineage. A cross-family route
+  would need to treat most of `/etc` as non-mergeable (drop rather than
+  3-way-merge family-specific package-manager and service config), carry
+  only universally meaningful state (`/var/home`, containers, flatpaks,
+  accounts), and regenerate target-family defaults from scratch — closer to
+  a "reinstall with data preservation" than an in-place migration.
+
 ### 1.0 — Universal migrator
 
 All routes in the table implemented or explicitly refused with evidence;
@@ -214,7 +239,7 @@ graph TD
   M3P1 --> M3P2["M3 #67 pt2 /etc conflict policy — landed post-switch, no cross-base E2E cell"]
   M1 --> GAP80["#80 identity-DB merge gap — confirmed, tracked separately"]
   M1 --> M4["M4 NativeStore selection / retire legacy builder — not started"]
-  M1 --> M5A["M5 #68 DE stash/restore — skeleton done, detection+wiring deferred"]
+  M1 --> M5A["M5 #68 DE stash/restore — detection+wiring landed, cross-DE E2E cell deferred"]
   M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI needs manual validation"]
   M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
 ```
@@ -249,7 +274,9 @@ graph TD
 - Bootloader on ostree→ostree: migrate to systemd-boot **when ready** (#64)
 - UID/GID divergence: **auto-remap with report** (#67)
 - Cross-base /etc conflicts: **target defaults win**, user value kept as
-  `.rebase-old` sidecar (#67, part 2 — not yet implemented, see M3 above)
+  `.rebase-old` sidecar (#67, part 2 — landed as
+  `bootc-migrate-core::etc_conflict`, see M3 above; not yet exercised by a
+  cross-base E2E cell)
 - Store format is defined by the **reader at boot** (target image) — writer
   selection follows the target's generation (#13/#72)
 - XBOOTLDR GUID-retype: **dead** (sd-boot ≥258.2 requires vfat) — ESP-copy
