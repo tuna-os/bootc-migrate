@@ -28,6 +28,7 @@ pub mod boot_cleanup;
 pub mod composefs;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
+pub mod cross_base;
 pub mod de_detect;
 pub mod de_migrate;
 pub mod etc_conflict;
