@@ -6,7 +6,7 @@
 //! this module owns the orchestration: registry scans, `ostree admin status`
 //! deployment discovery, and the two post-`bootc switch` applications.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::{etc_conflict, registry, remap, scan};
@@ -316,6 +316,7 @@ pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
     fn staged_deployment_root_picks_non_starred_line() {
         // Real `ostree admin status` output: the booted deployment is
         // prefixed with '*', the staged one is not.
