@@ -6,7 +6,7 @@
 //! this module owns the orchestration: registry scans, `ostree admin status`
 //! deployment discovery, and the two post-`bootc switch` applications.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use crate::{etc_conflict, registry, remap, scan};
