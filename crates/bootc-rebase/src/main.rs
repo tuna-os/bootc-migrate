@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use bootc_migrate_core::cross_base;
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
-use bootc_migrate_core::{scan, selinux};
+use bootc_migrate_core::selinux;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -1312,7 +1312,6 @@ fn staged_image_matches(requested: &str, staged: &str) -> bool {
 /// to the same "can't establish identity, don't gate" degradation used for
 /// a target with no parseable os-release — printing a warning either way so
 /// the degradation isn't silent.
-
 /// Scenario A (issue #30): re-base to another image as a plain OSTree
 /// deployment. `bootc switch` already does the heavy lifting on an
 /// OSTree-backed system — staging the target with OSTree's native 3-way /etc
@@ -1493,7 +1492,6 @@ mod tests {
         assert_eq!(staged_image_from_status(&json), None);
     }
 
-    #[test]
     #[test]
     fn accept_cross_base_flag_parses() {
         let cli = Cli::parse_from([
