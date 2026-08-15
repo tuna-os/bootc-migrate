@@ -62,7 +62,7 @@ drives route refusal with evidence.
 
 ### M2 — Bootloader migration (scenario B) — **skeleton landed, live mutation deferred**
 
-[#65](https://github.com/tuna-os/bootc-migrate-composefs/issues/65) — the
+[#65](https://github.com/tuna-os/bootc-migrate/issues/65) — the
 pure core (BLS entry assembly, kernel-arg carry-over, entry-token derivation)
 merged and is unit-tested; `bootc-rebase migrate-bootloader` exists as a CLI
 shape but its `run` always refuses with "not implemented."
@@ -82,7 +82,7 @@ sd-boot, survives a kernel update, and `--undo` restores GRUB cleanly.
 
 ### M3 — Cross-base re-base (scenario C) — **both parts landed, neither exercised by CI**
 
-[#67](https://github.com/tuna-os/bootc-migrate-composefs/issues/67) part 1
+[#67](https://github.com/tuna-os/bootc-migrate/issues/67) part 1
 (remap planner + apply walk over the staged deployment) is done and wired
 into `OstreeDeploy`, gated by `is_cross_base` + `--accept-cross-base`.
 
@@ -113,7 +113,7 @@ nor part 2 executes in CI at all. Both are unit-tested (planning, exemptions,
 sidecar naming, report/JSON, and a collect→plan→apply round trip over real
 trees) and neither has run on a real cross-base system.
 
-Related: [#80](https://github.com/tuna-os/bootc-migrate-composefs/issues/80)
+Related: [#80](https://github.com/tuna-os/bootc-migrate/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)
 that `bootc switch`'s native merge does plain whole-*file* 3-way merge with
 **no** identity-DB (`passwd`/`group`/etc.) key-level reconciliation — the
@@ -129,7 +129,7 @@ renumbered account, `.rebase-old` sidecars present where defaults were taken.
 
 ### M4 — Native store & the generation matrix (the #72 endgame) — **not started beyond the feature flag**
 
-[#13](https://github.com/tuna-os/bootc-migrate-composefs/issues/13)'s
+[#13](https://github.com/tuna-os/bootc-migrate/issues/13)'s
 `NativeStore` (composefs/composefs-oci crates, no CLI shelling) exists behind
 the `composefs-native` feature flag and is off by default. The default path
 still probes host/target/builder for a legacy-CLI-capable bootc and pins
@@ -152,7 +152,7 @@ carry that caveat in their module docs and need manual/corral-VM
 validation; #31's `efibootmgr` path is the same class of risk as #65 and
 should not be trusted until it has been run on a real UEFI system.
 
-- [#68](https://github.com/tuna-os/bootc-migrate-composefs/issues/68) — DE
+- [#68](https://github.com/tuna-os/bootc-migrate/issues/68) — DE
   config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma,
   COSMIC, niri, XFCE), a best-effort portable-preference extractor, and the
   `pre-switch.d`/`post-switch.d` hook contract are done, unit-tested, and
@@ -167,7 +167,7 @@ should not be trusted until it has been run on a real UEFI system.
   stash exists on a real system and survives the reboot — that and the
   portable subset actually being applied by a hook still need live
   validation.
-- [#15](https://github.com/tuna-os/bootc-migrate-composefs/issues/15) — the
+- [#15](https://github.com/tuna-os/bootc-migrate/issues/15) — the
   factory-vs-live `/etc` diff computation is done, exposed as
   `bootc-migrate etc-drift` (table or JSON). The interactive checklist UI
   (`etc-drift --interactive`, or `--review-drift` as "Phase 0.5" ahead of a
@@ -176,7 +176,7 @@ should not be trusted until it has been run on a real UEFI system.
   now implemented. The checklist's terminal event loop itself is the one
   piece that can't be proven by compile+unit-test — same as this project's
   other interactive-only work — and needs manual/corral-VM validation.
-- [#31](https://github.com/tuna-os/bootc-migrate-composefs/issues/31) — the
+- [#31](https://github.com/tuna-os/bootc-migrate/issues/31) — the
   UEFI boot-entry audit (dead/generic-label/duplicate/firmware-managed
   classification) is done, read-only, exposed as `bootc-rebase boot-entries`.
   Interactive selection, live entry removal, and branding-rename are now
@@ -200,7 +200,7 @@ request; non-experts can read what will happen before it happens.
 ### Deferred extensions (raised on #30, not yet scoped into a milestone)
 
 Two directions came up in discussion on the [generalize-into-a-re-base-engine
-RFC](https://github.com/tuna-os/bootc-migrate-composefs/issues/30) but never
+RFC](https://github.com/tuna-os/bootc-migrate/issues/30) but never
 got a milestone or an issue. Recorded here so they aren't lost, not because
 either is imminent:
 
