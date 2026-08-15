@@ -130,6 +130,7 @@ impl Drop for SleepGuard {
     }
 }
 
+
 /// RAII guard around `podman image mount`. Mounts a locally-cached OCI image and
 /// exposes its merged rootfs at `path`, unmounting on drop. Used as the Phase 5
 /// fallback when the composefs overlay mount yields no usable content (bootc
@@ -537,7 +538,7 @@ fn prepare_composefs_loopback_include() -> Result<tempfile::TempDir> {
          What=/sysroot/composefs-loopback.ext4\n\
          Where=/sysroot/composefs\n\
          Type=ext4\n\
-         Options=loop,ro\n\
+         Options=loop,rw\n\
          \n\
          [Install]\n\
          WantedBy=initrd-root-fs.target\n",
@@ -948,6 +949,7 @@ pub fn run_migration(
         bootloader,
         force,
     )?;
+
 
     println!("\n=== MIGRATION COMPLETED ===");
     println!("Staged ComposeFS deployment: {}", verity.as_hex());

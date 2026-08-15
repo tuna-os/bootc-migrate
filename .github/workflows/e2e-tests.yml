@@ -15,23 +15,21 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
-# The scenarios boot full VMs via QEMU and need hardware KVM acceleration.
-# GitHub-hosted runners (including larger runners) do NOT expose /dev/kvm, so
-# these jobs gate on a KVM-capable self-hosted runner (kanpur) via the
-# KVM_E2E_ENABLED org variable. Fork pull requests are deliberately excluded:
-# this job runs privileged containers and QEMU on the runner host. While the
-# var is unset the matrix is skipped and e2e-gate/required-checks pass
-# trivially. To re-enable: register kanpur as an org runner labelled "kvm" and
-# set KVM_E2E_ENABLED=true.
+# The scenarios boot full VMs via QEMU. GitHub-hosted runners do not expose
+# /dev/kvm, so QEMU uses TCG emulation there. That is slower but keeps the
+# boot/reboot regression matrix runnable while no dedicated KVM runner is
+# available. Fork pull requests remain excluded because this job uses
+# privileged containers and loop mounts.
 jobs:
   e2e:
     if: >-
-      vars.KVM_E2E_ENABLED == 'true' &&
-      (github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     name: ${{ matrix.scenario.name }}
-    runs-on: [self-hosted, kvm]
-    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    # TCG is markedly slower than KVM, especially across two full reboots.
+    # GitHub-hosted jobs permit six hours; leave headroom below that ceiling.
+    timeout-minutes: 330
     # Exploratory cells (aurora: see below) opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without dragging
     # down the "E2E Migration Tests" workflow conclusion e2e-gate polls —
@@ -137,10 +135,9 @@ jobs:
             swtpm \
             swtpm-tools \
 
-      # This job only runs on the kanpur self-hosted runner (label "kvm").
-      # Make /dev/kvm world-accessible so QEMU can use KVM acceleration (TCG
-      # fallback is ~10x slower and blows the 45-minute job timeout — proven on
-      # GitHub-hosted 2-core runners, where SSH banner exchanges time out).
+      # GitHub-hosted runners normally lack /dev/kvm. Keep this opportunistic
+      # so the same workflow automatically accelerates when a KVM-capable
+      # hosted runner becomes available; otherwise QEMU uses TCG.
       - name: Enable KVM access
         run: |
           if [ -e /dev/kvm ]; then

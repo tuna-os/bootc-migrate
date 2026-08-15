@@ -43,20 +43,23 @@ pub fn phase4_stage_deploy(
                 eprintln!("[phase4] warning: failed to refresh staged GBM backend paths: {e:#}")
             }
         }
-        let networkmanager_compat =
-            sanitize_staged_networkmanager_backend_compat(content_image, &etc_dir).context(
-                "failed to validate NetworkManager Wi-Fi backend compatibility for the staged deployment",
-            )?;
-        if networkmanager_compat.removed_iwd_settings > 0 {
-            println!(
-                "[phase4] removed {} incompatible source NetworkManager iwd setting(s) from the staged target",
-                networkmanager_compat.removed_iwd_settings
-            );
-        }
-        if networkmanager_compat.removed_wpa_supplicant_mask {
-            println!(
-                "[phase4] removed the source wpa_supplicant mask so the target's NetworkManager can activate its default Wi-Fi backend"
-            );
+        match sanitize_staged_networkmanager_backend_compat(content_image, &etc_dir) {
+            Ok(networkmanager_compat) => {
+                if networkmanager_compat.removed_iwd_settings > 0 {
+                    println!(
+                        "[phase4] removed {} incompatible source NetworkManager iwd setting(s) from the staged target",
+                        networkmanager_compat.removed_iwd_settings
+                    );
+                }
+                if networkmanager_compat.removed_wpa_supplicant_mask {
+                    println!(
+                        "[phase4] removed the source wpa_supplicant mask so the target's NetworkManager can activate its default Wi-Fi backend"
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "[phase4] warning: could not inspect target NetworkManager Wi-Fi backend: {e:#}"
+            ),
         }
         println!(
             "Deployment already staged at {}. Skipping Phase 4.",
@@ -94,19 +97,23 @@ pub fn phase4_stage_deploy(
             "[phase4] removed {removed} host root or /var mount(s) from the target /etc/fstab"
         );
     }
-    let networkmanager_compat =
-        sanitize_staged_networkmanager_backend_compat(content_image, &etc_dir)
-            .context("failed to validate NetworkManager Wi-Fi backend compatibility")?;
-    if networkmanager_compat.removed_iwd_settings > 0 {
-        println!(
-            "[phase4] removed {} incompatible source NetworkManager iwd setting(s); the target will use its default Wi-Fi backend",
-            networkmanager_compat.removed_iwd_settings
-        );
-    }
-    if networkmanager_compat.removed_wpa_supplicant_mask {
-        println!(
-            "[phase4] removed the source wpa_supplicant mask so the target can activate its default Wi-Fi backend"
-        );
+    match sanitize_staged_networkmanager_backend_compat(content_image, &etc_dir) {
+        Ok(networkmanager_compat) => {
+            if networkmanager_compat.removed_iwd_settings > 0 {
+                println!(
+                    "[phase4] removed {} incompatible source NetworkManager iwd setting(s); the target will use its default Wi-Fi backend",
+                    networkmanager_compat.removed_iwd_settings
+                );
+            }
+            if networkmanager_compat.removed_wpa_supplicant_mask {
+                println!(
+                    "[phase4] removed the source wpa_supplicant mask so the target can activate its default Wi-Fi backend"
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "[phase4] warning: could not inspect target NetworkManager Wi-Fi backend: {e:#}"
+        ),
     }
 
     // Stage /var symlink
@@ -160,10 +167,12 @@ pub fn phase4_stage_deploy(
     Ok(deploy_dir)
 }
 
-/// Install a systemd mount unit into the deployment's /etc so the booted system
-/// loop-mounts the composefs ext4 store at /sysroot/composefs. Idempotent with
-/// any mount that survives the initrd: systemd treats an already-mounted target
-/// as active.
+/// Install systemd units into the deployment's /etc so the booted system
+/// loop-mounts the composefs ext4 store read-write at `/sysroot/composefs`.
+/// The initrd intentionally mounts it read-only while assembling the immutable
+/// root. A separate runtime service must remount an already-active initrd mount:
+/// systemd otherwise considers the mount unit satisfied and preserves its
+/// read-only options, blocking day-2 bootc updates.
 fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
     let unit_dir = etc_dir.join("systemd/system");
     fs::create_dir_all(&unit_dir)?;
@@ -179,17 +188,39 @@ fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
          What=/sysroot/composefs-loopback.ext4\n\
          Where=/sysroot/composefs\n\
          Type=ext4\n\
-         Options=loop,ro\n\
+         Options=loop,rw\n\
+         \n\
+         [Install]\n\
+         WantedBy=local-fs.target\n",
+    )?;
+    fs::write(
+        unit_dir.join("sysroot-composefs-remount.service"),
+        "[Unit]\n\
+         Description=Make ComposeFS Loopback Store Writable\n\
+         Requires=sysroot-composefs.mount\n\
+         After=sysroot-composefs.mount\n\
+         Before=local-fs.target\n\
+         DefaultDependencies=no\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart=/usr/bin/mount -o remount,rw /sysroot/composefs\n\
+         RemainAfterExit=yes\n\
          \n\
          [Install]\n\
          WantedBy=local-fs.target\n",
     )?;
     let wants_dir = unit_dir.join("local-fs.target.wants");
     fs::create_dir_all(&wants_dir)?;
-    let link = wants_dir.join("sysroot-composefs.mount");
-    let _ = fs::remove_file(&link);
-    std::os::unix::fs::symlink("../sysroot-composefs.mount", &link)
-        .context("failed to enable runtime sysroot-composefs.mount")?;
+    for unit in [
+        "sysroot-composefs.mount",
+        "sysroot-composefs-remount.service",
+    ] {
+        let link = wants_dir.join(unit);
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(format!("../{unit}"), &link)
+            .with_context(|| format!("failed to enable runtime {unit}"))?;
+    }
     Ok(())
 }
 
