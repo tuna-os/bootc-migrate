@@ -66,7 +66,7 @@ run; for CI use `gh run view --json jobs` to poll per-scenario results.
 
 ## Interactive testing with Corral VMs
 
-[Corral](https://github.com/hanthor/corral) manages KubeVirt/QEMU VMs
+[Corral](https://github.com/tuna-os/corral) manages KubeVirt/QEMU VMs
 provisioned from bootc container images. Use it for interactive TUI testing,
 exploratory debugging, and validating changes on real OSTree systems without
 running the full scripted E2E harness.
