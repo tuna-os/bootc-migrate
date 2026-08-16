@@ -19,7 +19,8 @@
 #
 # Built by CI (.github/workflows/release.yml) from the per-arch release
 # binaries — see ctx/linux/$TARGETARCH/ staged there before this build.
-FROM gcr.io/distroless/cc-debian12
+# Digest-pinned (was implicit :latest) — Renovate updates the digest.
+FROM gcr.io/distroless/cc-debian12@sha256:6e1871c34683dc9ee996d13084497783fd98ac0200213d0826625f4e9d4be1d0
 ARG TARGETARCH
 COPY linux/${TARGETARCH}/bootc-migrate /usr/local/bin/bootc-migrate
 ENTRYPOINT ["/usr/local/bin/bootc-migrate"]
