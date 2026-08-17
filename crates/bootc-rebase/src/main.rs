@@ -8,6 +8,9 @@
 
 use anyhow::{Context, Result, bail};
 use bootc_migrate_core::cross_base;
+use bootc_migrate_core::de_controller::{
+    DesktopMigrationController, DesktopMigrationDecision, DesktopMigrationPlan,
+};
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
 use bootc_migrate_core::selinux;
@@ -778,14 +781,6 @@ fn run_de_migrate(args: &DeMigrateArgs) -> Result<()> {
 /// standalone subcommand is found by the `rebase` flow and vice versa.
 const DE_STASH_SUBDIR: &str = ".local/share/de-migrate";
 
-/// What the DE step of a re-base will do, decided before anything is staged.
-#[derive(Debug)]
-struct DesktopMigrationPlan {
-    from: bootc_migrate_core::de_migrate::DesktopEnvironment,
-    to: bootc_migrate_core::de_migrate::DesktopEnvironment,
-    users: Vec<bootc_migrate_core::de_migrate::UserHome>,
-}
-
 /// Decide whether this re-base needs a DE config stash/restore (#68), always
 /// saying out loud why it does not: a silent no-op here looks identical to a
 /// broken `--de-migrate`.
@@ -808,36 +803,30 @@ fn plan_desktop_migration(args: &Args) -> Option<DesktopMigrationPlan> {
 }
 
 fn try_plan_desktop_migration(args: &Args) -> Result<Option<DesktopMigrationPlan>> {
-    use bootc_migrate_core::{de_detect, de_migrate};
-
-    if !args.de_migrate {
-        println!(
-            "DE migration: skipped (--de-migrate not passed); per-user desktop config is \
-             left exactly as it is."
-        );
-        return Ok(None);
+    let controller = DesktopMigrationController::new(args.de_migrate, &args.target_image);
+    match controller.plan()? {
+        DesktopMigrationDecision::Disabled => {
+            println!(
+                "DE migration: skipped (--de-migrate not passed); per-user desktop config is \
+                 left exactly as it is."
+            );
+            Ok(None)
+        }
+        DesktopMigrationDecision::NotCrossDesktop { host, target } => {
+            println!(
+                "DE migration: nothing to do (this host: {host}, {}: {target}).",
+                args.target_image
+            );
+            Ok(None)
+        }
+        DesktopMigrationDecision::NoUsers { from, to } => {
+            println!(
+                "DE migration: {from} -> {to}, but /etc/passwd has no human accounts to stash."
+            );
+            Ok(None)
+        }
+        DesktopMigrationDecision::Planned(plan) => Ok(Some(plan)),
     }
-
-    let host = de_detect::detect_host_desktop().context("detecting this host's desktop")?;
-    let target = de_detect::detect_image_desktop(&args.target_image)
-        .with_context(|| format!("detecting the desktop shipped by {}", args.target_image))?;
-
-    let Some((from, to)) = de_detect::cross_desktop_pair(&host, &target) else {
-        println!(
-            "DE migration: nothing to do (this host: {host}, {}: {target}).",
-            args.target_image
-        );
-        return Ok(None);
-    };
-
-    let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
-    let users = de_migrate::parse_user_homes(&passwd);
-    if users.is_empty() {
-        println!("DE migration: {from} -> {to}, but /etc/passwd has no human accounts to stash.");
-        return Ok(None);
-    }
-
-    Ok(Some(DesktopMigrationPlan { from, to, users }))
 }
 
 /// Stash the outgoing DE's config for every planned user and run the
