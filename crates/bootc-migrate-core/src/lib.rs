@@ -8,6 +8,7 @@
 //! - [`boot_cleanup`] — the destructive half of that audit: a pure planner for
 //!   entry removal/branding-rename, and the `efibootmgr` executor it authorizes
 //! - [`de_detect`] — desktop-environment detection for a target image (registry-streamed) or the live host
+//! - [`de_controller`] — read-only policy for planning cross-desktop config migration
 //! - [`de_migrate`] — cross-DE config stash/restore, portable-subset extraction, hook contract
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
 //! - [`etc_conflict`] — cross-base /etc conflict policy applied to a deployment
@@ -29,6 +30,7 @@ pub mod composefs;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
 pub mod cross_base;
+pub mod de_controller;
 pub mod de_detect;
 pub mod de_migrate;
 pub mod etc_conflict;
