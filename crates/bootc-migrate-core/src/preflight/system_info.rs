@@ -407,3 +407,112 @@ impl SystemInfo {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pending_ostree_deployment_markers() {
+        let cases = [
+            ("", PendingTransactionStatus::Clean),
+            (
+                "* fedora:fedora/42/x86_64/silverblue\n    Version: 42.1",
+                PendingTransactionStatus::Clean,
+            ),
+            (
+                "  fedora abc.0 (pending)\n* fedora def.0",
+                PendingTransactionStatus::PendingDeployment,
+            ),
+            (
+                "  fedora abc.0 (staged)\n* fedora def.0",
+                PendingTransactionStatus::StagedDeployment,
+            ),
+            (
+                "  fedora abc.0 (staged)\n  fedora def.0 (pending)",
+                PendingTransactionStatus::StagedDeployment,
+            ),
+            (
+                "  fedora abc.0 (pending)\n  fedora def.0 (staged)",
+                PendingTransactionStatus::PendingDeployment,
+            ),
+        ];
+
+        for (output, expected) in cases {
+            assert_eq!(parse_ostree_status_for_pending(output), expected);
+        }
+    }
+
+    #[test]
+    fn pending_transaction_status_has_actionable_display_text() {
+        let cases = [
+            (PendingTransactionStatus::Clean, "no pending transaction"),
+            (
+                PendingTransactionStatus::StagedDeployment,
+                "staged deployment (next boot will apply)",
+            ),
+            (
+                PendingTransactionStatus::PendingDeployment,
+                "pending deployment (update in progress)",
+            ),
+            (
+                PendingTransactionStatus::StaleTransactionFiles,
+                "stale transaction temp files in OSTree repo",
+            ),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(status.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn counts_only_regular_files_below_object_prefixes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let objects = temp.path().join("objects");
+        fs::create_dir_all(objects.join("ab/nested"))?;
+        fs::create_dir_all(objects.join("cd"))?;
+        fs::write(objects.join("ab/first"), b"one")?;
+        fs::write(objects.join("ab/second"), b"two")?;
+        fs::write(objects.join("ab/nested/too-deep"), b"ignored")?;
+        fs::write(objects.join("cd/third"), b"three")?;
+        fs::write(objects.join("not-a-prefix-file"), b"ignored")?;
+
+        assert_eq!(count_composefs_files(&objects), 3);
+        assert_eq!(count_composefs_files(&temp.path().join("missing")), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn free_space_uses_existing_filesystem() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        assert!(get_free_space(temp.path())? > 0);
+        assert!(get_free_space(temp.path().join("missing")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reflink_probe_always_removes_probe_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _supported = check_reflink_support(temp.path());
+
+        assert!(!temp.path().join(".reflink_test_src").exists());
+        assert!(!temp.path().join(".reflink_test_dest").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn bootc_status_deserializes_camel_case_payload() -> Result<()> {
+        let payload = r#"{
+            "apiVersion": "org.containers.bootc/v1",
+            "kind": "BootcHost",
+            "status": {"booted": {"ostree": {"checksum": "abc"}, "composefs": null}}
+        }"#;
+
+        let status: BootcStatus = serde_json::from_str(payload)?;
+        assert_eq!(status.api_version, "org.containers.bootc/v1");
+        assert_eq!(status.kind, "BootcHost");
+        assert!(status.status.booted.and_then(|b| b.ostree).is_some());
+        Ok(())
+    }
+}
