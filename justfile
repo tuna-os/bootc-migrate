@@ -124,9 +124,9 @@ fmt-check:
 clippy:
     cargo clippy --all-targets -- -D warnings
 
-# Check dependency licenses and sources with cargo-deny.
+# Check dependency advisories, licenses and sources with cargo-deny.
 deny:
-    cargo deny check bans sources licenses
+    cargo deny check advisories bans sources licenses
 
 # Run all linters (shellcheck, rustfmt, clippy). Retained as an alias for `check`.
 lint: lint-shell lint-rust

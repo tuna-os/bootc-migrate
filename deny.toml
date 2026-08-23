@@ -9,3 +9,16 @@ private = { ignore = true }
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+[advisories]
+# `cargo deny check advisories` consults the RustSec database. It is currently
+# absent from the check list in .github/workflows/ci.yml and was absent from
+# the justfile recipe — which is how h2 0.4.15 (RUSTSEC-2026-0258, fixed in
+# 0.4.16) sat in the lockfile unnoticed. See #164.
+ignore = [
+  # RUSTSEC-2025-0119: number_prefix is unmaintained. Transitive via indicatif;
+  # no patched version exists and nothing in this repository can resolve it.
+  # Listed explicitly so the exception is auditable rather than implicit in a
+  # check that simply is not run. Revisit when indicatif drops the dependency.
+  { id = "RUSTSEC-2025-0119", reason = "unmaintained, transitive via indicatif, no fix available upstream" },
+]
