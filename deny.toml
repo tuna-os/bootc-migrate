@@ -2,12 +2,14 @@
 [advisories]
 # Consult the RustSec advisory DB (bootc-migrate#164): without this section
 # cargo-deny's default `check` skips advisories entirely and known-vulnerable
-# crates (e.g. h2 0.4.15 / RUSTSEC-2026-0258) go unnoticed. `yanked` and
-# `vulnerability` are denied so a yanked/known-vulnerable crate fails CI
-# rather than silently building. (severity-threshold was removed upstream —
-# EmbarkStudios/cargo-deny#611 — so CVSS-level gating is no longer used.)
+# crates (e.g. h2 0.4.15 / RUSTSEC-2026-0258) go unnoticed. Known
+# vulnerabilities are always denied; yanked and unmaintained/unsound are
+# gated here so a yanked or unmaintained crate fails CI rather than silently
+# building. (vulnerability/severity-threshold keys were removed upstream —
+# EmbarkStudios/cargo-deny#611.)
 yanked = "deny"
-vulnerability = "deny"
+unmaintained = "all"
+unsound = "all"
 
 [licenses]
 allow = ["Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT",
