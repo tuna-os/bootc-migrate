@@ -1,4 +1,12 @@
 # cargo-deny configuration, aligned with bootc-dev/bootc and containers/composefs-rs.
+[advisories]
+# Consult the RustSec advisory DB (bootc-migrate#164): without this section
+# cargo-deny's default `check` skips advisories entirely and known-vulnerable
+# crates (e.g. h2 0.4.15 / RUSTSEC-2026-0258) go unnoticed. `yanked` is also
+# denied so a yanked-but-pinned crate fails CI rather than silently building.
+yanked = "deny"
+severity-threshold = "low"
+
 [licenses]
 allow = ["Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT",
          "BSD-3-Clause", "BSD-2-Clause", "Zlib",
