@@ -102,9 +102,7 @@ impl ReviewState {
     }
 
     fn select_all(&mut self, value: bool) {
-        for c in &mut self.checked {
-            *c = value;
-        }
+        self.checked.fill(value);
     }
 
     /// Handle one key press. Returns `true` when the review loop should end.
