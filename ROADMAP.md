@@ -34,6 +34,37 @@ but those run on paths no CI cell reaches (no cross-base E2E cell, no NVRAM
 mutation, no TUI assertions), so they are landed-but-unproven rather than
 done. See each milestone below for the specific line and why.
 
+## Next release gate — first post-rename release
+
+The next release is a trust checkpoint, not a date-only cut. It must restore
+one coherent public identity after the repository and binary rename while
+keeping the protected migrator's proven contract distinct from the broader,
+partly unvalidated re-base engine.
+
+Before tagging, the release owner must record these decisions and evidence:
+
+- **Identity:** Cargo workspace/crate versions, changelog heading, Git tag,
+  binary names, archive names, and container tags agree. The published quick
+  start downloads those exact artifacts; no pre-rename
+  `bootc-migrate-composefs` path remains in the primary install flow.
+- **Scope:** release notes state whether `bootc-rebase` is excluded, included
+  as an experimental preview, or supported. Experimental routes must not
+  inherit the protected MVP's stability language.
+- **Validation:** all protected-MVP E2E cells pass on the release commit, and
+  a manual dispatch of the release workflow successfully builds both target
+  archives and the container without publishing them.
+- **Safety boundary:** release notes enumerate every live or interactive path
+  that lacks automated coverage (including cross-base, cross-DE, NVRAM, and
+  checklist paths) and link to recovery/undo guidance.
+- **Ownership:** one named release owner and target date are attached to the
+  roadmap issue; the owner verifies checksums and install commands from the
+  immutable GitHub Release before announcing it.
+
+This gate deliberately does not require unfinished M2–M5 work to graduate.
+It allows the proven, renamed migrator to ship while making the newer engine's
+evidence level visible to adopters. After this release, cadence and the
+`bootc-rebase` graduation gate should be tracked separately.
+
 ## Milestones
 
 ### M0 — MVP hardening (continuous; protects everything else) — **done**
