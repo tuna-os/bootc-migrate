@@ -7,6 +7,8 @@
 //! the roadmap.
 
 use anyhow::{Context, Result, bail};
+
+use crate::de_migrate_command::print_hook_results;
 use bootc_migrate_core::cross_base;
 use bootc_migrate_core::de_controller::{
     DesktopMigrationController, DesktopMigrationDecision, DesktopMigrationPlan,
@@ -18,6 +20,8 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 mod boot_entry_review;
+mod de_migrate_command;
+mod scan_command;
 
 use bootc_migrate_core::rebase_plan::{Backend, Strategy, bootloader_plan, plan, route};
 
@@ -247,85 +251,6 @@ struct Args {
     /// state unless asked to.
     #[arg(long)]
     de_migrate: bool,
-}
-
-fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabilities) {
-    println!("=== Target image capabilities ===");
-    println!("Image:                 {image}");
-    println!(
-        "Composefs:             {}",
-        if caps.composefs_capable {
-            "capable"
-        } else {
-            "not enabled in prepare-root.conf"
-        }
-    );
-    println!(
-        "OSTree capable:        {}",
-        if caps.ostree_capable { "yes" } else { "no" }
-    );
-    println!(
-        "Bootloader payload:    {}",
-        if caps.systemd_boot_payload {
-            "systemd-boot ✓"
-        } else {
-            "none"
-        }
-    );
-    println!(
-        "bootc present:         {}",
-        if caps.bootc_present { "yes" } else { "no" }
-    );
-    println!(
-        "Desktops:              {}",
-        if caps.desktops.is_empty() {
-            "none".to_string()
-        } else {
-            caps.desktops.join(", ")
-        }
-    );
-    if let Some(base) = &caps.base {
-        println!(
-            "Base OS:               {} {}",
-            base.id,
-            base.version_id.as_deref().unwrap_or("")
-        );
-    } else {
-        println!("Base OS:               unknown");
-    }
-    println!(
-        "Sysusers:              {} static allocation(s)",
-        caps.sysusers.len()
-    );
-    println!(
-        "Transient root/etc:    {} / {}",
-        if caps.root_transient { "yes" } else { "no" },
-        if caps.etc_transient { "yes" } else { "no" }
-    );
-    println!(
-        "fs-verity required:    {}",
-        if caps.fs_verity_required { "yes" } else { "no" }
-    );
-    println!(
-        "Initramfs composefs:   {}",
-        if caps.initramfs_has_composefs_module {
-            "module present"
-        } else {
-            "not present (may need regeneration for a composefs boot)"
-        }
-    );
-    println!(
-        "Filesystem expected:   {}",
-        caps.filesystem_expectation.as_deref().unwrap_or("unknown")
-    );
-    let issues = bootc_migrate_core::scan::compatibility_issues(caps);
-    println!(
-        "Compatible:            {}",
-        if issues.is_empty() { "YES" } else { "NO" }
-    );
-    for issue in &issues {
-        println!("  - {issue}");
-    }
 }
 
 /// Stub (issue #65): the pure BLS-entry/karg-carry-over/entry-token core
@@ -684,97 +609,6 @@ fn run_boot_entries_undo(args: &BootEntriesArgs, esp_root: &Path) -> Result<()> 
     Ok(())
 }
 
-fn parse_de(name: &str) -> Result<bootc_migrate_core::de_migrate::DesktopEnvironment> {
-    bootc_migrate_core::de_migrate::parse_desktop_environment(name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown desktop environment '{name}' \
-             (expected gnome, kde, cosmic, niri, or xfce)"
-        )
-    })
-}
-
-fn run_de_migrate(args: &DeMigrateArgs) -> Result<()> {
-    use bootc_migrate_core::de_migrate;
-
-    match &args.action {
-        DeMigrateAction::Stash {
-            from_de,
-            home,
-            stash_dir,
-            run_hooks,
-            dry_run,
-        } => {
-            let de = parse_de(from_de)?;
-            let moved =
-                de_migrate::stash(de, home, stash_dir, *dry_run).context("stashing DE config")?;
-            if moved.is_empty() {
-                println!("Nothing to stash for {from_de} under {}.", home.display());
-            } else {
-                println!("Stashed {} path(s) for {from_de}:", moved.len());
-                for p in &moved {
-                    println!("  {p}");
-                }
-            }
-            if *run_hooks {
-                let hooks = de_migrate::discover_hooks(Path::new(de_migrate::PRE_SWITCH_HOOK_DIR))
-                    .context("discovering pre-switch hooks")?;
-                // to_de is unknown at this point (the target DE isn't detected by
-                // this subcommand yet — see #68's "Depends on" note), so the
-                // env var is left empty rather than guessed.
-                let env = [
-                    ("REBASE_FROM_DE".to_string(), from_de.clone()),
-                    ("REBASE_TO_DE".to_string(), String::new()),
-                    (
-                        "REBASE_STASH_DIR".to_string(),
-                        stash_dir.display().to_string(),
-                    ),
-                    ("REBASE_HOME".to_string(), home.display().to_string()),
-                ];
-                let results = de_migrate::run_hooks(&hooks, &env, *dry_run)
-                    .context("running pre-switch hooks")?;
-                print_hook_results(&results);
-            }
-            Ok(())
-        }
-        DeMigrateAction::Restore {
-            to_de,
-            home,
-            stash_dir,
-            run_hooks,
-            dry_run,
-        } => {
-            let de = parse_de(to_de)?;
-            let moved = de_migrate::restore(de, home, stash_dir, *dry_run)
-                .context("restoring DE config")?;
-            if moved.is_empty() {
-                println!("Nothing to restore for {to_de} into {}.", home.display());
-            } else {
-                println!("Restored {} path(s) for {to_de}:", moved.len());
-                for p in &moved {
-                    println!("  {p}");
-                }
-            }
-            if *run_hooks {
-                let hooks = de_migrate::discover_hooks(Path::new(de_migrate::POST_SWITCH_HOOK_DIR))
-                    .context("discovering post-switch hooks")?;
-                let env = [
-                    ("REBASE_FROM_DE".to_string(), String::new()),
-                    ("REBASE_TO_DE".to_string(), to_de.clone()),
-                    (
-                        "REBASE_STASH_DIR".to_string(),
-                        stash_dir.display().to_string(),
-                    ),
-                    ("REBASE_HOME".to_string(), home.display().to_string()),
-                ];
-                let results = de_migrate::run_hooks(&hooks, &env, *dry_run)
-                    .context("running post-switch hooks")?;
-                print_hook_results(&results);
-            }
-            Ok(())
-        }
-    }
-}
-
 /// Where a user's stash lives, relative to their home. Same value as the
 /// `de-migrate stash|restore --stash-dir` default, so a stash written by the
 /// standalone subcommand is found by the `rebase` flow and vice versa.
@@ -924,28 +758,6 @@ fn run_post_switch_desktop_migration(plan: &DesktopMigrationPlan, dry_run: bool)
 fn preview_desktop_migration(plan: &DesktopMigrationPlan) -> Result<()> {
     run_pre_switch_desktop_migration(plan, true)?;
     run_post_switch_desktop_migration(plan, true)
-}
-
-fn print_hook_results(results: &[bootc_migrate_core::de_migrate::HookResult]) {
-    if results.is_empty() {
-        println!("No hooks found.");
-        return;
-    }
-    for r in results {
-        let status = if r.success { "ok" } else { "FAILED" };
-        println!("  hook {} [{status}]", r.path);
-    }
-}
-
-fn run_scan(args: &ScanArgs) -> Result<()> {
-    println!("Scanning target image {}...", args.image);
-    let caps = bootc_migrate_core::scan::scan_target_image(&args.image)?;
-    if args.json {
-        println!("{}", caps.to_json());
-    } else {
-        print_capabilities_table(&args.image, &caps);
-    }
-    Ok(())
 }
 
 fn parse_backend(s: &str) -> Result<Backend> {
@@ -1116,7 +928,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Scan(ref scan_args)) => run_scan(scan_args),
+        Some(Commands::Scan(ref scan_args)) => scan_command::run(scan_args),
         Some(Commands::Rollback(ref rollback_args)) => {
             check_root_privilege()?;
             bootc_migrate_core::migration::rollback::run_rollback(
@@ -1126,7 +938,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::BootEntries(ref args)) => run_boot_entries(args),
-        Some(Commands::DeMigrate(ref args)) => run_de_migrate(args),
+        Some(Commands::DeMigrate(ref args)) => de_migrate_command::run(args),
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");
@@ -1519,31 +1331,6 @@ mod tests {
             "--de-migrate",
         ]);
         assert!(opted_in.rebase_args.de_migrate);
-    }
-
-    #[test]
-    fn parse_de_accepts_every_known_desktop_and_rejects_others() {
-        use bootc_migrate_core::de_migrate::DesktopEnvironment;
-        let cases: &[(&str, Option<DesktopEnvironment>)] = &[
-            ("gnome", Some(DesktopEnvironment::Gnome)),
-            ("GNOME", Some(DesktopEnvironment::Gnome)),
-            ("kde", Some(DesktopEnvironment::Kde)),
-            ("cosmic", Some(DesktopEnvironment::Cosmic)),
-            ("niri", Some(DesktopEnvironment::Niri)),
-            ("xfce", Some(DesktopEnvironment::Xfce)),
-            ("plasma", None),
-            ("", None),
-        ];
-        for (input, expected) in cases {
-            match (parse_de(input), expected) {
-                (Ok(de), Some(want)) => assert_eq!(de, *want, "parsing {input:?}"),
-                (Err(e), None) => assert!(
-                    e.to_string().contains("unknown desktop environment"),
-                    "parsing {input:?}: unexpected error {e}"
-                ),
-                (got, want) => panic!("parsing {input:?}: got {got:?}, wanted {want:?}"),
-            }
-        }
     }
 
     #[test]
