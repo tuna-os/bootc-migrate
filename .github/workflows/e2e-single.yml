@@ -34,6 +34,14 @@ on:
         default: composefs-migrate
         type: choice
         options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate]
+      cross_base:
+        description: >-
+          Pass --accept-cross-base and assert the cross-base remap report is
+          emitted (ostree-rebase mode only). Fails the run if the image pair
+          turns out NOT to be cross-base, so the check can't pass vacuously.
+        required: false
+        default: false
+        type: boolean
       runner:
         description: >-
           Runner override for THIS dispatch only (e.g. ubuntu-24.04, or a
@@ -152,6 +160,7 @@ jobs:
             FILESYSTEM="${{ inputs.filesystem }}" \
             DISK_SIZE="${{ inputs.disk_size }}" \
             E2E_MODE="${{ inputs.mode }}" \
+            E2E_CROSS_BASE="${{ inputs.cross_base && '1' || '0' }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       # tui-migrate runs record both interactive flows as asciicast v2

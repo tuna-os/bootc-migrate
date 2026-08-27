@@ -873,12 +873,39 @@ mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
 REBASEFIX
 
+    # E2E_CROSS_BASE=1 exercises M3's cross-base path (#67/#187): the UID/GID
+    # remap planner and the etc_conflict post-merge reconciliation pass, which
+    # are gated behind is_cross_base and refused without --accept-cross-base.
+    # Both had shipped without ever executing anywhere.
+    REBASE_FLAGS=""
+    if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
+        REBASE_FLAGS="--accept-cross-base"
+    fi
+
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" \
-        2>&1 | sed 's/^/[rebase] /'; then
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree $REBASE_FLAGS" \
+        > /tmp/rebase-out.log 2>&1; then
+        sed 's/^/[rebase] /' /tmp/rebase-out.log
         echo "FAIL: bootc-rebase exited nonzero"
         exit 1
+    fi
+    sed 's/^/[rebase] /' /tmp/rebase-out.log
+
+    if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
+        # The whole point of this cell is that the cross-base code RAN. Without
+        # this assertion the cell would pass just as happily against a
+        # same-family pair, which is precisely how the gap stayed invisible:
+        # gate_cross_base returns None and prints nothing when is_cross_base is
+        # false, so silence is indistinguishable from success.
+        step "=== ostree-rebase: asserting the cross-base path actually executed ==="
+        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
+            echo "FAIL: E2E_CROSS_BASE=1 but no remap report was printed —"
+            echo "      is_cross_base was false, so this pair is NOT cross-base"
+            echo "      and the code under test never ran."
+            exit 1
+        fi
+        echo "OK: cross-base detected; remap report emitted."
     fi
 
     step "=== ostree-rebase: verifying staged deployment ==="

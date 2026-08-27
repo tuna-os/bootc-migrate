@@ -39,15 +39,36 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
-| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active (gating since run 33050814991, 65 min green) |
+| bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
+| bluefin LTS → dakota (ostree-rebase, `E2E_CROSS_BASE=1`) | M3's cross-base UID/GID remap + `etc_conflict` pass — the first execution of either (#67/#187) | active, non-gating |
+| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
+
+### Cross-base cell (`E2E_CROSS_BASE=1`)
+
+`ostree-rebase` mode takes `E2E_CROSS_BASE=1`, which adds
+`--accept-cross-base` (the route is refused without it) **and** asserts that
+`=== Cross-base UID/GID remap report ===` appeared in the output.
+
+That second half is the point. `gate_cross_base` returns `None` and prints
+nothing when `is_cross_base` is false, so without the assertion the cell would
+pass just as happily against a same-family pair — indistinguishable from
+success. #186 records how this class of vacuous pass hid the gap.
+
+Bluefin LTS is CentOS Stream 10-based and dakota is Fedora, so the pair
+differs on `ID`/`ID_LIKE`. Note that the *other* `bluefin:lts` cells are
+cross-base by lineage too, but run `composefs-migrate` — the MVP binary, which
+merges via `mergetc` and has no `is_cross_base` gate — so they do not exercise
+this path. Run locally with `just e2e-cross-base`.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
 - **M1**: dakota → dakota:other-tag (`ImageSwap`, `E2E_MODE=image-swap`)
 - **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
   kernel update asserting ESP resync; `--undo` restores GRUB
-- **M3**: fedora-family → centos-family with populated /var (ownership,
-  remap report, `.rebase-old` sidecars)
+- **M3**: the cross-base cell above covers centos-family → fedora-family.
+  The exit criterion names the *other* direction (fedora → centos), which
+  needs a CentOS-family target image the harness does not currently install;
+  decide explicitly whether direction matters (#187)
 - **M4**: a migration where **no** legacy-CLI bootc exists (NativeStore
   writer); kernel-version gate ≥6.12 for file-backed EROFS mounts
 - **M0**: rollback cell — migrate, boot, `rollback`, assert the OSTree
