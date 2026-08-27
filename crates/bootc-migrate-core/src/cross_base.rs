@@ -14,8 +14,14 @@ use crate::{etc_conflict, registry, remap, scan};
 /// Scan `target_image`'s capabilities, retrying on transient registry
 /// failures — early-boot E2E runs have raced the guest's own network coming
 /// up (`bootc switch`'s own pull moments later succeeds against the same
-/// registry). Returns `None` (with a printed warning) rather than an error
-/// so callers can degrade to "unknown information, don't gate on it."
+/// registry). Returns `None` (with a printed warning) rather than an error.
+///
+/// **A `None` here means "unknown", never "nothing to report."** Advisory
+/// callers may treat the two alike; a *gate* must not. `gate_cross_base`
+/// used to, and the result was that a safety gate whose entire job is to
+/// refuse an unaccepted cross-base re-base silently stopped refusing
+/// whenever the registry was unreachable — see [`CrossBaseVerdict`] and
+/// bootc-migrate#191.
 pub fn scan_target_capabilities_with_retries(
     target_image: &str,
     purpose: &str,
@@ -42,20 +48,76 @@ pub fn scan_target_capabilities_with_retries(
     None
 }
 
-pub fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPlan>> {
+/// What cross-base planning could establish about this re-base.
+///
+/// Exists to keep "we looked, and the bases share a lineage" distinct from
+/// "we could not find out." Both used to collapse into `None`, which is
+/// exactly the ambiguity that let [`gate_cross_base`] stop gating without
+/// anyone noticing (bootc-migrate#191): silence is not evidence of safety.
+#[derive(Debug)]
+pub enum CrossBaseVerdict {
+    /// Scanned successfully; host and target disagree on `ID`/`ID_LIKE`.
+    CrossBase(Box<remap::RemapPlan>),
+    /// Scanned successfully; the two share a lineage, so no remap is needed.
+    SameLineage,
+    /// The target's (or this host's) identity could not be established. The
+    /// re-base may or may not be cross-base — nothing was ruled out.
+    Unknown(&'static str),
+}
+
+impl CrossBaseVerdict {
+    /// The refusal message this verdict warrants, or `None` to proceed.
+    ///
+    /// Split from [`gate_cross_base`] so the decision is testable without a
+    /// registry: the I/O is in building the verdict, the policy is here.
+    /// `accepted` is `--accept-cross-base || --force`.
+    pub fn refusal(&self, accepted: bool) -> Option<String> {
+        if accepted {
+            return None;
+        }
+        match self {
+            // Checked, and the bases share a lineage. Nothing to gate on.
+            CrossBaseVerdict::SameLineage => None,
+            CrossBaseVerdict::Unknown(reason) => Some(format!(
+                "Cannot determine whether this is a cross-base re-base: {reason}.\n\
+                 \n\
+                 This is not the same as having checked and found nothing. The \
+                 UID/GID remap and /etc conflict policy that a cross-base re-base \
+                 needs cannot be planned, so proceeding would apply neither.\n\
+                 \n\
+                 Re-run with --accept-cross-base to proceed unguarded (appropriate \
+                 when you already know the bases match), or restore access to the \
+                 target image's registry and try again."
+            )),
+            CrossBaseVerdict::CrossBase(_) => Some(
+                "Cross-base re-base detected (host and target disagree on ID/ID_LIKE). \
+                 Re-run with --accept-cross-base to proceed with the remap above."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+pub fn build_cross_base_plan(target_image: &str) -> Result<CrossBaseVerdict> {
     let Some(host_base) = scan::read_host_base_info() else {
-        return Ok(None);
+        return Ok(CrossBaseVerdict::Unknown(
+            "this host's own /etc/os-release and /usr/lib/os-release are both unreadable",
+        ));
     };
 
     let Some(caps) = scan_target_capabilities_with_retries(target_image, "cross-base identity")
     else {
-        return Ok(None);
+        return Ok(CrossBaseVerdict::Unknown(
+            "the target image could not be scanned (see the registry warning above)",
+        ));
     };
     let Some(target_base) = caps.base else {
-        return Ok(None);
+        return Ok(CrossBaseVerdict::Unknown(
+            "the target image carries no readable os-release identity",
+        ));
     };
     if !scan::is_cross_base(&host_base, &target_base) {
-        return Ok(None);
+        return Ok(CrossBaseVerdict::SameLineage);
     }
 
     let source_passwd =
@@ -82,34 +144,60 @@ pub fn build_cross_base_plan(target_image: &str) -> Result<Option<remap::RemapPl
     let target_group =
         remap::parse_group(&std::fs::read_to_string(&target_group_path).unwrap_or_default());
 
-    Ok(Some(remap::plan_remap(
+    Ok(CrossBaseVerdict::CrossBase(Box::new(remap::plan_remap(
         &source_passwd,
         &source_group,
         &target_passwd,
         &target_group,
-    )))
+    ))))
 }
 
 /// Print the remap report and, unless `accept_cross_base` (or `force`) was
 /// passed, refuse with the blast radius already visible. Returns the plan
-/// so the caller can apply it after staging succeeds — `None` when this
-/// re-base isn't cross-base at all.
+/// so the caller can apply it after staging succeeds — `None` when no remap
+/// is needed.
+///
+/// Refuses in **two** cases, not one:
+///
+/// - the re-base is cross-base and the operator has not accepted it; and
+/// - cross-base status could not be established at all.
+///
+/// The second case used to proceed silently. That inverted the gate's
+/// purpose: the operator got the unguarded path — the same outcome as
+/// passing `--accept-cross-base` — without ever being asked, triggered by
+/// something as ordinary as a proxy, a metered link, or a registry blip.
+/// A gate that cannot see has to say so, not wave things through, so
+/// "unknown" is now refused on the same terms as "cross-base" and takes the
+/// same explicit opt-in. See bootc-migrate#191.
 pub fn gate_cross_base(
     target_image: &str,
     accept_cross_base: bool,
     force: bool,
 ) -> Result<Option<remap::RemapPlan>> {
-    let Some(plan) = build_cross_base_plan(target_image)? else {
-        return Ok(None);
-    };
-    println!("{}", remap::render_report(&plan));
-    if !accept_cross_base && !force {
-        bail!(
-            "Cross-base re-base detected (host and target disagree on ID/ID_LIKE). \
-             Re-run with --accept-cross-base to proceed with the remap above."
-        );
+    let accepted = accept_cross_base || force;
+    let verdict = build_cross_base_plan(target_image)?;
+
+    // Print the blast radius before any refusal, so the operator deciding
+    // whether to pass --accept-cross-base can see what they'd be accepting.
+    if let CrossBaseVerdict::CrossBase(plan) = &verdict {
+        println!("{}", remap::render_report(plan));
     }
-    Ok(Some(plan))
+
+    if let Some(message) = verdict.refusal(accepted) {
+        bail!(message);
+    }
+
+    match verdict {
+        CrossBaseVerdict::CrossBase(plan) => Ok(Some(*plan)),
+        CrossBaseVerdict::Unknown(reason) => {
+            eprintln!(
+                "Warning: proceeding without cross-base checks — {reason}. \
+                 No UID/GID remap or /etc conflict policy will be applied."
+            );
+            Ok(None)
+        }
+        CrossBaseVerdict::SameLineage => Ok(None),
+    }
 }
 
 /// #80: print (read-only, before staging) any system accounts the target
@@ -359,5 +447,59 @@ mod tests {
     fn booted_deployment_root_errors_when_nothing_is_booted() {
         assert!(parse_booted_deployment_root("  bluefin def456.1\n").is_err());
         assert!(parse_booted_deployment_root("* only-one-field\n").is_err());
+    }
+
+    /// bootc-migrate#191. The table is the whole point: "we checked and the
+    /// bases match" and "we could not check" must not decide the same way,
+    /// because only one of them is evidence of safety.
+    #[test]
+    fn refusal_policy_table() {
+        let unknown = CrossBaseVerdict::Unknown("the target image could not be scanned");
+        let same = CrossBaseVerdict::SameLineage;
+        let cross = CrossBaseVerdict::CrossBase(Box::new(remap::plan_remap(
+            &remap::parse_passwd("dbus:x:81:81::/:/sbin/nologin\n"),
+            &remap::parse_group("dbus:x:81:\n"),
+            &remap::parse_passwd("dbus:x:82:82::/:/sbin/nologin\n"),
+            &remap::parse_group("dbus:x:82:\n"),
+        )));
+
+        // Not accepted: only a positive same-lineage finding proceeds.
+        assert!(same.refusal(false).is_none(), "same lineage needs no gate");
+        assert!(
+            unknown.refusal(false).is_some(),
+            "an unknown verdict must refuse — this is the #191 regression"
+        );
+        assert!(cross.refusal(false).is_some(), "cross-base must refuse");
+
+        // Accepted (--accept-cross-base or --force): the operator has opted
+        // in, so every verdict proceeds.
+        for v in [&unknown, &same, &cross] {
+            assert!(
+                v.refusal(true).is_none(),
+                "explicit acceptance must always proceed: {v:?}"
+            );
+        }
+    }
+
+    /// The refusal has to be actionable: name the cause, and say that this is
+    /// not a clean bill of health. A message that reads like "no problems
+    /// found" would recreate the bug at the human layer.
+    #[test]
+    fn unknown_refusal_explains_itself() {
+        let msg = CrossBaseVerdict::Unknown("the target image could not be scanned")
+            .refusal(false)
+            .expect("must refuse");
+        assert!(
+            msg.contains("the target image could not be scanned"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("not the same as having checked"),
+            "must distinguish unknown from clean: {msg}"
+        );
+        assert!(
+            msg.contains("--accept-cross-base"),
+            "must name the escape hatch: {msg}"
+        );
     }
 }
