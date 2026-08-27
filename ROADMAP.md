@@ -32,7 +32,7 @@ deliberately deferred** — each of M2, M3, and M5 shipped a pure/unit-testable
 mutation CI cannot validate; M3 and M5 have since grown their live halves,
 but those run on paths no CI cell reaches (no cross-base E2E cell, no NVRAM
 mutation; the TUI-assertions gap now has headless render/state tests plus
-the exploratory `tui-migrate` cell, gating once proven), so they are
+the `tui-migrate` cell, which is now gating and green), so they are
 landed-but-unproven rather than done. See each milestone below for the specific line and why.
 
 ## Next release gate — first post-rename release
@@ -212,7 +212,9 @@ should not be trusted until it has been run on a real UEFI system.
   the `tui-migrate` E2E cell, which drives the checklist and then a full
   migration through the wizard on a pty inside the VM
   (`tests/tui-e2e-driver.py`; see docs/testing.md "TUI testing"). The
-  cell starts as exploratory (allow_failure) and gates once proven.
+  cell is gating as of 2026-08-27 (run 33050814991, 65 min green on a
+  hosted runner) and publishes an asciicast/GIF/screenshot walkthrough
+  artifact on every run.
 - [#31](https://github.com/tuna-os/bootc-migrate/issues/31) — the
   UEFI boot-entry audit (dead/generic-label/duplicate/firmware-managed
   classification) is done, read-only, exposed as `bootc-rebase boot-entries`.
@@ -277,7 +279,7 @@ graph TD
   M1 --> GAP80["#80 identity-DB merge gap — confirmed, tracked separately"]
   M1 --> M4["M4 NativeStore selection / retire legacy builder — not started"]
   M1 --> M5A["M5 #68 DE stash/restore — detection+wiring landed, cross-DE E2E cell deferred"]
-  M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI unit-tested + tui-migrate E2E cell (exploratory)"]
+  M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI unit-tested + tui-migrate E2E cell gating"]
   M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
 ```
 

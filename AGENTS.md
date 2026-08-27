@@ -53,11 +53,22 @@ Also available via just: `just watch log="e2e-luks.log"`
 
 | Scenario | Base | Target | Filesystem | Disk size |
 |----------|------|--------|------------|-----------|
-| btrfs + composefs | bluefin:stable | dakota:stable | btrfs | 20G |
-| xfs + loopback | bluefin:lts | dakota:stable | xfs+ext4loop | 20G |
+| btrfs + composefs | bluefin:stable | dakota:stable | btrfs | 40G |
+| ext4 + composefs | bluefin:lts | dakota:stable | ext4 | 40G |
 | LUKS + xfs | bluefin:lts | dakota:stable | xfs+crypt | 40G |
-| LVM-on-LUKS + /var | bluefin:lts | dakota:stable | xfs+lvm+crypt | 40G |
+| LVM-on-LUKS + /var | bluefin:lts | dakota:stable | xfs+lvm+crypt | 60G |
+| ostree re-base (`E2E_MODE=ostree-rebase`) | bluefin:stable | dakota:stable | btrfs | 40G |
+| ostree re-base GNOME -> KDE (non-gating) | bluefin:stable | aurora:stable | btrfs | 40G |
 | TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 40G |
+
+Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
+no fs-verity); btrfs and ext4 seal in place. A bug in the loopback path shows
+up as exactly those two cells failing together.
+
+All cells run on GitHub-hosted `ubuntu-latest` (which does provide
+`/dev/kvm`); `E2E_SELF_HOSTED=true` or `E2E_RUNSON_SPEC` switch lanes and
+`KVM_E2E_ENABLED='false'` stands the matrix down. See docs/testing.md
+"KVM runner options".
 
 ## Two-candidate CI races
 
