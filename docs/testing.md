@@ -40,25 +40,36 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
 | bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
-| bluefin LTS → dakota (ostree-rebase, `E2E_CROSS_BASE=1`) | M3's cross-base UID/GID remap + `etc_conflict` pass — the first execution of either (#67/#187) | active, non-gating |
 | bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
 
-### Cross-base cell (`E2E_CROSS_BASE=1`)
+### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
 
 `ostree-rebase` mode takes `E2E_CROSS_BASE=1`, which adds
-`--accept-cross-base` (the route is refused without it) **and** asserts that
+`--accept-cross-base` (the route is refused without it) and asserts that
 `=== Cross-base UID/GID remap report ===` appeared in the output.
 
-That second half is the point. `gate_cross_base` returns `None` and prints
-nothing when `is_cross_base` is false, so without the assertion the cell would
-pass just as happily against a same-family pair — indistinguishable from
-success. #186 records how this class of vacuous pass hid the gap.
+The assertion is the point. `gate_cross_base` returns `None` and prints
+nothing whenever it declines to act, so silence is indistinguishable from
+success and an unasserted cell would pass vacuously.
 
-Bluefin LTS is CentOS Stream 10-based and dakota is Fedora, so the pair
-differs on `ID`/`ID_LIKE`. Note that the *other* `bluefin:lts` cells are
-cross-base by lineage too, but run `composefs-migrate` — the MVP binary, which
-merges via `mergetc` and has no `is_cross_base` gate — so they do not exercise
-this path. Run locally with `just e2e-cross-base`.
+**There is currently no matrix cell using it**, because running it surfaced a
+blocker (#191): inside the E2E guest the target-image *scan* cannot reach
+ghcr.io, so `gate_cross_base` degrades to a no-op with only a warning and
+cross-base detection never runs. `bootc switch` itself pulls fine in the same
+guest, so this is specific to the scan path. Until that is fixed, no cell can
+demonstrate the cross-base code executing, and a permanently-red cell would
+only add noise.
+
+The plumbing stays wired — `just e2e-cross-base` locally, and a `cross_base`
+input on `e2e-single.yml` — so the cell can return as one matrix entry once
+#191 clears. Tracked by #187.
+
+Note also that the intended image pair may not qualify anyway: `is_cross_base`
+is lineage-aware (`scan.rs`), returning false when either side's `ID_LIKE`
+contains the other's `ID`. CentOS declares `ID_LIKE="rhel fedora"`, so
+CentOS → Fedora is same-lineage **by design** — see the existing
+`cross_base_same_family_via_id_like_is_clean` test. That question is still
+open because the scan failure meant `is_cross_base` was never evaluated.
 
 Planned, one per milestone exit (see ROADMAP.md):
 

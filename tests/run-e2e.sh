@@ -894,18 +894,34 @@ REBASEFIX
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
         # The whole point of this cell is that the cross-base code RAN. Without
-        # this assertion the cell would pass just as happily against a
-        # same-family pair, which is precisely how the gap stayed invisible:
-        # gate_cross_base returns None and prints nothing when is_cross_base is
-        # false, so silence is indistinguishable from success.
+        # an assertion the cell would pass just as happily against a
+        # same-family pair, which is how the gap stayed invisible:
+        # gate_cross_base returns None and prints nothing whenever it declines
+        # to act, so silence is indistinguishable from success.
+        #
+        # Silence has FOUR causes, though, and they are not equivalent — report
+        # which one actually happened rather than naming a single guess. An
+        # earlier version of this check asserted "is_cross_base was false"
+        # unconditionally and was wrong: the real cause was an unreachable
+        # registry, which is a different (and more interesting) problem.
         step "=== ostree-rebase: asserting the cross-base path actually executed ==="
-        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
-            echo "FAIL: E2E_CROSS_BASE=1 but no remap report was printed —"
-            echo "      is_cross_base was false, so this pair is NOT cross-base"
-            echo "      and the code under test never ran."
+        if grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
+            echo "OK: cross-base detected; remap report emitted."
+        elif grep -q "could not scan target image for cross-base identity" /tmp/rebase-out.log; then
+            echo "FAIL: the target image could not be scanned, so cross-base"
+            echo "      detection never ran and DEGRADED SILENTLY to a no-op."
+            echo "      This is not a same-family result — is_cross_base was"
+            echo "      never evaluated. See the registry warning above."
+            exit 1
+        else
+            echo "FAIL: E2E_CROSS_BASE=1 and the target scanned cleanly, but no"
+            echo "      remap report was printed — is_cross_base returned false,"
+            echo "      so this image pair is NOT cross-base and the code under"
+            echo "      test never ran. Pick a pair whose ID/ID_LIKE genuinely"
+            echo "      disagree (note that CentOS declares ID_LIKE=...fedora,"
+            echo "      so EL -> Fedora is same-lineage by design)."
             exit 1
         fi
-        echo "OK: cross-base detected; remap report emitted."
     fi
 
     step "=== ostree-rebase: verifying staged deployment ==="

@@ -84,9 +84,9 @@ validation named in that issue's own scope never shipped.
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | the `efibootmgr` path has never executed; no cell mutates NVRAM | #31, #189 |
-| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | never executes in CI (see M3 above) | #67, #187 |
+| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | never executes; currently un-coverable in CI — the guest cannot scan the target, so the gate no-ops (#191) | #67, #187, #191 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | no cell passes `--de-migrate`; stash never created on a real system | #68, #188 |
-| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream ostree/bootc change or compensating logic | #80 |
+| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory also silently no-ops in CI for the same scan failure (#191) | #80, #191 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -170,23 +170,31 @@ are unit-tested (planning, exemptions, sidecar naming, report/JSON, and a
 collect→plan→apply round trip over real trees) and neither has run on a real
 cross-base system.
 
-An earlier version of this paragraph gave the wrong reason — that every cell
-is Fedora-family → Fedora-family. That is false: Bluefin LTS is CentOS Stream
-10-based (docs/filesystem-support.md) and three cells run `bluefin:lts →
-dakota:stable`, so by image lineage those cells *are* cross-base. The code
-still never runs, for two narrower reasons, and the distinction matters
-because it makes the missing coverage much cheaper than "we have no CentOS
-guest" implies:
+Why, precisely — this went through two wrong explanations before the code
+was actually read, so the reasoning is recorded rather than the conclusion
+alone:
 
-- the three `bluefin:lts` cells run `E2E_MODE=composefs-migrate` — the MVP
-  `bootc-migrate` binary, which merges via `mergetc` and has no
-  `is_cross_base` gate at all;
-- the two cells that do run `bootc-rebase` (`ostree-rebase` mode) are both
-  `bluefin:stable` → Fedora targets;
-- and no cell passes `--accept-cross-base`, so a cross-base pair would be
-  refused before reaching the code under test.
+- `is_cross_base` (`scan.rs`) is **lineage-aware**: it returns false when
+  either side's `ID_LIKE` contains the other's `ID`. CentOS declares
+  `ID_LIKE="rhel fedora"`, so a CentOS → Fedora re-base is same-lineage *by
+  design* — see the `cross_base_same_family_via_id_like_is_clean` test. So
+  "every cell is Fedora-family → Fedora-family" is substantively right, and
+  Bluefin LTS being CentOS Stream 10-based does not by itself make a cell
+  cross-base. (An earlier revision of this file claimed otherwise; that was
+  wrong.)
+- Separately, the three `bluefin:lts` cells run
+  `E2E_MODE=composefs-migrate` — the MVP binary, which merges via `mergetc`
+  and has no `is_cross_base` gate at all — and no cell passes
+  `--accept-cross-base`.
+- And when a cell was actually built to exercise this (#187), it uncovered a
+  third blocker that outranks both: inside the E2E guest the target-image
+  scan cannot reach ghcr.io, so `gate_cross_base` degrades to a no-op with
+  only a warning and `is_cross_base` is never evaluated at all (#191).
 
-The harness already installs a CentOS-family guest. Tracked as #187.
+So the honest status is that the cross-base path is not merely uncovered but
+currently **un-coverable in CI**, and the first question is #191, not the
+cell. Whether any available image pair even qualifies as cross-base under the
+`ID_LIKE` rule is still open. Tracked as #187.
 
 Related: [#80](https://github.com/tuna-os/bootc-migrate/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)

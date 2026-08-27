@@ -121,44 +121,6 @@ jobs:
             mode: ostree-rebase
             disk_size: 40G
             allow_failure: true
-          - name: bluefin LTS -> dakota cross-base re-base (CentOS -> Fedora)
-            # M3 (#67) shipped the cross-base UID/GID remap planner and the
-            # etc_conflict post-merge reconciliation pass, and #67 was closed
-            # as completed — but the E2E cell named in its own scope was never
-            # added, so neither had ever executed anywhere (#186, #187).
-            #
-            # Bluefin LTS is CentOS Stream 10-based (docs/filesystem-support.md)
-            # and dakota is Fedora, so this pair genuinely differs on
-            # ID/ID_LIKE and is_cross_base is true. The other bluefin:lts cells
-            # do not exercise it: they run composefs-migrate, i.e. the MVP
-            # binary, which merges via mergetc and has no is_cross_base gate.
-            #
-            # E2E_CROSS_BASE=1 adds --accept-cross-base (the route is refused
-            # without it) AND asserts the remap report was printed — without
-            # that assertion the cell would pass identically on a same-family
-            # pair, which is how this gap stayed invisible.
-            base: ghcr.io/projectbluefin/bluefin:lts
-            target: ghcr.io/projectbluefin/dakota:stable
-            mode: ostree-rebase
-            cross_base: true
-            # MUST be set explicitly, and must not be btrfs. The matrix
-            # default is btrfs, which suits the Fedora-based bluefin:stable
-            # cells; LTS is CentOS Stream 10 and ships XFS
-            # (docs/filesystem-support.md), and its initramfs cannot find a
-            # btrfs root — the first run of this cell inherited the default
-            # and died in GRUB with "no such device: <root-uuid>" before the
-            # guest ever booted, so the cross-base code never ran.
-            #
-            # ext4 matches the sibling LTS composefs cell (which passes) and
-            # keeps the XFS ext4-loopback store out of a cell whose subject is
-            # cross-base identity handling, not storage.
-            filesystem: ext4
-            disk_size: 40G
-            # Exploratory on its first outing, following the aurora cell's
-            # precedent: this is the first execution of two unproven
-            # subsystems, and a first run that fails is information rather
-            # than a regression. Graduate once it has a track record.
-            allow_failure: true
           - name: bluefin -> dakota (TUI-driven migration)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
