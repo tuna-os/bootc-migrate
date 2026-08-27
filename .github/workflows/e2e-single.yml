@@ -33,22 +33,61 @@ on:
         required: false
         default: composefs-migrate
         type: choice
-        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase]
+        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate]
+      runner:
+        description: >-
+          Runner override for THIS dispatch only (e.g. ubuntu-latest).
+          Setting it also bypasses the KVM_E2E_ENABLED gate — GitHub-hosted
+          Linux runners have exposed /dev/kvm since early 2024, so
+          ubuntu-latest is worth probing even though the matrix historically
+          assumed it was TCG-only. Leave empty for the normal runner
+          selection (self-hosted "kvm" / E2E_RUNSON_SPEC).
+        required: false
+        default: ""
 
-# Dispatch-only debug workflow — same QEMU/KVM requirement as e2e-tests.yml:
-# gated on the kanpur "kvm" self-hosted runner via KVM_E2E_ENABLED.
+# Dispatch-only debug workflow — same QEMU/KVM requirement and runner
+# selection as e2e-tests.yml: gated via KVM_E2E_ENABLED, targeting either
+# the "kvm"-labelled self-hosted runner or RunsOn-on-AWS nested-virt
+# runners when E2E_RUNSON_SPEC is set (see e2e-tests.yml's job comment and
+# docs/testing.md "KVM runner options"). An explicit `runner` input
+# overrides both and lifts the gate for that one dispatch.
 jobs:
   e2e:
-    if: ${{ vars.KVM_E2E_ENABLED == 'true' }}
+    if: ${{ vars.KVM_E2E_ENABLED == 'true' || inputs.runner != '' }}
     name: "${{ inputs.base }} -> ${{ inputs.target }} (${{ inputs.filesystem }}, ${{ inputs.mode }})"
-    runs-on: [self-hosted, kvm]
-    timeout-minutes: 45
+    runs-on: >-
+      ${{ inputs.runner != '' && inputs.runner ||
+          (vars.E2E_RUNSON_SPEC != '' &&
+          format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
+          fromJSON('["self-hosted", "kvm"]')) }}
+    # Probe dispatches on unfamiliar runners get more headroom: the first
+    # ubuntu-latest probe (2026-08-27) proved /dev/kvm IS present there,
+    # but hit pathologically slow podman-build layer commits (25 min for
+    # a trivial RUN) and timed out before QEMU ever started.
+    timeout-minutes: ${{ inputs.runner != '' && fromJSON('90') || fromJSON('45') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+
+      # Only on probe dispatches (runner override set): surface the I/O
+      # facts that decide whether a hosted runner is viable — podman's
+      # storage driver (a vfs fallback copies the whole ~10 GB base image
+      # on every layer commit) and raw disk write throughput (Azure burst
+      # credit exhaustion shows up here). Pure diagnosis, no mutation.
+      - name: Runner I/O diagnostics (probe only)
+        if: ${{ inputs.runner != '' }}
+        run: |
+          echo "=== podman storage driver ==="
+          sudo podman info --format '{{.Store.GraphDriverName}} rootless={{.Host.Security.Rootless}}' || true
+          sudo podman info | grep -iA3 'graphDriverName\|graphRoot' || true
+          echo "=== filesystems ==="
+          df -hT / /var/lib/containers 2>/dev/null || df -hT /
+          echo "=== raw write throughput (1 GiB) ==="
+          sudo dd if=/dev/zero of=/var/lib/containers/ddtest bs=1M count=1024 conv=fdatasync 2>&1 | tail -1
+          sudo rm -f /var/lib/containers/ddtest
 
       - name: Install system dependencies
         run: |
@@ -61,6 +100,8 @@ jobs:
         run: |
           if [ -e /dev/kvm ]; then
             sudo chmod 666 /dev/kvm
+            echo "KVM acceleration available:"
+            ls -la /dev/kvm
           else
             echo "::warning::/dev/kvm not present; TCG fallback will be slow"
           fi

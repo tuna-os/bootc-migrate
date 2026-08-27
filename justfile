@@ -61,6 +61,16 @@ e2e-luks: build test
       FILESYSTEM="xfs+crypt" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-luks.log
 
+# Bluefin → Dakota, driven through the TUI wizard + drift checklist
+# (E2E_MODE=tui-migrate; see tests/tui-e2e-driver.py).
+e2e-tui: build test
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      BASE_IMAGE="ghcr.io/projectbluefin/bluefin:stable" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      DISK_SIZE="40G" \
+      E2E_MODE="tui-migrate" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-tui.log
+
 # Bluefin LTS → Dakota (LVM-on-LUKS, separate /var LV + loopback).
 e2e-lvm: build test
     sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \

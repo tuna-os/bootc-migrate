@@ -8,11 +8,15 @@
 //! [`EtcDriftManifest`] that Phase 4's `/etc` merge honors per path (see
 //! `bootc_migrate_core::mergetc::merge_etc_files_with_overrides`).
 //!
-//! This module intentionally has no unit tests: driving a real terminal
-//! event loop isn't something a compile+unit-test loop can prove, the same
-//! policy this project already applies to its other interactive-only work
-//! (see ROADMAP.md's decision log entries for #65/#31/#15, and AGENTS.md's
-//! "Interactive testing with Corral VMs" for how to validate it by hand).
+//! The terminal event loop itself carries no unit tests — driving a real
+//! terminal isn't something a compile+unit-test loop can prove, the same
+//! policy this project applies to its other interactive-only work (see
+//! ROADMAP.md's decision log for #65/#31/#15). The [`ReviewState`] state
+//! machine and the `render` function underneath it are pure and *are*
+//! tested (keys via `handle_key`, frames via ratatui's `TestBackend`),
+//! matching `bootc-rebase`'s boot-entry checklist; the raw-terminal loop
+//! is exercised live by the tui-migrate E2E cell (tests/tui-e2e-driver.py)
+//! and by hand on Corral VMs (AGENTS.md).
 
 use anyhow::{Context, Result};
 use bootc_migrate_core::mergetc::{DriftKind, EtcDriftEntry, EtcDriftManifest};
@@ -278,4 +282,108 @@ fn event_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn entries() -> Vec<EtcDriftEntry> {
+        vec![
+            EtcDriftEntry {
+                path: "hostname".into(),
+                kind: DriftKind::Modified,
+            },
+            EtcDriftEntry {
+                path: "sudoers.d/90-realuser".into(),
+                kind: DriftKind::Added,
+            },
+            EtcDriftEntry {
+                path: "motd".into(),
+                kind: DriftKind::Removed,
+            },
+        ]
+    }
+
+    #[test]
+    fn defaults_match_todays_merge_behavior() {
+        // Every entry pre-checked "keep current" so a review nobody touches
+        // is a no-op relative to not reviewing at all (#15).
+        let state = ReviewState::new(entries());
+        assert!(state.checked.iter().all(|c| *c));
+        assert_eq!(state.list_state.selected(), Some(0));
+        let manifest = state.manifest();
+        assert_eq!(manifest.decisions.len(), 3);
+        assert!(manifest.decisions.values().all(|keep| *keep));
+    }
+
+    #[test]
+    fn cursor_wraps_both_directions() {
+        let mut state = ReviewState::new(entries());
+        state.handle_key(KeyCode::Up);
+        assert_eq!(state.list_state.selected(), Some(2));
+        state.handle_key(KeyCode::Down);
+        state.handle_key(KeyCode::Char('j'));
+        assert_eq!(state.list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn toggle_and_bulk_select_feed_the_manifest() {
+        let mut state = ReviewState::new(entries());
+        state.handle_key(KeyCode::Down);
+        state.handle_key(KeyCode::Char(' '));
+        let manifest = state.manifest();
+        assert!(manifest.decisions["hostname"]);
+        assert!(!manifest.decisions["sudoers.d/90-realuser"]);
+        state.handle_key(KeyCode::Char('n'));
+        assert!(state.manifest().decisions.values().all(|keep| !keep));
+        state.handle_key(KeyCode::Char('a'));
+        assert!(state.manifest().decisions.values().all(|keep| *keep));
+    }
+
+    #[test]
+    fn enter_confirms_and_esc_cancels() {
+        let mut state = ReviewState::new(entries());
+        assert!(!state.handle_key(KeyCode::Char(' ')));
+        assert!(state.handle_key(KeyCode::Enter));
+        assert!(!state.cancelled);
+
+        let mut state = ReviewState::new(entries());
+        assert!(state.handle_key(KeyCode::Esc));
+        assert!(state.cancelled);
+    }
+
+    #[test]
+    fn empty_drift_state_handles_keys_without_panicking() {
+        let mut state = ReviewState::new(Vec::new());
+        state.handle_key(KeyCode::Down);
+        state.handle_key(KeyCode::Char(' '));
+        assert_eq!(state.list_state.selected(), None);
+        assert!(state.manifest().decisions.is_empty());
+    }
+
+    #[test]
+    fn render_shows_paths_kinds_and_checkboxes() {
+        let mut state = ReviewState::new(entries());
+        state.handle_key(KeyCode::Char(' ')); // uncheck "hostname"
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|f| render(f, &mut state)).expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Config Drift Review"), "title:\n{text}");
+        assert!(text.contains("(3 change(s))"), "count:\n{text}");
+        assert!(text.contains("/etc/hostname"), "path:\n{text}");
+        assert!(text.contains("[Modified]"), "kind:\n{text}");
+        assert!(text.contains("☐"), "unchecked box:\n{text}");
+        assert!(text.contains("☑"), "checked box:\n{text}");
+        assert!(text.contains("[Enter]"), "hints:\n{text}");
+    }
 }

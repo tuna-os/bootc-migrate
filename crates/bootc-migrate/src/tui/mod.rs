@@ -1158,3 +1158,357 @@ fn event_loop(
     }
     Ok(())
 }
+
+// The tests drive the same `App` state machine and `render` function the
+// live event loop uses, with keys fed to `handle_key` directly and frames
+// drawn into a `TestBackend` buffer. Only the raw-terminal plumbing in
+// `run_tui`/`event_loop` (raw mode, alternate screen, crossterm polling)
+// is outside their reach — that is what the tui-migrate E2E cell drives
+// on a real VM (tests/tui-e2e-driver.py).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// Render `app` once into a fresh TestBackend and return the buffer as
+    /// one newline-joined string for content assertions.
+    fn draw_to_text(app: &mut App) -> String {
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|f| render(f, app)).expect("draw");
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// A fresh App without running detect/preflight side effects beyond
+    /// `App::new`'s os-release read (harmless on any host).
+    fn app_on(screen: Screen) -> App {
+        let mut app = App::new();
+        app.screen = screen;
+        app
+    }
+
+    #[test]
+    fn log_line_classification() {
+        type KindPred = fn(&LogKind) -> bool;
+        let cases: &[(&str, KindPred)] = &[
+            ("=== Phase 3: Seal ===", |k| matches!(k, LogKind::Header)),
+            ("[phase2] pulling layer", |k| matches!(k, LogKind::Phase)),
+            ("something failed badly", |k| matches!(k, LogKind::Error)),
+            ("ERROR: no space", |k| matches!(k, LogKind::Error)),
+            ("✓ store sealed", |k| matches!(k, LogKind::Success)),
+            ("plain progress line", |k| matches!(k, LogKind::Normal)),
+        ];
+        for (raw, pred) in cases {
+            let line = LogLine::classify(raw);
+            assert!(pred(&line.kind), "unexpected kind for {raw:?}");
+        }
+    }
+
+    #[test]
+    fn phases_follow_migration_log_lines() {
+        let mut app = app_on(Screen::Running);
+        app.update_phases_from_line("=== Phase 0: Preflight ===");
+        assert_eq!(app.phases[0].status, PhaseStatus::Running);
+        app.update_phases_from_line("=== Phase 1: OSTree import ===");
+        assert_eq!(app.phases[0].status, PhaseStatus::Done);
+        assert_eq!(app.phases[1].status, PhaseStatus::Running);
+        app.update_phases_from_line("[phase2] GET blob");
+        assert_eq!(app.phases[1].status, PhaseStatus::Done);
+        assert_eq!(app.phases[2].status, PhaseStatus::Running);
+        app.update_phases_from_line("=== MIGRATION COMPLETED ===");
+        assert!(app.phases.iter().all(|p| p.status == PhaseStatus::Done));
+    }
+
+    #[test]
+    fn skipped_import_phase_is_marked_skipped() {
+        let mut app = app_on(Screen::Running);
+        app.update_phases_from_line("=== Phase 1: Skipped (--skip-import) ===");
+        assert_eq!(app.phases[0].status, PhaseStatus::Done);
+        assert_eq!(app.phases[1].status, PhaseStatus::Skipped);
+    }
+
+    #[test]
+    fn command_args_reflect_configured_options() {
+        let mut app = App::new();
+        // Defaults: first preset, dry-run on, systemd-boot.
+        let args = app.build_command_args();
+        assert!(args.contains(&"--target-image".to_string()));
+        assert!(args.contains(&PRESET_IMAGES[0].1.to_string()));
+        assert!(args.contains(&"--dry-run".to_string()));
+        assert!(args.contains(&"systemd-boot".to_string()));
+        assert!(!args.contains(&"--force".to_string()));
+
+        app.opt_dry_run = false;
+        app.opt_skip_import = true;
+        app.opt_force = true;
+        app.opt_skip_preflight = true;
+        app.opt_bootloader = Bootloader::Grub2;
+        let args = app.build_command_args();
+        assert!(!args.contains(&"--dry-run".to_string()));
+        assert!(args.contains(&"--skip-import".to_string()));
+        assert!(args.contains(&"--force".to_string()));
+        assert!(args.contains(&"--skip-preflight".to_string()));
+        assert!(args.contains(&"grub2".to_string()));
+    }
+
+    #[test]
+    fn custom_image_entry_via_keys() {
+        let mut app = app_on(Screen::SelectImage);
+        // Move to the last row ("Custom…").
+        for _ in 0..PRESET_IMAGES.len() {
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert!(app.is_custom_selected());
+        // Enter with an empty custom image starts editing instead of advancing.
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.custom_image_editing);
+        assert_eq!(app.screen, Screen::SelectImage);
+        for c in "quay.io/x/y:z".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Char('z'), KeyModifiers::NONE);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE); // stop editing
+        assert!(!app.custom_image_editing);
+        assert_eq!(app.selected_image(), "quay.io/x/y:z");
+        // Second Enter advances to the options screen.
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::ConfigureOptions);
+    }
+
+    #[test]
+    fn select_image_cursor_stays_in_bounds() {
+        let mut app = app_on(Screen::SelectImage);
+        app.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.image_list_state.selected(), Some(0));
+        for _ in 0..(PRESET_IMAGES.len() * 2) {
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert_eq!(
+            app.image_list_state.selected(),
+            Some(PRESET_IMAGES.len() - 1)
+        );
+    }
+
+    #[test]
+    fn option_toggles_and_bootloader_arrows() {
+        let mut app = app_on(Screen::ConfigureOptions);
+        assert!(app.opt_dry_run);
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(!app.opt_dry_run);
+        // Move to the bootloader row (index 2) and pick GRUB2 with →.
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.opt_bootloader, Bootloader::Grub2);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.opt_bootloader, Bootloader::SystemdBoot);
+        // 'n' advances to the review screen.
+        app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        // 'b' goes back.
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::ConfigureOptions);
+    }
+
+    #[test]
+    fn quit_dialog_flow() {
+        let mut app = app_on(Screen::SelectImage);
+        assert!(!app.show_quit_dialog);
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.show_quit_dialog);
+        // "Keep going" (right) + Enter closes the dialog without quitting.
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        let quit = app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!quit);
+        assert!(!app.show_quit_dialog);
+        // 'q' reopens; "Quit" (left) + Enter signals exit.
+        app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.show_quit_dialog);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        let quit = app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(quit);
+    }
+
+    #[test]
+    fn migration_channel_success_marks_phases_done() {
+        let mut app = app_on(Screen::Running);
+        let (tx, rx) = mpsc::channel::<MigMsg>();
+        app.rx = Some(rx);
+        tx.send(MigMsg::Line("=== Phase 0: Preflight ===".into()))
+            .unwrap();
+        tx.send(MigMsg::Line("=== MIGRATION COMPLETED ===".into()))
+            .unwrap();
+        tx.send(MigMsg::Done(true)).unwrap();
+        app.drain_migration_channel();
+        assert!(app.migration_done);
+        assert!(app.migration_success);
+        assert!(app.phases.iter().all(|p| p.status == PhaseStatus::Done));
+        assert_eq!(app.log_lines.len(), 2);
+        // Enter now advances to the Complete screen.
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Complete);
+    }
+
+    #[test]
+    fn migration_channel_failure_marks_running_phase_failed() {
+        let mut app = app_on(Screen::Running);
+        let (tx, rx) = mpsc::channel::<MigMsg>();
+        app.rx = Some(rx);
+        tx.send(MigMsg::Line("=== Phase 0: Preflight ===".into()))
+            .unwrap();
+        tx.send(MigMsg::Line("ERROR: preflight refused".into()))
+            .unwrap();
+        tx.send(MigMsg::Done(false)).unwrap();
+        app.drain_migration_channel();
+        assert!(app.migration_done);
+        assert!(!app.migration_success);
+        assert_eq!(app.phases[0].status, PhaseStatus::Failed);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Failed);
+    }
+
+    #[test]
+    fn running_screen_scrolls_log() {
+        let mut app = app_on(Screen::Running);
+        for i in 0..30 {
+            app.log_lines.push(LogLine::classify(&format!("line {i}")));
+        }
+        app.log_scroll = 29;
+        app.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.log_scroll, 28);
+        app.handle_key(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(app.log_scroll, 18);
+        app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(app.log_scroll, 28);
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.log_scroll, 29);
+        // Enter while the migration is still running must not leave Running.
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Running);
+    }
+
+    #[test]
+    fn back_navigation_mapping() {
+        let mut app = app_on(Screen::Review);
+        app.prev_screen();
+        assert_eq!(app.screen, Screen::ConfigureOptions);
+        app.prev_screen();
+        assert_eq!(app.screen, Screen::SelectImage);
+        app.prev_screen();
+        assert_eq!(app.screen, Screen::Preflight);
+        app.prev_screen();
+        assert_eq!(app.screen, Screen::Welcome);
+        app.prev_screen();
+        assert_eq!(app.screen, Screen::Welcome);
+    }
+
+    #[test]
+    fn end_screens_exit_on_q_or_enter() {
+        for screen in [Screen::Complete, Screen::Failed] {
+            let mut app = app_on(screen);
+            assert!(app.handle_key(KeyCode::Char('q'), KeyModifiers::NONE));
+        }
+    }
+
+    // ── Render assertions ────────────────────────────────────────────────
+
+    #[test]
+    fn welcome_screen_renders_branding_and_hints() {
+        let mut app = App::new();
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("bootc-migrate"), "missing title:\n{text}");
+        assert!(text.contains("Step 1 of 5"), "missing step:\n{text}");
+        assert!(text.contains("[Enter]"), "missing hint:\n{text}");
+    }
+
+    #[test]
+    fn select_image_screen_lists_presets() {
+        let mut app = app_on(Screen::SelectImage);
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("Step 3 of 5"), "missing step:\n{text}");
+        assert!(
+            text.contains("Dakota stable (default)"),
+            "missing preset:\n{text}"
+        );
+        assert!(text.contains("Custom"), "missing custom row:\n{text}");
+    }
+
+    #[test]
+    fn options_screen_shows_dry_run_tag_in_title() {
+        let mut app = app_on(Screen::ConfigureOptions);
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("DRY-RUN"), "missing dry-run tag:\n{text}");
+        app.opt_dry_run = false;
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("LIVE MIGRATION"), "missing live tag:\n{text}");
+    }
+
+    #[test]
+    fn review_screen_shows_the_exact_command() {
+        let mut app = app_on(Screen::Review);
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("--target-image"), "missing command:\n{text}");
+        assert!(text.contains("--dry-run"), "missing dry-run flag:\n{text}");
+    }
+
+    #[test]
+    fn running_screen_renders_phases_and_log() {
+        let mut app = app_on(Screen::Running);
+        app.update_phases_from_line("=== Phase 0: Preflight ===");
+        app.log_lines
+            .push(LogLine::classify("=== Phase 0: Preflight ==="));
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("Preflight"), "missing phase:\n{text}");
+        assert!(
+            text.contains("Migration running"),
+            "missing running title:\n{text}"
+        );
+    }
+
+    #[test]
+    fn end_screens_render_their_verdicts() {
+        let mut app = app_on(Screen::Complete);
+        let text = draw_to_text(&mut app);
+        assert!(
+            text.contains("Migration complete"),
+            "missing complete title:\n{text}"
+        );
+        let mut app = app_on(Screen::Failed);
+        let text = draw_to_text(&mut app);
+        assert!(
+            text.contains("Migration failed"),
+            "missing failed title:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quit_dialog_overlays_current_screen() {
+        let mut app = app_on(Screen::SelectImage);
+        app.show_quit_dialog = true;
+        let text = draw_to_text(&mut app);
+        assert!(
+            text.contains("Are you sure you want to quit?"),
+            "missing dialog:\n{text}"
+        );
+        assert!(text.contains("Keep going"), "missing button:\n{text}");
+    }
+
+    #[test]
+    fn preflight_screen_renders_without_report() {
+        // preflight_state None (e.g. run as non-root) must still render.
+        let mut app = app_on(Screen::Preflight);
+        app.preflight_state = None;
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("Step 2 of 5"), "missing step:\n{text}");
+    }
+}
