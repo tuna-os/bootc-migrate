@@ -39,15 +39,47 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
-| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active (gating since run 33050814991, 65 min green) |
+| bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
+| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
+
+### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
+
+`ostree-rebase` mode takes `E2E_CROSS_BASE=1`, which adds
+`--accept-cross-base` (the route is refused without it) and asserts that
+`=== Cross-base UID/GID remap report ===` appeared in the output.
+
+The assertion is the point. `gate_cross_base` returns `None` and prints
+nothing whenever it declines to act, so silence is indistinguishable from
+success and an unasserted cell would pass vacuously.
+
+**There is currently no matrix cell using it**, because running it surfaced a
+blocker (#191): inside the E2E guest the target-image *scan* cannot reach
+ghcr.io, so `gate_cross_base` degrades to a no-op with only a warning and
+cross-base detection never runs. `bootc switch` itself pulls fine in the same
+guest, so this is specific to the scan path. Until that is fixed, no cell can
+demonstrate the cross-base code executing, and a permanently-red cell would
+only add noise.
+
+The plumbing stays wired — `just e2e-cross-base` locally, and a `cross_base`
+input on `e2e-single.yml` — so the cell can return as one matrix entry once
+#191 clears. Tracked by #187.
+
+Note also that the intended image pair may not qualify anyway: `is_cross_base`
+is lineage-aware (`scan.rs`), returning false when either side's `ID_LIKE`
+contains the other's `ID`. CentOS declares `ID_LIKE="rhel fedora"`, so
+CentOS → Fedora is same-lineage **by design** — see the existing
+`cross_base_same_family_via_id_like_is_clean` test. That question is still
+open because the scan failure meant `is_cross_base` was never evaluated.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
 - **M1**: dakota → dakota:other-tag (`ImageSwap`, `E2E_MODE=image-swap`)
 - **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
   kernel update asserting ESP resync; `--undo` restores GRUB
-- **M3**: fedora-family → centos-family with populated /var (ownership,
-  remap report, `.rebase-old` sidecars)
+- **M3**: the cross-base cell above covers centos-family → fedora-family.
+  The exit criterion names the *other* direction (fedora → centos), which
+  needs a CentOS-family target image the harness does not currently install;
+  decide explicitly whether direction matters (#187)
 - **M4**: a migration where **no** legacy-CLI bootc exists (NativeStore
   writer); kernel-version gate ≥6.12 for file-backed EROFS mounts
 - **M0**: rollback cell — migrate, boot, `rollback`, assert the OSTree

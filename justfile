@@ -81,6 +81,19 @@ e2e-lvm: build test
       ./tests/run-e2e.sh 2>&1 | tee e2e-lvm.log
 
 # Run E2E with composefs boot log_level=debug
+# Cross-base ostree re-base (CentOS-based LTS -> Fedora dakota), exercising
+# M3's UID/GID remap + etc_conflict pass. Asserts the cross-base path ran.
+e2e-cross-base: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="ext4" \
+      E2E_MODE="ostree-rebase" \
+      E2E_CROSS_BASE="1" \
+      ./tests/run-e2e.sh
+
 e2e-debug: build
     @echo "=== Running E2E with composefs systemd debug logging ==="
     sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
@@ -136,7 +149,7 @@ clippy:
 
 # Check dependency licenses and sources with cargo-deny.
 deny:
-    cargo deny check bans sources licenses
+    cargo deny check advisories bans sources licenses
 
 # Run all linters (shellcheck, rustfmt, clippy). Retained as an alias for `check`.
 lint: lint-shell lint-rust

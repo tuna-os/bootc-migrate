@@ -96,10 +96,11 @@ On **Bluefin LTS** (XFS) or systems with **LVM / LUKS / a dedicated `/var`
 partition**, the tool handles those automatically — see
 [docs/filesystem-support.md](docs/filesystem-support.md).
 
-> **Status: CI-validated, released, and proven on real hardware.** Four E2E
-> scenarios — btrfs, ext4, LUKS+XFS, and LVM-on-LUKS with a dedicated `/var` —
-> run in CI on every push to `main` (migration, commit, deep-clean, and
-> `bootc status` / `upgrade --check` all green). Prebuilt binaries are on the
+> **Status: CI-validated, released, and proven on real hardware.** Seven E2E
+> scenarios — btrfs, ext4, LUKS+XFS, LVM-on-LUKS with a dedicated `/var`, two
+> ostree re-bases, and a TUI-driven migration — run in CI on every push to
+> `main` (migration, commit, deep-clean, and `bootc status` /
+> `upgrade --check` all green). Prebuilt binaries are on the
 > [Releases](https://github.com/tuna-os/bootc-migrate/releases) page. Don't point this at a machine you can't
 > reinstall, but the core path is stable.
 
@@ -475,8 +476,23 @@ sudo ./tests/run-e2e.sh
 ```
 
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
-`FILESYSTEM`, `SKIP_SETUP`. The CI matrix runs four scenarios: btrfs (default), XFS+ext4-loopback, LUKS+XFS+crypt,
-and LVM-on-LUKS with a dedicated `/var`.
+`FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
+
+The CI matrix runs seven cells (see `.github/workflows/e2e-tests.yml`, which
+is authoritative):
+
+| Cell | Base → target | Filesystem | Disk |
+|---|---|---|---|
+| composefs migration | bluefin:stable → dakota:stable | btrfs | 40G |
+| composefs migration | bluefin:lts → dakota:stable | ext4 | 40G |
+| composefs migration | bluefin:lts → dakota:stable | xfs+crypt | 40G |
+| composefs migration | bluefin:lts → dakota:stable | xfs+lvm+crypt | 60G |
+| ostree re-base | bluefin:stable → dakota:stable | btrfs | 40G |
+| ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
+| TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
+
+Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
+no fs-verity); btrfs and ext4 seal in place.
 
 ## Layout
 
@@ -490,7 +506,7 @@ A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md) for why):
   (`de_migrate`), types.
 - `crates/bootc-migrate` — **the protected MVP binary** described
   above. CLI surface (clap), `commit`/`undo`/`rollback` subcommands, the TUI
-  wizard. Its four E2E cells are untouchable regression gates — this binary's
+  wizard. Its E2E cells are untouchable regression gates — this binary's
   behavior doesn't change as new capability lands in `bootc-rebase`.
 - `crates/bootc-rebase` — the universal re-base engine binary; see below.
 - `tests/run-e2e.sh` — QEMU E2E harness exercising both binaries.
