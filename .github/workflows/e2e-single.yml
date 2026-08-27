@@ -34,20 +34,32 @@ on:
         default: composefs-migrate
         type: choice
         options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate]
+      runner:
+        description: >-
+          Runner override for THIS dispatch only (e.g. ubuntu-latest).
+          Setting it also bypasses the KVM_E2E_ENABLED gate — GitHub-hosted
+          Linux runners have exposed /dev/kvm since early 2024, so
+          ubuntu-latest is worth probing even though the matrix historically
+          assumed it was TCG-only. Leave empty for the normal runner
+          selection (self-hosted "kvm" / E2E_RUNSON_SPEC).
+        required: false
+        default: ""
 
 # Dispatch-only debug workflow — same QEMU/KVM requirement and runner
 # selection as e2e-tests.yml: gated via KVM_E2E_ENABLED, targeting either
 # the "kvm"-labelled self-hosted runner or RunsOn-on-AWS nested-virt
 # runners when E2E_RUNSON_SPEC is set (see e2e-tests.yml's job comment and
-# docs/testing.md "KVM runner options").
+# docs/testing.md "KVM runner options"). An explicit `runner` input
+# overrides both and lifts the gate for that one dispatch.
 jobs:
   e2e:
-    if: ${{ vars.KVM_E2E_ENABLED == 'true' }}
+    if: ${{ vars.KVM_E2E_ENABLED == 'true' || inputs.runner != '' }}
     name: "${{ inputs.base }} -> ${{ inputs.target }} (${{ inputs.filesystem }}, ${{ inputs.mode }})"
     runs-on: >-
-      ${{ vars.E2E_RUNSON_SPEC != '' &&
+      ${{ inputs.runner != '' && inputs.runner ||
+          (vars.E2E_RUNSON_SPEC != '' &&
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
-          fromJSON('["self-hosted", "kvm"]') }}
+          fromJSON('["self-hosted", "kvm"]')) }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -67,6 +79,8 @@ jobs:
         run: |
           if [ -e /dev/kvm ]; then
             sudo chmod 666 /dev/kvm
+            echo "KVM acceleration available:"
+            ls -la /dev/kvm
           else
             echo "::warning::/dev/kvm not present; TCG fallback will be slow"
           fi
