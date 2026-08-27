@@ -523,25 +523,62 @@ def set_checkbox(driver: TuiDriver, row_label: str, checked: bool) -> None:
         " ", f"set {row_label} to {box}")
 
 
+# Wizard screens in flow order, with the token that identifies each on a
+# settled frame and the key that moves the wizard forward from it.
+# current_wizard_screen() checks the FURTHEST-ALONG token first: stale
+# grid content can only come from screens already visited, and a token
+# from a screen not yet reached cannot be stale — so the deepest match
+# is the truth. That, plus steering backward with 'b' when a stalled
+# guest processes a queued duplicate key late and overshoots, makes
+# navigation self-correcting against every delayed-delivery hazard
+# (observed: the TUI's event loop can stall ~20s under guest load, so a
+# timeout-based retry cannot distinguish a dropped key from a queued
+# one — only overshoot detection + backtracking can).
+WIZARD_SCREENS = [
+    ("Step 1 of 5", ENTER),          # Welcome
+    ("System Preflight", ENTER),      # Preflight (entry ran the scan already)
+    ("Select Target Image", ENTER),   # Select image (Enter advances when
+                                      # the editor is closed & image set)
+    ("Configure Options", "n"),       # Options
+    ("Review & Run", None),           # Review (terminal for navigation)
+]
+
+
+def current_wizard_screen(driver: TuiDriver):
+    for idx in range(len(WIZARD_SCREENS) - 1, -1, -1):
+        if driver.row_containing(WIZARD_SCREENS[idx][0]):
+            return idx
+    return None
+
+
+def goto_screen(driver: TuiDriver, target: int, attempts: int = 12) -> None:
+    label = f"goto {WIZARD_SCREENS[target][0]!r}"
+    for _ in range(attempts):
+        cur = driver.synced_check(lambda: current_wizard_screen(driver))
+        if cur == target:
+            driver.snapshot(label)
+            return
+        if cur is None:
+            driver.fail(f"no wizard screen recognized ({label})")
+        if cur < target:
+            driver.send(WIZARD_SCREENS[cur][1], f"{label}: forward")
+        else:
+            driver.send("b", f"{label}: back")
+    driver.fail(f"never reached screen ({label})")
+
+
 def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> None:
     """Welcome → Preflight → SelectImage (custom target) → Options →
-    Review, with every transition and toggle verified against the
-    reconstructed screen (see TuiDriver.advance / ensure_state)."""
+    Review, with every step verified against the reconstructed screen
+    and self-corrected on overshoot (see goto_screen / ensure_state)."""
     driver.expect("Step 1 of 5", 30, "welcome screen")
-    # Preflight gathers real system data (repo size scan) synchronously
-    # before its screen appears, so this transition gets a long per-press
-    # wait — a re-press during the scan would queue and skip a screen.
-    driver.advance(ENTER, "Step 1 of 5", "System Preflight",
-                   "welcome -> preflight", per_wait=60)
-    driver.snapshot("preflight screen")
-    driver.advance(ENTER, "System Preflight", "Select Target Image",
-                   "preflight -> select image")
+    goto_screen(driver, 2)  # through preflight to the select screen
 
-    # Step the ▶ marker down to the "Custom…" row (self-healing against
-    # dropped keys), open the editor — the █ block cursor in the input
+    # Step the ▶ marker down to the "Custom…" row (extra j's clamp at
+    # the last row), open the editor — the █ block cursor in the input
     # box is the proof it is really open, without which the typed image
-    # would be interpreted as hotkeys — type the target, and confirm the
-    # text landed before closing.
+    # would be interpreted as hotkeys — type the target, and confirm it
+    # landed.
     driver.ensure_state(
         lambda: True if driver.row_containing("Custom", "\u25b6") else None,
         "j", "cursor to custom row", attempts=8)
@@ -550,14 +587,10 @@ def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> Non
         ENTER, "open custom image editor")
     driver.send(args.target_image, "type target image")
     driver.expect(args.target_image, 15, "typed image visible")
-    # From here Enter always progresses: the first closes the editor,
-    # the next advances to the options screen — advance() presses again
-    # only while the select screen is still visibly on screen, so it
-    # walks through both without a separate (and unverifiable: absence
-    # checks can read a half-painted frame) "editor closed" state.
-    driver.advance(ENTER, "Select Target Image", "Configure Options",
-                   "close editor / select image -> options",
-                   attempts=5, per_wait=6)
+    # Enter closes the editor, another advances; goto_screen presses and
+    # verifies until the options screen is truly current, backtracking if
+    # a late-processed duplicate ever overshoots.
+    goto_screen(driver, 3)
 
     if configure_live_run:
         # Mirror the scripted invocation the four MVP cells use:
@@ -575,8 +608,7 @@ def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> Non
         # turn a self-test into a live run.
         move_options_cursor(driver, 0)
         set_checkbox(driver, OPTION_ROWS[0], True)
-    driver.advance("n", "Configure Options", "Review & Run",
-                   "options -> review")
+    goto_screen(driver, 4)
     # The review screen must show the exact command we configured.
     driver.expect(args.target_image, 10, "target image in review command")
     if configure_live_run:
