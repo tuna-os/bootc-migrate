@@ -113,7 +113,8 @@ jobs:
 
   # Gate PRs on E2E passing. This job waits for the e2e-tests.yml workflow
   # (which runs in parallel) and blocks merge if any scenario failed. A run
-  # whose whole matrix skipped (KVM_E2E_ENABLED unset) is treated as a pass.
+  # whose whole matrix skipped (KVM_E2E_ENABLED='false' kill switch) is
+  # treated as a pass.
   e2e-gate:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -123,11 +124,16 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            // Wait up to 50 minutes for the E2E workflow to complete
+            // Wait up to 100 minutes for the E2E workflow to complete.
+            // The matrix runs on hosted runners with a 90-minute per-job
+            // timeout (the tui-migrate cell measured 65 min end to end),
+            // so this window must clear that plus queue time — at 50 it
+            // would have failed every PR the moment the matrix started
+            // gating.
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const sha = context.payload.pull_request.head.sha;
-            const maxWait = 50 * 60 * 1000;
+            const maxWait = 100 * 60 * 1000;
             const start = Date.now();
 
             while (Date.now() - start < maxWait) {
@@ -144,11 +150,11 @@ jobs:
                     core.info(`E2E passed: ${e2eRun.html_url}`);
                     return;
                   } else if (e2eRun.conclusion === 'skipped') {
-                    // The whole matrix is gated on vars.KVM_E2E_ENABLED (the
-                    // scenarios need hardware KVM, which GitHub-hosted runners
-                    // don't provide). With the var unset every job skips and
-                    // the run concludes 'skipped' — that is not a failure.
-                    core.warning(`E2E skipped (KVM_E2E_ENABLED unset): ${e2eRun.html_url}`);
+                    // KVM_E2E_ENABLED='false' is the kill switch: every job
+                    // skips and the run concludes 'skipped'. That is not a
+                    // failure — it is an operator deliberately standing the
+                    // matrix down.
+                    core.warning(`E2E skipped (KVM_E2E_ENABLED='false'): ${e2eRun.html_url}`);
                     return;
                   } else {
                     core.setFailed(`E2E failed (${e2eRun.conclusion}): ${e2eRun.html_url}`);

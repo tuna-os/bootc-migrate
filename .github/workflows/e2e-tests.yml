@@ -16,36 +16,41 @@ concurrency:
   cancel-in-progress: true
 
 # The scenarios boot full VMs via QEMU and need hardware KVM acceleration.
-# GitHub-hosted runners (including larger runners) do NOT expose /dev/kvm, so
-# these jobs gate on a KVM-capable runner via the KVM_E2E_ENABLED org
-# variable. Fork pull requests are deliberately excluded: this job runs
-# privileged containers and QEMU on the runner host. While the var is unset
-# the matrix is skipped and e2e-gate/required-checks pass trivially.
+# GitHub-hosted Linux runners DO expose /dev/kvm (proven 2026-08-27 by the
+# e2e-single probes: crw-rw-rw- root:kvm, guest SSH in 31s), so the matrix
+# now defaults to ubuntu-latest and gates every PR. Fork pull requests stay
+# excluded: these jobs run privileged containers and QEMU on the runner.
 #
-# Two ways to provide the runner (see docs/testing.md "KVM runner options"):
-# - Self-hosted: register a KVM-capable machine (e.g. kanpur) as an org
-#   runner labelled "kvm", set KVM_E2E_ENABLED=true, leave E2E_RUNSON_SPEC
-#   unset.
-# - RunsOn on AWS (https://runs-on.com): deploy the RunsOn stack (with the
-#   nested launch templates), set E2E_RUNSON_SPEC to the label spec after
-#   the routing key — e.g.
+# Runner selection, highest precedence first (docs/testing.md "KVM runner
+# options"):
+# - E2E_RUNSON_SPEC set → RunsOn on AWS (https://runs-on.com) ephemeral EC2.
+#   Value is the label spec after the routing key, e.g.
 #   family=c8i+m8i+r8i/cpu=8/ram=32/volume=120gb/nested-virt/image=ubuntu24-full-x64/spot=false
 #   (nested-virt needs an x64 image on a supported family; spot=false or
-#   retry=when-interrupted because these jobs run 30-45 min) — and set
-#   KVM_E2E_ENABLED=true. The expression below prepends the per-run
-#   routing key RunsOn requires.
+#   retry=when-interrupted because these jobs run 30-90 min). The expression
+#   below prepends the per-run routing key RunsOn requires.
+# - E2E_SELF_HOSTED=true → the "kvm"-labelled self-hosted host (kanpur).
+# - neither → ubuntu-latest (the default).
+#
+# KVM_E2E_ENABLED is now a kill switch, not an enable switch: set it to
+# 'false' to skip the whole matrix (e2e-gate treats a skipped run as a
+# trivial pass). Unset or 'true' both run.
 jobs:
   e2e:
     if: >-
-      vars.KVM_E2E_ENABLED == 'true' &&
+      vars.KVM_E2E_ENABLED != 'false' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     name: ${{ matrix.scenario.name }}
     runs-on: >-
       ${{ vars.E2E_RUNSON_SPEC != '' &&
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
-          fromJSON('["self-hosted", "kvm"]') }}
-    timeout-minutes: 45
+          (vars.E2E_SELF_HOSTED == 'true' &&
+           fromJSON('["self-hosted", "kvm"]') || 'ubuntu-latest') }}
+    # 90, not 45: the tui-migrate cell measured 65 min end to end on a
+    # hosted runner (image bake + migration + reboot + rollback + commit,
+    # all driven through the wizard). ci.yml's e2e-gate waits longer still.
+    timeout-minutes: 90
     # Exploratory cells (aurora: see below) opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without dragging
     # down the "E2E Migration Tests" workflow conclusion e2e-gate polls —
@@ -126,12 +131,12 @@ jobs:
             # every downstream assertion of the default mode runs
             # unchanged. This is the only cell that exercises the
             # terminal event loops (ROADMAP M5 "no TUI assertions" gap).
-            # Exploratory while it earns trust — promote to gating (drop
-            # allow_failure) after a few green runs, like the aurora
-            # cell's contract.
+            # Gating (no allow_failure) since run 33050814991 proved the
+            # whole flow green on a hosted runner in 65 min: drift
+            # checklist, wizard navigation, live migration, reboot into
+            # composefs, rollback round-trip, commit.
             mode: tui-migrate
             disk_size: 40G
-            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
@@ -148,6 +153,27 @@ jobs:
       # bluefin's own e2e uses (ublue-os/remove-unwanted-software).
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+
+      # GitHub-hosted runner images ship a podman storage config whose
+      # overlay options leave "Native Overlay Diff: false", so every layer
+      # commit falls back to the naive diff driver — a full walk-and-compare
+      # of the ~10 GB bluefin rootfs, measured at ~30 min per trivial RUN on
+      # the 2026-08-27 probes (the disk itself was fine at 419 MB/s, and the
+      # driver was already overlay, not vfs). A minimal storage.conf plus a
+      # reset of the still-empty graph cut the whole image bake to ~8 min.
+      # Skipped on the self-hosted host, which owns its own storage config
+      # and whose graph holds cached images worth keeping.
+      - name: Use native overlay diffs for podman
+        if: ${{ vars.E2E_SELF_HOSTED != 'true' }}
+        run: |
+          sudo tee /etc/containers/storage.conf >/dev/null <<'EOF'
+          [storage]
+          driver = "overlay"
+          runroot = "/run/containers/storage"
+          graphroot = "/var/lib/containers/storage"
+          EOF
+          sudo rm -rf /var/lib/containers/storage
+          sudo podman info | grep -iA5 'graphStatus' || true
 
       - name: Install system dependencies
         run: |

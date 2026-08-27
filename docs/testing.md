@@ -39,7 +39,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
-| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | exploratory (allow_failure) until proven, then gating |
+| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active (gating since run 33050814991, 65 min green) |
 
 Planned, one per milestone exit (see ROADMAP.md):
 
@@ -99,37 +99,64 @@ Failed screen and must exit cleanly:
 
 ## KVM runner options
 
-The whole E2E matrix needs `/dev/kvm` (TCG is ~10× slower and blows the
-45-minute timeout), which GitHub-hosted runners don't expose. Both E2E
-workflows gate on the `KVM_E2E_ENABLED` org variable and pick their
-runner from one expression, so there are two ways to turn the matrix on:
+The whole E2E matrix needs `/dev/kvm` (TCG is ~10× slower and blows any
+sane timeout). **GitHub-hosted Linux runners provide it** — measured
+2026-08-27, `crw-rw-rw- root:kvm`, guest SSH in 31 seconds — so
+`ubuntu-latest` is the default and no variable is needed to turn the
+matrix on. The long-standing "hosted runners have no KVM" note in these
+workflows predated GitHub enabling it and was simply stale.
 
-1. **Self-hosted** (the original setup): register a KVM-capable machine
-   (e.g. kanpur) as an org runner labelled `kvm`, set
-   `KVM_E2E_ENABLED=true`, leave `E2E_RUNSON_SPEC` unset.
-2. **RunsOn on AWS** (https://runs-on.com — ephemeral EC2 runners in
-   your own AWS account, useful when you have AWS credits and no
-   hardware): install the RunsOn GitHub App, deploy its CloudFormation
-   stack **including the nested launch templates** (an existing stack
-   must be upgraded before `nested-virt` jobs run — plain EC2 VMs have
-   no nested virtualization, so this is what exposes `/dev/kvm` without
-   paying for `.metal` instances), then set two variables:
+One hosted-runner adjustment is required and lives in both workflows:
+the runner image's podman config leaves `Native Overlay Diff: "false"`,
+which makes every `podman build` layer commit walk and compare the whole
+~10 GB bluefin rootfs — about **30 minutes per trivial `RUN`**, enough
+to burn a 45-minute budget before QEMU ever starts. The `Use native
+overlay diffs for podman` step writes a minimal `/etc/containers/
+storage.conf` and resets the still-empty graph, cutting the full image
+bake to ~8 minutes. It is skipped when `E2E_SELF_HOSTED=true`, because
+that host owns its storage config and its graph holds cached images.
 
-       KVM_E2E_ENABLED=true
+Runner selection, highest precedence first:
+
+1. **`E2E_RUNSON_SPEC` set** → [RunsOn](https://runs-on.com) ephemeral
+   EC2 runners in your own AWS account (useful for more cores than a
+   hosted runner's 4, or when hosted capacity is contended). Install the
+   RunsOn GitHub App and deploy its CloudFormation stack **including the
+   nested launch templates** (an existing stack must be upgraded before
+   `nested-virt` jobs run — plain EC2 VMs have no nested virtualization,
+   so this is what exposes `/dev/kvm` without paying for `.metal`), then
+   set:
+
        E2E_RUNSON_SPEC=family=c8i+m8i+r8i/cpu=8/ram=32/volume=120gb/nested-virt/image=ubuntu24-full-x64/spot=false
 
    The workflows prepend the `runs-on=<run-id>` routing key RunsOn
-   requires; everything after it is yours to tune in the variable
-   without touching workflow YAML. Constraints worth keeping:
-   `nested-virt` needs an x64 image on a supported family
-   (c8i/m8i/r8i); `volume=120gb` covers the 60G sparse guest disk plus
-   both ~5 GB images and the Rust target; `spot=false` (or
-   `retry=when-interrupted`) because a 30-45-minute cell is a bad spot
-   candidate. The `Enable KVM access` step already probes `/dev/kvm`
-   and warns rather than failing, so a mis-sized spec degrades loudly,
-   not silently.
+   requires; everything after it is yours to tune without touching
+   workflow YAML. Constraints worth keeping: `nested-virt` needs an x64
+   image on a supported family (c8i/m8i/r8i); `volume=120gb` covers the
+   60G sparse guest disk plus both ~5 GB images and the Rust target;
+   `spot=false` (or `retry=when-interrupted`) because a 30-90-minute
+   cell is a bad spot candidate.
+2. **`E2E_SELF_HOSTED=true`** → the `kvm`-labelled self-hosted host
+   (kanpur), the original setup.
+3. **Neither** → `ubuntu-latest`.
 
-Flipping between the two is a variable change, no workflow edit.
+`KVM_E2E_ENABLED` is now a **kill switch, not an enable switch**: set it
+to `'false'` to stand the whole matrix down (`e2e-gate` treats a skipped
+run as a trivial pass); unset or `'true'` both run. Switching lanes is a
+variable change, never a workflow edit.
+
+### Timeouts, and why they are what they are
+
+| Budget | Value | Reason |
+|---|---|---|
+| Per-cell job timeout | 90 min | The tui-migrate cell measured 65 min end to end (image bake + migration + reboot + rollback + commit, driven through the wizard). |
+| `e2e-gate` wait window (ci.yml) | 100 min | Must clear the job timeout plus queue time. It was 50 min while the matrix was gated off; leaving it there would have failed every PR the moment the matrix started gating. |
+
+Measured cell runtimes on `ubuntu-latest` (2026-08-27): ostree-rebase-plan
+26 min, composefs-migrate 36 min, tui-migrate 65 min. The `Enable KVM
+access` step probes `/dev/kvm` and warns rather than failing, so a runner
+without it degrades loudly — a cell that suddenly takes hours is that
+warning going unread.
 
 ## Narrow dispatch (implemented)
 
