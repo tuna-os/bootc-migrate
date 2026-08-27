@@ -583,7 +583,14 @@ def run_wizard(args) -> None:
     driver.advance(ENTER, "Review & Run", "Phase 2 \u00b7 OCI pull",
                    "start migration")
 
-    driver.expect("MIGRATION COMPLETED", args.migration_timeout, "completion banner")
+    # The running screen's phase sidebar shows " ✓ Complete — press Enter "
+    # when the spawned migration exits successfully — the reliable signal.
+    # The log pane's "=== MIGRATION COMPLETED ===" banner is matched too,
+    # but it can sit outside the pane's visible window (observed on the
+    # first full VM run: migration done, banner scrolled out, driver
+    # timed out watching for it).
+    driver.expect(["Complete — press Enter", "MIGRATION COMPLETED"],
+                  args.migration_timeout, "completion signal")
     driver.press_until(ENTER, "Migration Complete!", 20, "running -> complete")
     driver.send("q", "exit TUI")
     rc = driver.wait_exit(30)
