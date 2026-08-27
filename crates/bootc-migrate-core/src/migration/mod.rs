@@ -1,6 +1,7 @@
 pub mod boot;
 pub mod bootloader;
 pub mod deploy;
+pub mod host_storage;
 pub mod import;
 pub mod kernel_options;
 pub mod os_release;
@@ -63,7 +64,7 @@ fn acquire_lock() -> Result<File> {
 
 // ---- Mount guard (Optional: safe cleanup of TempDir-backed mounts) ----
 
-struct MountGuard {
+pub(crate) struct MountGuard {
     mount_path: PathBuf,
 }
 
@@ -176,144 +177,6 @@ impl Drop for PodmanImageMount {
 }
 
 // ---- Public API ----
-
-/// Check free space before pulling. Returns Ok(()) if sufficient, Err otherwise.
-pub fn check_free_space(reflink_available: bool) -> Result<()> {
-    let ostree_repo = "/sysroot/ostree/repo";
-    if !Path::new(ostree_repo).exists() {
-        return Ok(());
-    }
-
-    let du = Command::new("/usr/bin/du")
-        .args(["-sb", ostree_repo])
-        .output()
-        .context("failed to run du")?;
-    let du_stdout = String::from_utf8_lossy(&du.stdout);
-    let ostree_size: u64 = du_stdout
-        .split_whitespace()
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let free = crate::preflight::get_free_space("/sysroot/composefs")
-        .or_else(|_| crate::preflight::get_free_space("/sysroot"))?;
-    let multiplier: f64 = if reflink_available { 1.1 } else { 1.5 };
-    let needed = (ostree_size as f64 * multiplier) as u64;
-
-    println!(
-        "Free space check: ostree repo = {:.2} GB, free = {:.2} GB, needed ≈ {:.2} GB (reflink: {})",
-        ostree_size as f64 / 1e9,
-        free as f64 / 1e9,
-        needed as f64 / 1e9,
-        reflink_available,
-    );
-
-    if free < needed {
-        return Err(anyhow!(
-            "Insufficient free space: need ~{:.2} GB, have {:.2} GB. Free up space or use a larger disk.",
-            needed as f64 / 1e9,
-            free as f64 / 1e9,
-        ));
-    }
-    Ok(())
-}
-
-/// XFS does not support fs-verity (required by cfs pull). When the /sysroot
-/// filesystem lacks verity, create a loopback ext4 image, mount it at
-/// /sysroot/composefs, and migrate the composefs store onto it.
-/// composefs repository metadata (`meta.json`) as written by `cfsctl init`:
-/// format version 1 with sha512 fs-verity digests. Required by `bootc status`
-/// and cfsctl; our hand-built XFS-loopback repo must carry it.
-const COMPOSEFS_REPO_META_JSON: &str = "{\n  \"version\": 1,\n  \"algorithm\": \"fsverity-sha512-12\",\n  \"features\": {\n    \"compatible\": [],\n    \"read-only-compatible\": [],\n    \"incompatible\": []\n  }\n}\n";
-
-fn setup_composefs_loopback_if_needed(report: &PreflightReport) -> Result<Option<MountGuard>> {
-    let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
-    // btrfs and ext4 support fs-verity. xfs does not (as of kernel 6.12).
-    if fs_type == "xfs" {
-        let target = "/sysroot/composefs";
-        let img_path = "/sysroot/composefs-loopback.ext4";
-
-        // Don't recreate if already set up (e.g. re-run after crash).
-        if Path::new(img_path).exists() {
-            // Check if already mounted at target.
-            let mount_out = Command::new("findmnt")
-                .args(["-n", "-o", "SOURCE", target])
-                .output()
-                .ok();
-            if let Some(out) = mount_out {
-                let src = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if src.contains("composefs-loopback") {
-                    println!("ComposeFS loopback already active at {target} (source: {src}).");
-                    return Ok(None);
-                }
-            }
-            // Image exists but not mounted — remove stale and recreate.
-            let _ = fs::remove_file(img_path);
-        }
-
-        // Sizing this off the *source* ostree repo alone badly undersizes it:
-        // Phase 2 pulls the *target* image into this same loopback regardless
-        // of whether Phase 1's reflink import (the only thing ostree_gb
-        // actually measures) runs at all — with --skip-import, or a small
-        // source migrating to a much larger target, the old 10-30 GB clamp
-        // left no room for the pull and ENOSPC'd mid-Phase-2 (#42). The
-        // loopback is a sparse file (ext4 allocates blocks on demand), so a
-        // generous nominal size is free — bound only by what the underlying
-        // filesystem actually has (composefs_free_bytes, already measured by
-        // preflight), not by an arbitrary fixed ceiling.
-        let ostree_gb = report.ostree_repo_size_bytes as f64 / 1e9;
-        let free_gb = report.composefs_free_bytes as f64 / 1e9;
-        let desired_gb = (ostree_gb * 1.5 + 25.0).ceil() as u64;
-        let max_gb = ((free_gb * 0.9) as u64).max(30);
-        let size_gb = desired_gb.clamp(30, max_gb);
-        println!(
-            "XFS detected — setting up {size_gb} GB ext4 loopback for composefs verity support.",
-        );
-
-        // Create sparse file (ext4 will allocate blocks on demand).
-        let status = Command::new("truncate")
-            .args(["-s", &format!("{size_gb}G"), img_path])
-            .status()
-            .context("failed to truncate composefs loopback image")?;
-        if !status.success() {
-            return Err(anyhow!("truncate failed for composefs loopback image"));
-        }
-
-        // Format as ext4 with verity support.
-        let status = Command::new("/usr/sbin/mkfs.ext4")
-            .args(["-F", "-O", "verity", img_path])
-            .status()
-            .context("failed to format composefs loopback as ext4")?;
-        if !status.success() {
-            return Err(anyhow!("mkfs.ext4 failed for composefs loopback"));
-        }
-
-        // Mount.
-        fs::create_dir_all(target).context("failed to create /sysroot/composefs")?;
-        let status = Command::new("/usr/bin/mount")
-            .args(["-o", "loop", img_path, target])
-            .status()
-            .context("failed to mount composefs loopback")?;
-        if !status.success() {
-            return Err(anyhow!("mount failed for composefs loopback"));
-        }
-
-        // Initialize the composefs repository metadata. Migration populates
-        // objects/images/streams by hand; without meta.json `bootc status` and
-        // cfsctl reject the repo ("must be initialized with `cfsctl init`").
-        // Matches what `cfsctl init` writes (format v1, sha512 fs-verity).
-        fs::write(
-            Path::new(target).join("meta.json"),
-            COMPOSEFS_REPO_META_JSON,
-        )
-        .context("failed to write composefs repo meta.json")?;
-
-        println!("ComposeFS loopback mounted at {target} ({size_gb} GB ext4, fs-verity enabled).");
-        Ok(Some(MountGuard::new(Path::new(target))))
-    } else {
-        Ok(None)
-    }
-}
 
 /// Detect whether LVM volumes are active on the running system.
 fn detect_lvm() -> bool {
@@ -901,14 +764,14 @@ pub fn run_migration(
     // ---- Phase 0: preflight free-space check ----
     println!("=== Phase 0: Free-space check ===");
     if !dry_run {
-        check_free_space(report.supports_reflink)?;
+        host_storage::check_free_space(report.supports_reflink)?;
     } else {
         println!("[DRY RUN] Would check free space on /sysroot/composefs.");
     }
 
     // ---- XFS workaround: ensure composefs store supports fs-verity ----
     let _loopback_guard: Option<MountGuard> = if !dry_run {
-        setup_composefs_loopback_if_needed(report)?
+        host_storage::prepare_composefs_storage(report)?
     } else {
         let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
         if fs_type == "xfs" {
