@@ -1,7 +1,13 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-08-13. Living document; the issue tracker is authoritative
+Status date: 2026-08-27. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
+
+Caveat on that split, recorded because it has already misled readers: five
+milestone issues are closed as completed while their exit criteria here are
+not met, because the implementation landed and the validation named in the
+issue's own scope did not. Where the two disagree, this file is currently the
+more accurate. See "Unvalidated paths" below and #186.
 
 ## Vision
 
@@ -65,6 +71,26 @@ This gate deliberately does not require unfinished M2–M5 work to graduate.
 It allows the proven, renamed migrator to ship while making the newer engine's
 evidence level visible to adopters. After this release, cadence and the
 `bootc-rebase` graduation gate should be tracked separately.
+
+## Unvalidated paths (single list for release notes)
+
+The next release gate requires enumerating "every live or interactive path
+that lacks automated coverage". Assembling that from five milestone
+narratives is error-prone, so it is collected here. #186 tracks the fact that
+each of these had its implementation issue closed as completed while the
+validation named in that issue's own scope never shipped.
+
+| Path | State | Validation gap | Tracking |
+|---|---|---|---|
+| `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
+| Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | the `efibootmgr` path has never executed; no cell mutates NVRAM | #31, #189 |
+| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | never executes in CI (see M3 above) | #67, #187 |
+| DE stash/restore (`--de-migrate`) | implemented, detection table-tested | no cell passes `--de-migrate`; stash never created on a real system | #68, #188 |
+| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream ostree/bootc change or compensating logic | #80 |
+| `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
+
+Everything not in this table — the OSTree→ComposeFS migrator itself, including
+rollback and commit — is covered by the seven-cell E2E matrix.
 
 ## Milestones
 
@@ -139,11 +165,28 @@ introduced in `mergetc`); machine-describing paths and the identity DBs are
 reported but never replaced. This is the same "adjust the staged deployment
 before first boot" seam part 1's remap already uses.
 
-**What is not proven**: no CI cell is cross-base — all four E2E scenarios are
-Fedora-family → Fedora-family, so `is_cross_base` is false and neither part 1
-nor part 2 executes in CI at all. Both are unit-tested (planning, exemptions,
-sidecar naming, report/JSON, and a collect→plan→apply round trip over real
-trees) and neither has run on a real cross-base system.
+**What is not proven**: neither part 1 nor part 2 executes in CI at all. Both
+are unit-tested (planning, exemptions, sidecar naming, report/JSON, and a
+collect→plan→apply round trip over real trees) and neither has run on a real
+cross-base system.
+
+An earlier version of this paragraph gave the wrong reason — that every cell
+is Fedora-family → Fedora-family. That is false: Bluefin LTS is CentOS Stream
+10-based (docs/filesystem-support.md) and three cells run `bluefin:lts →
+dakota:stable`, so by image lineage those cells *are* cross-base. The code
+still never runs, for two narrower reasons, and the distinction matters
+because it makes the missing coverage much cheaper than "we have no CentOS
+guest" implies:
+
+- the three `bluefin:lts` cells run `E2E_MODE=composefs-migrate` — the MVP
+  `bootc-migrate` binary, which merges via `mergetc` and has no
+  `is_cross_base` gate at all;
+- the two cells that do run `bootc-rebase` (`ostree-rebase` mode) are both
+  `bluefin:stable` → Fedora targets;
+- and no cell passes `--accept-cross-base`, so a cross-base pair would be
+  refused before reaching the code under test.
+
+The harness already installs a CentOS-family guest. Tracked as #187.
 
 Related: [#80](https://github.com/tuna-os/bootc-migrate/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)
@@ -212,9 +255,9 @@ should not be trusted until it has been run on a real UEFI system.
   the `tui-migrate` E2E cell, which drives the checklist and then a full
   migration through the wizard on a pty inside the VM
   (`tests/tui-e2e-driver.py`; see docs/testing.md "TUI testing"). The
-  cell is gating as of 2026-08-27 (run 33050814991, 65 min green on a
-  hosted runner) and publishes an asciicast/GIF/screenshot walkthrough
-  artifact on every run.
+  cell is gating as of 2026-08-27 and publishes an asciicast/GIF/screenshot
+  walkthrough artifact on every run. The full seven-cell matrix runs on
+  GitHub-hosted runners (run 33071608765, all green).
 - [#31](https://github.com/tuna-os/bootc-migrate/issues/31) — the
   UEFI boot-entry audit (dead/generic-label/duplicate/firmware-managed
   classification) is done, read-only, exposed as `bootc-rebase boot-entries`.
