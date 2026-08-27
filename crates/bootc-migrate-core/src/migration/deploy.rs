@@ -149,8 +149,9 @@ pub fn phase4_stage_deploy(
 
     // For XFS roots, the composefs repo lives in an ext4 loopback file; the
     // booted system must mount it at /sysroot/composefs so `bootc status` and
-    // day-2 updates can read the repo (the initrd mount is torn down at
-    // switch-root). Install a runtime mount unit into the deployment's /etc.
+    // day-2 updates can reach the repo. Usually the initrd's mount survives
+    // switch-root and this unit merely goes active over it; it is here for the
+    // case where it does not. Install it into the deployment's /etc.
     if Path::new("/sysroot/composefs-loopback.ext4").exists()
         && let Err(e) = write_runtime_composefs_loopback_mount(&etc_dir)
     {
@@ -161,21 +162,20 @@ pub fn phase4_stage_deploy(
 }
 
 /// Install a systemd mount unit into the deployment's /etc so the booted system
-/// loop-mounts the composefs ext4 store at /sysroot/composefs. Idempotent with
-/// any mount that survives the initrd: systemd treats an already-mounted target
-/// as active.
+/// loop-mounts the composefs ext4 store at /sysroot/composefs.
 ///
-/// Mounted **rw**, unlike the initrd unit in
-/// `migration::prepare_composefs_loopback_include` (which only has to read the
-/// EROFS image to set up root, so read-only is right there). This is the mount
-/// the running system keeps, and day-2 updates write to the store: with `ro`
-/// here, `bootc upgrade` on a migrated XFS system fails with "Pulling image
-/// into composefs repository: Repository is not writable: read-only file
-/// system", i.e. the migration produces a system that can never update. Both
-/// loopback-backed E2E cells (xfs+crypt, xfs+lvm+crypt) reproduce that
-/// identically while the btrfs cell — whose store is a plain directory on the
-/// writable /sysroot — passes, which is also the evidence that /sysroot is
-/// writable at this point and an rw loop mount can succeed.
+/// This is a fallback, not the mount the running system normally uses. The
+/// initrd unit from `migration::prepare_composefs_loopback_include` mounts the
+/// same source at the same target under /sysroot, which *becomes* / at
+/// switch-root, so that mount survives — and systemd then treats this unit's
+/// already-mounted target as active without issuing a second mount. Options
+/// set here therefore do not override the initrd's; they apply only if the
+/// initrd mount is somehow absent.
+///
+/// Kept in sync at **rw** with the initrd unit for exactly that case: day-2
+/// updates write to the store, and a `ro` store makes `bootc upgrade` fail
+/// with "Repository is not writable: read-only file system". See that
+/// function's docs for the full account.
 fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
     let unit_dir = etc_dir.join("systemd/system");
     fs::create_dir_all(&unit_dir)?;
@@ -1668,5 +1668,35 @@ mod tests {
             NetworkManagerBackendCompat::default()
         );
         assert!(mask.is_symlink());
+    }
+
+    /// The composefs store must be mounted rw: day-2 updates write into it,
+    /// and a `ro` store makes `bootc upgrade` fail with "Repository is not
+    /// writable". This unit and the initrd unit in
+    /// `migration::prepare_composefs_loopback_include` must agree — see the
+    /// matching test there for why the initrd one is the binding copy.
+    #[test]
+    fn runtime_composefs_loopback_mount_is_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_runtime_composefs_loopback_mount(tmp.path()).unwrap();
+
+        let unit = tmp.path().join("systemd/system/sysroot-composefs.mount");
+        let body = std::fs::read_to_string(&unit).unwrap();
+        let opts = body
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Options="))
+            .expect("mount unit has no Options= line");
+        assert!(
+            opts.split(',').any(|o| o == "rw"),
+            "runtime composefs loopback mount must be rw, got Options={opts}"
+        );
+        assert!(body.contains("Where=/sysroot/composefs"));
+        assert!(body.contains("What=/sysroot/composefs-loopback.ext4"));
+
+        // Writing the unit is not enough; it has to be enabled.
+        let link = tmp
+            .path()
+            .join("systemd/system/local-fs.target.wants/sysroot-composefs.mount");
+        assert!(link.is_symlink(), "mount unit was written but not enabled");
     }
 }

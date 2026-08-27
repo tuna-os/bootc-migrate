@@ -518,6 +518,24 @@ fn blkid_uuid(device: &str) -> Option<String> {
 /// loop-mount the composefs ext4 store at /sysroot/composefs inside the initrd,
 /// ordered after sysroot.mount and before bootc-root-setup.service. Returns the
 /// tempdir guard; its contents are copied into the initrd by dracut.
+///
+/// Mounted **rw** even though the initrd itself only reads the EROFS image:
+/// this mount is established under /sysroot, and /sysroot *becomes* / at
+/// switch-root, so it survives into the running system. The runtime unit that
+/// [`deploy::write_runtime_composefs_loopback_mount`] installs cannot correct
+/// it — systemd treats an already-mounted target as active and never issues a
+/// second mount — so whatever options are chosen here are the options the
+/// booted system keeps. With `ro`, day-2 updates fail against the store:
+///
+/// ```text
+/// error: Upgrading composefs: Performing Upgrade Operation: Pulling composefs
+/// repository: Pulling image into composefs repository: Repository is not
+/// writable: read-only file system
+/// ```
+///
+/// i.e. the migration produces a system that can never update. `rw` is also
+/// the more correct choice for an ext4 image on its own terms: recovering an
+/// unclean journal requires a writable mount.
 fn prepare_composefs_loopback_include() -> Result<tempfile::TempDir> {
     let tmp = tempfile::Builder::new()
         .prefix("bootc-cfsloop-")
@@ -537,7 +555,7 @@ fn prepare_composefs_loopback_include() -> Result<tempfile::TempDir> {
          What=/sysroot/composefs-loopback.ext4\n\
          Where=/sysroot/composefs\n\
          Type=ext4\n\
-         Options=loop,ro\n\
+         Options=loop,rw\n\
          \n\
          [Install]\n\
          WantedBy=initrd-root-fs.target\n",
@@ -1213,5 +1231,46 @@ UUID=root /var btrfs subvol=var,noatime,lazytime,commit=120,discard=async,compre
     fn test_sleep_guard_creation_and_drop() {
         let guard = SleepGuard::new("unit test migration");
         drop(guard);
+    }
+
+    /// This is the binding copy of the mount options. The unit is established
+    /// under /sysroot, which becomes / at switch-root, so the mount survives
+    /// into the running system and the runtime unit
+    /// (`deploy::write_runtime_composefs_loopback_mount`) never gets to issue
+    /// a second mount — systemd sees the target already mounted and marks it
+    /// active. `ro` here therefore means a migrated XFS system can never take
+    /// a day-2 update, which both loopback E2E cells reproduced as
+    /// "Repository is not writable: read-only file system".
+    #[test]
+    fn initrd_composefs_loopback_mount_is_writable() {
+        let tmp = prepare_composefs_loopback_include().unwrap();
+
+        let unit = tmp
+            .path()
+            .join("etc/systemd/system/sysroot-composefs.mount");
+        let body = std::fs::read_to_string(&unit).unwrap();
+        let opts = body
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Options="))
+            .expect("mount unit has no Options= line");
+        assert!(
+            opts.split(',').any(|o| o == "rw"),
+            "initrd composefs loopback mount must be rw — it is the mount the \
+             booted system keeps; got Options={opts}"
+        );
+        assert!(body.contains("Where=/sysroot/composefs"));
+
+        let link = tmp
+            .path()
+            .join("etc/systemd/system/initrd-root-fs.target.wants/sysroot-composefs.mount");
+        assert!(link.is_symlink(), "mount unit was written but not enabled");
+
+        // bootc-root-setup must not run before the store is mounted.
+        let dropin = tmp
+            .path()
+            .join("etc/systemd/system/bootc-root-setup.service.d/RequiresLoopback.conf");
+        let dropin_body = std::fs::read_to_string(&dropin).unwrap();
+        assert!(dropin_body.contains("Requires=sysroot-composefs.mount"));
+        assert!(dropin_body.contains("After=sysroot-composefs.mount"));
     }
 }
