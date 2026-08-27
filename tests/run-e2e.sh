@@ -404,11 +404,20 @@ SFDISK
         echo "LVM: creating PV/VG ($LVM_VG) with separate root + var LVs inside LUKS..."
         sudo pvcreate -ff -y "/dev/mapper/$LUKS_MAPPER"
         sudo vgcreate "$LVM_VG" "/dev/mapper/$LUKS_MAPPER"
-        # /var only holds small test fixtures, so give it a fixed 4G and let root
-        # take the rest — the migration needs ample root space for the Dakota
-        # composefs object store + ext4 verity loopback (XFS path). Separate
-        # volumes is the whole point: /var lives on its own LV.
-        sudo lvcreate -y -L 4G -n var "$LVM_VG"
+        # /var gets 20G, not the fixed 4G it had until 2026-08-27: it holds
+        # far more than "small test fixtures", because the guest's podman
+        # storage (/var/lib/containers/storage) is where Phase 2 pulls the
+        # ~5 GB-compressed target image. At 4G that pull dies with
+        # "no space left on device" partway through — which is why the two
+        # earlier DISK_SIZE bumps (20G -> 40G -> 60G, #42) never helped:
+        # a bigger disk only grows *root*, never this fixed-size LV. The
+        # cell was gated off (KVM_E2E_ENABLED unset) for the whole period,
+        # so nothing ever executed the 60G config until the matrix moved to
+        # hosted runners. Root still takes the rest (~38G of a 60G disk),
+        # which is what the passing single-filesystem composefs cells get
+        # for the whole job. Separate volumes remains the point: /var lives
+        # on its own LV.
+        sudo lvcreate -y -L 20G -n var "$LVM_VG"
         sudo lvcreate -y -l 100%FREE -n root "$LVM_VG"
         sudo vgchange -ay "$LVM_VG"
         sudo udevadm settle 2>/dev/null || true
