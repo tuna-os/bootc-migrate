@@ -214,7 +214,7 @@ fn phase4_var_migration() -> Result<()> {
     // A dedicated filesystem or direct Btrfs subvolume is mounted at this
     // stateroot path by the initrd (Phase 5), so its existing data remains in
     // place. Copying it would be both wasteful and lossy for special files.
-    if let Some(var) = detect_separate_var()? {
+    if let Some(var) = super::var_layout::detect_separate_var()? {
         println!(
             "[phase4] preserving /var in place ({}, UUID={}, options={}); Phase 5 will mount it at the composefs stateroot",
             var.fstype, var.uuid, var.options
