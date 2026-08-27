@@ -18,9 +18,8 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 mod boot_entry_review;
-mod routing;
 
-use routing::{Backend, Strategy, bootloader_plan, plan, route};
+use bootc_migrate_core::rebase_plan::{Backend, Strategy, bootloader_plan, plan, route};
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
