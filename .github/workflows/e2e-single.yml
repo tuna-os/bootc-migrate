@@ -72,20 +72,43 @@ jobs:
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
 
+      # GitHub-hosted runner images ship a podman storage config whose
+      # overlay options leave "Native Overlay Diff: false", so every
+      # layer commit falls back to the naive diff driver — a full
+      # walk-and-compare of the ~10 GB bluefin rootfs, measured at
+      # ~30 min per trivial RUN on the 2026-08-27 probes (disk itself
+      # was fine: 419 MB/s; driver was already overlay, not vfs).
+      # Replace it with a minimal storage.conf (no mount_program, no
+      # ignore_chown_errors) and reset the (still empty at this point)
+      # graph so rootful podman uses native kernel overlayfs diffs.
+      # Probe-gated: the kanpur self-hosted runner keeps its own config.
+      - name: Use native overlay diffs for podman (probe only)
+        if: ${{ inputs.runner != '' }}
+        run: |
+          sudo tee /etc/containers/storage.conf >/dev/null <<'EOF'
+          [storage]
+          driver = "overlay"
+          runroot = "/run/containers/storage"
+          graphroot = "/var/lib/containers/storage"
+          EOF
+          sudo rm -rf /var/lib/containers/storage
+          sudo podman info | grep -iA5 'graphStatus' || true
+
       # Only on probe dispatches (runner override set): surface the I/O
       # facts that decide whether a hosted runner is viable — podman's
-      # storage driver (a vfs fallback copies the whole ~10 GB base image
-      # on every layer commit) and raw disk write throughput (Azure burst
-      # credit exhaustion shows up here). Pure diagnosis, no mutation.
+      # storage driver ("Native Overlay Diff: false" means naive
+      # walk-the-whole-image layer commits) and raw disk write
+      # throughput (Azure burst credit exhaustion shows up here).
       - name: Runner I/O diagnostics (probe only)
         if: ${{ inputs.runner != '' }}
         run: |
           echo "=== podman storage driver ==="
           sudo podman info --format '{{.Store.GraphDriverName}} rootless={{.Host.Security.Rootless}}' || true
-          sudo podman info | grep -iA3 'graphDriverName\|graphRoot' || true
+          sudo podman info | grep -iA5 'graphDriverName\|graphRoot\|graphStatus' || true
           echo "=== filesystems ==="
           df -hT / /var/lib/containers 2>/dev/null || df -hT /
           echo "=== raw write throughput (1 GiB) ==="
+          sudo mkdir -p /var/lib/containers
           sudo dd if=/dev/zero of=/var/lib/containers/ddtest bs=1M count=1024 conv=fdatasync 2>&1 | tail -1
           sudo rm -f /var/lib/containers/ddtest
 
