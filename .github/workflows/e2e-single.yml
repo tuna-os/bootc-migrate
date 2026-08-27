@@ -60,13 +60,34 @@ jobs:
           (vars.E2E_RUNSON_SPEC != '' &&
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
           fromJSON('["self-hosted", "kvm"]')) }}
-    timeout-minutes: 45
+    # Probe dispatches on unfamiliar runners get more headroom: the first
+    # ubuntu-latest probe (2026-08-27) proved /dev/kvm IS present there,
+    # but hit pathologically slow podman-build layer commits (25 min for
+    # a trivial RUN) and timed out before QEMU ever started.
+    timeout-minutes: ${{ inputs.runner != '' && fromJSON('90') || fromJSON('45') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+
+      # Only on probe dispatches (runner override set): surface the I/O
+      # facts that decide whether a hosted runner is viable — podman's
+      # storage driver (a vfs fallback copies the whole ~10 GB base image
+      # on every layer commit) and raw disk write throughput (Azure burst
+      # credit exhaustion shows up here). Pure diagnosis, no mutation.
+      - name: Runner I/O diagnostics (probe only)
+        if: ${{ inputs.runner != '' }}
+        run: |
+          echo "=== podman storage driver ==="
+          sudo podman info --format '{{.Store.GraphDriverName}} rootless={{.Host.Security.Rootless}}' || true
+          sudo podman info | grep -iA3 'graphDriverName\|graphRoot' || true
+          echo "=== filesystems ==="
+          df -hT / /var/lib/containers 2>/dev/null || df -hT /
+          echo "=== raw write throughput (1 GiB) ==="
+          sudo dd if=/dev/zero of=/var/lib/containers/ddtest bs=1M count=1024 conv=fdatasync 2>&1 | tail -1
+          sudo rm -f /var/lib/containers/ddtest
 
       - name: Install system dependencies
         run: |
