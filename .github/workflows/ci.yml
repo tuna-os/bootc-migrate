@@ -76,7 +76,7 @@ jobs:
         with:
           args: -color
 
-  # Dependency license and source policy (deny.toml).
+  # Dependency advisory, license, and source policy (deny.toml).
   cargo-deny:
     runs-on: ubuntu-24.04
     steps:
@@ -84,7 +84,12 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: warn
-          command: check bans sources licenses
+          # `advisories` must be listed explicitly: `cargo deny check` runs
+          # only the checks it is named, so omitting it skips the RustSec
+          # database entirely and deny.toml's [advisories] section is never
+          # read. This job is a required check, so a vulnerable dependency
+          # would otherwise merge green (bootc-migrate#164).
+          command: check advisories bans sources licenses
 
   # Sentinel job for branch protection — set this as the single required check.
   # Accepts 'skipped' so optional jobs never block a PR (e2e-gate skips on
