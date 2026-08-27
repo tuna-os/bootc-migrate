@@ -44,6 +44,7 @@ Exit status: 0 when the driven flow reached its expected end state,
 import argparse
 import codecs
 import errno
+import json
 import fcntl
 import os
 import re
@@ -178,11 +179,33 @@ class Screen:
 class TuiDriver:
     """Spawn a TUI process on a pty and expect/send against its screen."""
 
-    def __init__(self, argv, transcript_path):
+    def __init__(self, argv, transcript_path, record_path=None, snapshot_dir=None):
         self.argv = argv
         self.transcript_path = transcript_path
         self.screen = Screen(COLS, ROWS)
         self.rows = ROWS
+        # Optional asciicast v2 recording of everything the TUI writes,
+        # for rendering a timelapse (asciinema play / agg → GIF), and an
+        # optional directory collecting one plain-text screenshot of the
+        # reconstructed screen per matched milestone.
+        self.record_file = None
+        self.record_start = None
+        if record_path:
+            self.record_file = open(record_path, "w", encoding="utf-8")
+            self.record_start = time.monotonic()
+            header = {
+                "version": 2,
+                "width": COLS,
+                "height": ROWS,
+                "timestamp": int(time.time()),
+                "env": {"TERM": "xterm-256color", "SHELL": "/bin/bash"},
+                "title": " ".join(argv),
+            }
+            self.record_file.write(json.dumps(header) + "\n")
+        self.snapshot_dir = snapshot_dir
+        self.snapshot_count = 0
+        if snapshot_dir:
+            os.makedirs(snapshot_dir, exist_ok=True)
         # Monotonic time of the last winsize nudge. A key written while
         # the TUI is still handling the resulting SIGWINCH/resize event
         # can be dropped by its input backend (observed reproducibly), so
@@ -228,6 +251,12 @@ class TuiDriver:
             raise
         if not chunk:
             return False
+        if self.record_file:
+            self.record_file.write(json.dumps([
+                round(time.monotonic() - self.record_start, 6),
+                "o",
+                chunk.decode("utf-8", "replace"),
+            ]) + "\n")
         self.screen.feed(chunk)
         return True
 
@@ -268,12 +297,27 @@ class TuiDriver:
                 next_repaint = now + 5
             eof = not self._drain(min(0.5, deadline - now))
 
+    def snapshot(self, label: str) -> None:
+        """Save the reconstructed screen as a numbered plain-text
+        screenshot — the automated successor to the manual vhs capture
+        in scripts/capture-screenshots.sh."""
+        if not self.snapshot_dir:
+            return
+        self.snapshot_count += 1
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "-", label).strip("-")[:60]
+        path = os.path.join(self.snapshot_dir, f"{self.snapshot_count:02d}-{safe}.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.screen.text())
+
     def expect(self, patterns, timeout: float, label: str) -> int:
         if isinstance(patterns, str):
             patterns = [patterns]
         which = self.try_find(patterns, timeout)
         if which is None:
             self.fail(f"timeout ({timeout:.0f}s) waiting for {patterns!r} ({label})")
+        # Let the screen finish drawing before photographing it.
+        self._drain(0.3)
+        self.snapshot(label)
         return which
 
     def press_until(self, keys: str, patterns, attempts: int, label: str) -> int:
@@ -287,6 +331,8 @@ class TuiDriver:
             self.send(keys, label)
             which = self.try_find(patterns, 3)
             if which is not None:
+                self._drain(0.3)
+                self.snapshot(label)
                 return which
         self.fail(f"{patterns!r} never appeared after {attempts}x {keys!r} ({label})")
         return 1  # unreachable
@@ -319,6 +365,11 @@ class TuiDriver:
         return 1  # unreachable
 
     def save_transcript(self) -> None:
+        self.snapshot("final-screen")
+        if self.record_file:
+            self.record_file.close()
+            self.record_file = None
+            log("asciicast recording closed")
         if not self.transcript_path:
             return
         with open(self.transcript_path, "w", encoding="utf-8") as f:
@@ -339,6 +390,11 @@ class TuiDriver:
         except ProcessLookupError:
             pass
         sys.exit(1)
+
+
+def make_driver(args, argv):
+    return TuiDriver(argv, args.transcript,
+                     record_path=args.record, snapshot_dir=args.snapshot_dir)
 
 
 def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> None:
@@ -378,7 +434,7 @@ def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> Non
 
 
 def run_wizard(args) -> None:
-    driver = TuiDriver([args.binary, "tui"], args.transcript)
+    driver = make_driver(args, [args.binary, "tui"])
     navigate_to_review(driver, args, configure_live_run=True)
     if not args.dry_run:
         driver.expect("LIVE MIGRATION", 10, "live mode tag")
@@ -403,7 +459,7 @@ def run_wizard_expect_failure(args) -> None:
     (e.g. a developer container that is not an OSTree system): proves the
     wizard navigates, launches the run, surfaces the failure screen, and
     exits cleanly."""
-    driver = TuiDriver([args.binary, "tui"], args.transcript)
+    driver = make_driver(args, [args.binary, "tui"])
     navigate_to_review(driver, args, configure_live_run=False)
     driver.send(ENTER, "start migration (will fail preflight)")
     driver.expect("Phase 2 · OCI pull", 30, "running screen phase sidebar")
@@ -418,7 +474,7 @@ def run_wizard_expect_failure(args) -> None:
 
 def run_drift(args) -> None:
     argv = [args.binary, "etc-drift", "--interactive", "--output", args.output]
-    driver = TuiDriver(argv, args.transcript)
+    driver = make_driver(args, argv)
     driver.expect("Config Drift Review", 60, "drift review screen")
     # Uncheck the cursor's entry so the manifest provably reflects a real
     # interaction (the harness asserts a `false` decision), then confirm.
@@ -445,6 +501,12 @@ def main() -> None:
     parser.add_argument("--output", default="/var/tmp/bootc-migrate-etc-drift.json",
                         help="manifest path (drift mode)")
     parser.add_argument("--transcript", default="/var/tmp/tui-transcript.txt")
+    parser.add_argument("--record", default="",
+                        help="write an asciicast v2 recording of the TUI "
+                             "session here (render with asciinema/agg)")
+    parser.add_argument("--snapshot-dir", default="",
+                        help="save a plain-text screenshot of each matched "
+                             "screen into this directory")
     args = parser.parse_args()
 
     if args.mode in ("wizard", "wizard-expect-failure") and not args.target_image:

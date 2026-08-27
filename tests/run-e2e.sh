@@ -1117,7 +1117,7 @@ if [ "$E2E_MODE" = "tui-migrate" ]; then
 
     step "=== tui-migrate: driving etc-drift --interactive (#15 checklist) ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "python3 /var/tmp/tui-e2e-driver.py --mode drift --binary /var/tmp/bootc-migrate --output /var/tmp/etc-drift-manifest.json --transcript /var/tmp/tui-drift-transcript.txt" \
+        "python3 /var/tmp/tui-e2e-driver.py --mode drift --binary /var/tmp/bootc-migrate --output /var/tmp/etc-drift-manifest.json --transcript /var/tmp/tui-drift-transcript.txt --record /var/tmp/tui-drift.cast --snapshot-dir /var/tmp/tui-snapshots" \
         2>&1 | sed 's/^/[tui-drift] /'; then
         echo "FAIL: TUI drift review driver failed; final screen follows"
         ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-drift-transcript.txt" 2>/dev/null || true
@@ -1149,7 +1149,7 @@ fi
 # toggled on — the exact configuration of the CLI invocation), so the
 # `[migrate]` stream carries the driver's screen-by-screen progress.
 if [ "$E2E_MODE" = "tui-migrate" ]; then
-    MIGRATE_CMD="python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt"
+    MIGRATE_CMD="python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt --record /var/tmp/tui-migrate.cast --snapshot-dir /var/tmp/tui-snapshots"
 else
     MIGRATE_CMD="/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
 fi
@@ -1175,6 +1175,19 @@ if [ "${MIGRATE_RC:-1}" != "0" ]; then
         ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-wizard-transcript.txt" 2>/dev/null >&2 || true
     fi
     exit "${MIGRATE_RC:-1}"
+fi
+
+# Pull the TUI walkthrough artifacts out of the guest now, before the
+# reboot: the asciicast recordings of both interactive flows (render a
+# timelapse with `asciinema play` or `agg … .gif` — CI does the latter)
+# and the per-screen text screenshots. Best-effort: a failed copy must
+# not fail an otherwise green migration.
+if [ "$E2E_MODE" = "tui-migrate" ]; then
+    step "=== tui-migrate: fetching recordings + screenshots from VM ==="
+    scp $SCP_OPTS root@localhost:/var/tmp/tui-migrate.cast \
+        root@localhost:/var/tmp/tui-drift.cast "$WORKSPACE_DIR"/ 2>/dev/null || true
+    scp $SCP_OPTS -r root@localhost:/var/tmp/tui-snapshots "$WORKSPACE_DIR"/ 2>/dev/null || true
+    ls -la "$WORKSPACE_DIR"/tui-*.cast "$WORKSPACE_DIR"/tui-snapshots 2>/dev/null || true
 fi
 
 # e2e-sshd.socket baked into the base image (see MODIFIED_IMAGE above) is
