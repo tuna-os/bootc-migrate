@@ -1762,12 +1762,20 @@ if ! echo "$COMMIT_OUT" | grep -q "Reclaimed:"; then
 fi
 echo "OK: commit subcommand ran without error."
 
-# Post-conditions: everything OSTree-shaped should be gone.
-POST_OSTREE=$(ssh $SSH_OPTS root@localhost "test -d /sysroot/ostree && echo present || echo absent")
-if [ "$POST_OSTREE" != "absent" ]; then
-    echo "FAIL: /sysroot/ostree still present after commit"; exit 1
+# Post-conditions: everything OSTree-shaped that belongs to the SOURCE
+# deployment should be gone. /sysroot/ostree itself may legitimately
+# remain: commit deliberately preserves ostree/bootc — the target bootc
+# installation's own container storage (#84's keep-bootc contract in
+# transaction.rs::remove_legacy_ostree_content) — and does not rmdir the
+# parent. The old `test -d` absence check contradicted that contract and
+# could never pass; first caught when the ubuntu-latest probes brought
+# this cell back to life (2026-08-27) after the KVM matrix went dark.
+POST_OSTREE=$(ssh $SSH_OPTS root@localhost \
+    "if [ ! -d /sysroot/ostree ]; then echo absent; else ls -A /sysroot/ostree | grep -v '^bootc\$' | xargs; fi")
+if [ -n "$POST_OSTREE" ] && [ "$POST_OSTREE" != "absent" ]; then
+    echo "FAIL: legacy content still under /sysroot/ostree after commit: $POST_OSTREE"; exit 1
 fi
-echo "OK: /sysroot/ostree removed."
+echo "OK: no legacy OSTree content under /sysroot/ostree (only bootc/ may remain)."
 
 POST_ALEPH=$(ssh $SSH_OPTS root@localhost "test -e /sysroot/.bootc-aleph.json && echo present || echo absent")
 if [ "$POST_ALEPH" != "absent" ]; then
