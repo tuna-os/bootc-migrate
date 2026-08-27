@@ -97,42 +97,96 @@ pub fn print_report(report: &PreflightReport) {
     println!();
 }
 
+/// Minimum free space required where podman's container storage lives.
+///
+/// Preflight cannot know the target image's size — it runs before anything is
+/// pulled, and asking the registry would make a local check depend on network
+/// access. So this is a floor, not a prediction: it is the point below which a
+/// pull of a normal desktop bootc image is very unlikely to fit.
+///
+/// Calibrated against the E2E LVM cell, which is the case that produced
+/// bootc-migrate#185: a 4 GiB `/var` failed partway through the Phase-2 pull of
+/// `dakota:stable` (~5 GB compressed), and 20 GiB completed it with room to
+/// spare. 10 GiB sits between the two — high enough to catch the layouts that
+/// genuinely cannot work, low enough not to cry wolf on a tight-but-viable
+/// system. It is advisory: exceeding it is not a guarantee, and falling below
+/// it warns rather than refuses.
+pub const MIN_CONTAINER_STORAGE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Whether the container-storage filesystem has room for the target image pull.
+///
+/// Pure so the threshold and the message can be tested without a real `/var`.
+pub fn container_storage_has_room(free_bytes: u64) -> bool {
+    free_bytes >= MIN_CONTAINER_STORAGE_BYTES
+}
+
 /// Compute the readiness warnings for this system. Empty means all clear.
-pub fn readiness_issues(report: &PreflightReport) -> Vec<&'static str> {
-    let mut issues: Vec<&'static str> = Vec::new();
+pub fn readiness_issues(report: &PreflightReport) -> Vec<String> {
+    let mut issues: Vec<String> = Vec::new();
     if !report.is_bootc_ostree {
-        issues.push("NOT booted in OSTree mode — migration requires an OSTree-booted system.");
+        issues.push(
+            "NOT booted in OSTree mode — migration requires an OSTree-booted system.".to_string(),
+        );
     }
     if !report.is_uefi {
-        issues.push("Legacy BIOS boot detected — systemd-boot unavailable; will stay on GRUB2.");
+        issues.push(
+            "Legacy BIOS boot detected — systemd-boot unavailable; will stay on GRUB2.".to_string(),
+        );
     }
     if report.is_uefi && !report.nvram_writable {
-        issues
-            .push("UEFI NVRAM not writable — efibootmgr may fail; systemd-boot may not register.");
+        issues.push(
+            "UEFI NVRAM not writable — efibootmgr may fail; systemd-boot may not register."
+                .to_string(),
+        );
     }
     if !report.esp_detected {
-        issues.push("No ESP found — systemd-boot unavailable; will use GRUB2.");
+        issues.push("No ESP found — systemd-boot unavailable; will use GRUB2.".to_string());
     }
     if report.is_uefi && report.esp_path.is_some() && !report.esp_ready_for_systemd_boot {
-        issues.push("ESP too small for systemd-boot — need >=150 MB free; will use GRUB2 instead.");
+        issues.push(
+            "ESP too small for systemd-boot — need >=150 MB free; will use GRUB2 instead."
+                .to_string(),
+        );
     }
     if report.is_uefi && !report.systemd_boot_binaries_present {
-        issues.push("systemd-boot binaries missing in source OS — migration will extract them from the target image instead.");
+        issues.push("systemd-boot binaries missing in source OS — migration will extract them from the target image instead.".to_string());
     }
     if !report.grub_tools_available {
         issues.push(
-            "No GRUB tools (grub2-reboot, grub2-editenv) — one-shot boot selection may fail.",
+            "No GRUB tools (grub2-reboot, grub2-editenv) — one-shot boot selection may fail."
+                .to_string(),
         );
     }
     if !report.supports_reflink {
-        issues.push("No reflink support — object copies will use 1.5× more disk space.");
+        issues
+            .push("No reflink support — object copies will use 1.5× more disk space.".to_string());
     }
     let has_free_space =
         report.composefs_free_bytes as f64 > (report.ostree_repo_size_bytes as f64 * 1.5);
     if !has_free_space && report.ostree_repo_size_bytes > 0 {
         issues.push(
-            "Insufficient free space for migration — need >=1.5× repo size (without reflink).",
+            "Insufficient free space for migration — need >=1.5× repo size (without reflink)."
+                .to_string(),
         );
+    }
+    // Separate from the check above: that one sizes the composefs store's
+    // filesystem against the repo being converted, while Phase 2 pulls the
+    // target image into podman's storage under /var. On a dedicated /var those
+    // are different volumes, and only this check looks at the one the pull
+    // actually writes to (bootc-migrate#185).
+    if !container_storage_has_room(report.container_storage_free_bytes) {
+        let free_gb = report.container_storage_free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let min_gb = MIN_CONTAINER_STORAGE_BYTES as f64 / (1024.0 * 1024.0 * 1024.0);
+        let separate = if report.var_is_separate_mount {
+            " /var is a separate volume, so free space on / does not help here."
+        } else {
+            ""
+        };
+        issues.push(format!(
+            "Low free space on {} ({:.1} GB) for the target image pull — \
+             recommend >={:.0} GB.{}",
+            report.container_storage_path, free_gb, min_gb, separate
+        ));
     }
     issues
 }
@@ -231,6 +285,9 @@ mod tests {
             fs_type: Some("btrfs".into()),
             ostree_repo_size_bytes: 8_000_000_000,
             composefs_free_bytes: 33_000_000_000,
+            container_storage_free_bytes: MIN_CONTAINER_STORAGE_BYTES,
+            container_storage_path: "/var/lib/containers/storage".to_string(),
+            var_is_separate_mount: false,
             esp_ready_for_systemd_boot: true,
             systemd_boot_binaries_present: true,
             grub_tools_available: true,
@@ -326,5 +383,71 @@ mod tests {
                 .iter()
                 .any(|i| i.contains("Insufficient free space"))
         );
+    }
+
+    /// bootc-migrate#185: the Phase-2 pull lands in podman's storage under
+    /// /var, not on the composefs store's filesystem. A system with plenty of
+    /// room for the store and none for the pull must still be warned.
+    #[test]
+    fn low_container_storage_is_reported_even_when_composefs_space_is_fine() {
+        let mut r = healthy();
+        // Composefs side deliberately generous — this is the exact shape the
+        // LVM E2E cell had: roomy root, tiny dedicated /var.
+        r.composefs_free_bytes = 200 * 1024 * 1024 * 1024;
+        r.ostree_repo_size_bytes = 1024 * 1024 * 1024;
+        r.container_storage_free_bytes = 4 * 1024 * 1024 * 1024;
+        r.container_storage_path = "/var".to_string();
+        r.var_is_separate_mount = true;
+
+        let issues = readiness_issues(&r);
+        let hit = issues
+            .iter()
+            .find(|i| i.contains("Low free space"))
+            .expect("expected a container-storage warning");
+        // The message has to name the mount to enlarge; "insufficient space"
+        // pointing at repo size is what made this failure hard to read.
+        assert!(hit.contains("/var"), "message must name the mount: {hit}");
+        assert!(
+            hit.contains("4.0 GB"),
+            "message must state what was found: {hit}"
+        );
+        assert!(
+            hit.contains("separate volume"),
+            "a dedicated /var is the case where free space on / misleads: {hit}"
+        );
+        // The repo-size check must NOT fire here — they are separate concerns.
+        assert!(
+            !issues.iter().any(|i| i.contains("1.5×")),
+            "composefs space was ample; only the /var warning belongs: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ample_container_storage_is_silent() {
+        let mut r = healthy();
+        r.container_storage_free_bytes = 50 * 1024 * 1024 * 1024;
+        assert!(readiness_issues(&r).is_empty());
+    }
+
+    #[test]
+    fn container_storage_threshold_is_inclusive_at_the_boundary() {
+        assert!(container_storage_has_room(MIN_CONTAINER_STORAGE_BYTES));
+        assert!(!container_storage_has_room(MIN_CONTAINER_STORAGE_BYTES - 1));
+        assert!(!container_storage_has_room(0));
+    }
+
+    /// Without a separate /var the message must not claim there is one.
+    #[test]
+    fn single_filesystem_omits_the_separate_volume_note() {
+        let mut r = healthy();
+        r.container_storage_free_bytes = 1024;
+        r.container_storage_path = "/var/lib/containers/storage".to_string();
+        r.var_is_separate_mount = false;
+        let issues = readiness_issues(&r);
+        let hit = issues
+            .iter()
+            .find(|i| i.contains("Low free space"))
+            .unwrap();
+        assert!(!hit.contains("separate volume"), "{hit}");
     }
 }

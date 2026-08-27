@@ -167,6 +167,40 @@ pub fn get_free_space<P: AsRef<Path>>(path: P) -> Result<u64> {
     Ok(block_size * stats.f_bavail)
 }
 
+/// Candidate paths for podman's container storage, most specific first.
+///
+/// Phase 2 pulls the target image through podman, which bind-mounts
+/// `/var/lib/containers/storage` from the host, so this — not `/sysroot` — is
+/// where the migration's largest single write lands.
+const CONTAINER_STORAGE_CANDIDATES: [&str; 3] = ["/var/lib/containers/storage", "/var", "/"];
+
+/// Pick the most specific container-storage path that exists.
+///
+/// Split from the `statvfs` call so the selection order is testable without
+/// touching the host's real `/var`.
+pub fn select_container_storage_path<F>(exists: F) -> &'static str
+where
+    F: Fn(&str) -> bool,
+{
+    CONTAINER_STORAGE_CANDIDATES
+        .into_iter()
+        .find(|p| exists(p))
+        .unwrap_or("/")
+}
+
+/// Whether `/var` is its own mount point rather than part of the root
+/// filesystem, read from `/proc/mounts`.
+///
+/// This is the layout where the existing `/sysroot`-based free-space check is
+/// most misleading: root can have tens of gigabytes free while a dedicated
+/// `/var` volume is far too small for the pull (bootc-migrate#185).
+pub fn parse_var_is_separate_mount(proc_mounts: &str) -> bool {
+    proc_mounts
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .any(|mount_point| mount_point == "/var")
+}
+
 pub fn check_reflink_support<P: AsRef<Path>>(dir: P) -> bool {
     let src = dir.as_ref().join(".reflink_test_src");
     let dest = dir.as_ref().join(".reflink_test_dest");
@@ -220,6 +254,15 @@ pub struct SystemInfo {
     pub fs_type: Option<String>,
     pub ostree_repo_size_bytes: u64,
     pub composefs_free_bytes: u64,
+    /// Free space where podman's container storage lives — where the Phase-2
+    /// pull of the target image actually lands. Distinct from
+    /// `composefs_free_bytes`, which measures the composefs store's filesystem.
+    pub container_storage_free_bytes: u64,
+    /// Which path `container_storage_free_bytes` was measured on, so the
+    /// readiness message can name the mount the user has to enlarge.
+    pub container_storage_path: String,
+    /// Whether `/var` is a separate mount from the root filesystem.
+    pub var_is_separate_mount: bool,
     /// Whether the systemd-boot EFI binaries are installed in the running deployment
     /// (i.e. `/usr/lib/systemd/boot/efi` exists). `bootctl install` requires this.
     pub systemd_boot_binaries_present: bool,
@@ -385,6 +428,15 @@ impl SystemInfo {
             get_free_space(base).unwrap_or(0)
         };
 
+        // Where the Phase-2 podman pull lands — a different filesystem from
+        // the composefs store whenever /var is its own volume.
+        let container_storage_path =
+            select_container_storage_path(|p| Path::new(p).exists()).to_string();
+        let container_storage_free_bytes = get_free_space(&container_storage_path).unwrap_or(0);
+        let var_is_separate_mount = fs::read_to_string("/proc/mounts")
+            .map(|m| parse_var_is_separate_mount(&m))
+            .unwrap_or(false);
+
         let systemd_boot_binaries_present = Path::new("/usr/lib/systemd/boot/efi").exists();
 
         Ok(SystemInfo {
@@ -400,10 +452,54 @@ impl SystemInfo {
             fs_type,
             ostree_repo_size_bytes,
             composefs_free_bytes,
+            container_storage_free_bytes,
+            container_storage_path,
+            var_is_separate_mount,
             esp_detected,
             systemd_boot_binaries_present,
             grub_tools_available,
             sysroot_was_ro,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pull follows podman's storage path, so the most specific existing
+    /// candidate wins — measuring "/" when /var is a small separate volume is
+    /// exactly the mistake bootc-migrate#185 describes.
+    #[test]
+    fn container_storage_path_prefers_the_most_specific_existing_candidate() {
+        assert_eq!(
+            select_container_storage_path(|_| true),
+            "/var/lib/containers/storage"
+        );
+        assert_eq!(
+            select_container_storage_path(|p| p != "/var/lib/containers/storage"),
+            "/var"
+        );
+        assert_eq!(select_container_storage_path(|p| p == "/"), "/");
+        // Nothing exists (shouldn't happen on a real host): fall back, no panic.
+        assert_eq!(select_container_storage_path(|_| false), "/");
+    }
+
+    #[test]
+    fn separate_var_mount_is_detected_from_proc_mounts() {
+        let with_var = "/dev/mapper/vg-root / xfs rw,relatime 0 0\n\
+                        /dev/mapper/vg-var /var xfs rw,relatime 0 0\n\
+                        proc /proc proc rw 0 0\n";
+        assert!(parse_var_is_separate_mount(with_var));
+
+        let without_var = "/dev/mapper/vg-root / xfs rw,relatime 0 0\n\
+                           proc /proc proc rw 0 0\n";
+        assert!(!parse_var_is_separate_mount(without_var));
+
+        // A nested path under /var is not itself a /var mount.
+        let nested_only = "/dev/sda1 /var/lib/containers xfs rw 0 0\n";
+        assert!(!parse_var_is_separate_mount(nested_only));
+
+        assert!(!parse_var_is_separate_mount(""));
     }
 }

@@ -426,6 +426,12 @@ fn main() {
                 fs_type: Some("btrfs".to_string()),
                 ostree_repo_size_bytes: 0,
                 composefs_free_bytes: 0,
+                // Permissive like every other field here: preflight failed and
+                // the user passed --skip-preflight, so nothing was measured.
+                // Warning about space we never looked at would be noise.
+                container_storage_free_bytes: u64::MAX,
+                container_storage_path: "/var/lib/containers/storage".to_string(),
+                var_is_separate_mount: false,
                 esp_ready_for_systemd_boot: true,
                 systemd_boot_binaries_present: false,
                 grub_tools_available: true,

@@ -8,7 +8,7 @@ pub mod validate;
 pub use system_info::{
     BootcStatus, BootedStatus, HostStatus, PendingTransactionStatus, SystemInfo,
     check_pending_ostree_transaction, check_reflink_support, count_composefs_files, get_free_space,
-    parse_ostree_status_for_pending,
+    parse_ostree_status_for_pending, parse_var_is_separate_mount, select_container_storage_path,
 };
 
 use anyhow::Result;
@@ -30,6 +30,14 @@ pub struct PreflightReport {
     pub fs_type: Option<String>,
     pub ostree_repo_size_bytes: u64,
     pub composefs_free_bytes: u64,
+    /// Free space where podman's container storage lives — where the Phase-2
+    /// pull of the target image lands, which is a different filesystem from
+    /// the composefs store whenever /var is its own volume.
+    pub container_storage_free_bytes: u64,
+    /// Which path `container_storage_free_bytes` was measured on.
+    pub container_storage_path: String,
+    /// Whether /var is a separate mount from the root filesystem.
+    pub var_is_separate_mount: bool,
     /// Whether the ESP has enough space for systemd-boot (≥150 MB).
     pub esp_ready_for_systemd_boot: bool,
     /// Whether the systemd-boot EFI binaries are installed in the running deployment
@@ -75,6 +83,9 @@ mod tests {
             fs_type: Some("btrfs".to_string()),
             ostree_repo_size_bytes: 1024 * 1024 * 1024,
             composefs_free_bytes: 5 * 1024 * 1024 * 1024,
+            container_storage_free_bytes: 20 * 1024 * 1024 * 1024,
+            container_storage_path: "/var/lib/containers/storage".to_string(),
+            var_is_separate_mount: false,
             esp_ready_for_systemd_boot: true,
             systemd_boot_binaries_present: true,
             grub_tools_available: true,
