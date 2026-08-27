@@ -1117,7 +1117,7 @@ if [ "$E2E_MODE" = "tui-migrate" ]; then
 
     step "=== tui-migrate: driving etc-drift --interactive (#15 checklist) ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "python3 /var/tmp/tui-e2e-driver.py --mode drift --binary /var/tmp/bootc-migrate --output /var/tmp/etc-drift-manifest.json --transcript /var/tmp/tui-drift-transcript.txt" \
+        "python3 /var/tmp/tui-e2e-driver.py --mode drift --binary /var/tmp/bootc-migrate --output /var/tmp/etc-drift-manifest.json --transcript /var/tmp/tui-drift-transcript.txt --record /var/tmp/tui-drift.cast --snapshot-dir /var/tmp/tui-snapshots" \
         2>&1 | sed 's/^/[tui-drift] /'; then
         echo "FAIL: TUI drift review driver failed; final screen follows"
         ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-drift-transcript.txt" 2>/dev/null || true
@@ -1149,7 +1149,7 @@ fi
 # toggled on — the exact configuration of the CLI invocation), so the
 # `[migrate]` stream carries the driver's screen-by-screen progress.
 if [ "$E2E_MODE" = "tui-migrate" ]; then
-    MIGRATE_CMD="python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt"
+    MIGRATE_CMD="python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt --record /var/tmp/tui-migrate.cast --snapshot-dir /var/tmp/tui-snapshots"
 else
     MIGRATE_CMD="/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
 fi
@@ -1168,13 +1168,33 @@ HB_PID=""
 MIGRATE_RC=$(cat /tmp/e2e-migrate.rc 2>/dev/null | cut -d= -f2)
 rm -f /tmp/e2e-migrate.rc
 step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=${MIGRATE_RC:-?})"
+# Pull the TUI walkthrough artifacts out of the guest: the asciicast
+# recordings of both interactive flows (render a timelapse with
+# `asciinema play` or `agg … .gif` — CI does the latter) and the
+# per-screen text screenshots. Runs on failure too — a failed run's
+# recording is exactly the debugging evidence wanted — and before the
+# reboot on success. Best-effort: a failed copy must not fail an
+# otherwise green migration.
+fetch_tui_artifacts() {
+    step "=== tui-migrate: fetching recordings + screenshots from VM ==="
+    scp $SCP_OPTS root@localhost:/var/tmp/tui-migrate.cast \
+        root@localhost:/var/tmp/tui-drift.cast "$WORKSPACE_DIR"/ 2>/dev/null || true
+    scp $SCP_OPTS -r root@localhost:/var/tmp/tui-snapshots "$WORKSPACE_DIR"/ 2>/dev/null || true
+    ls -la "$WORKSPACE_DIR"/tui-*.cast "$WORKSPACE_DIR"/tui-snapshots 2>/dev/null || true
+}
+
 if [ "${MIGRATE_RC:-1}" != "0" ]; then
     echo "ERROR: migration binary exited with rc=${MIGRATE_RC:-?}" >&2
     if [ "$E2E_MODE" = "tui-migrate" ]; then
         echo "--- TUI wizard final screen ---" >&2
         ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-wizard-transcript.txt" 2>/dev/null >&2 || true
+        fetch_tui_artifacts
     fi
     exit "${MIGRATE_RC:-1}"
+fi
+
+if [ "$E2E_MODE" = "tui-migrate" ]; then
+    fetch_tui_artifacts
 fi
 
 # e2e-sshd.socket baked into the base image (see MODIFIED_IMAGE above) is
@@ -1749,12 +1769,20 @@ if ! echo "$COMMIT_OUT" | grep -q "Reclaimed:"; then
 fi
 echo "OK: commit subcommand ran without error."
 
-# Post-conditions: everything OSTree-shaped should be gone.
-POST_OSTREE=$(ssh $SSH_OPTS root@localhost "test -d /sysroot/ostree && echo present || echo absent")
-if [ "$POST_OSTREE" != "absent" ]; then
-    echo "FAIL: /sysroot/ostree still present after commit"; exit 1
+# Post-conditions: everything OSTree-shaped that belongs to the SOURCE
+# deployment should be gone. /sysroot/ostree itself may legitimately
+# remain: commit deliberately preserves ostree/bootc — the target bootc
+# installation's own container storage (#84's keep-bootc contract in
+# transaction.rs::remove_legacy_ostree_content) — and does not rmdir the
+# parent. The old `test -d` absence check contradicted that contract and
+# could never pass; first caught when the ubuntu-latest probes brought
+# this cell back to life (2026-08-27) after the KVM matrix went dark.
+POST_OSTREE=$(ssh $SSH_OPTS root@localhost \
+    "if [ ! -d /sysroot/ostree ]; then echo absent; else ls -A /sysroot/ostree | grep -v '^bootc\$' | xargs; fi")
+if [ -n "$POST_OSTREE" ] && [ "$POST_OSTREE" != "absent" ]; then
+    echo "FAIL: legacy content still under /sysroot/ostree after commit: $POST_OSTREE"; exit 1
 fi
-echo "OK: /sysroot/ostree removed."
+echo "OK: no legacy OSTree content under /sysroot/ostree (only bootc/ may remain)."
 
 POST_ALEPH=$(ssh $SSH_OPTS root@localhost "test -e /sysroot/.bootc-aleph.json && echo present || echo absent")
 if [ "$POST_ALEPH" != "absent" ]; then

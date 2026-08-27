@@ -222,6 +222,42 @@ jobs:
         if: always()
         run: df -h /
 
+      # The tui-migrate cell records both interactive flows as asciicast
+      # v2 and saves a per-screen text screenshot (see e2e-single.yml's
+      # twin steps for details). Rendered GIF timelapse + raw casts +
+      # screenshots are published on every run of that cell, pass or fail.
+      - name: Render TUI timelapse GIFs
+        if: ${{ always() && matrix.scenario.mode == 'tui-migrate' }}
+        run: |
+          if [ ! -f tui-migrate.cast ] && [ ! -f tui-drift.cast ]; then
+            echo "no asciicast produced (run failed before the TUI flows)"; exit 0
+          fi
+          curl -sSL -o /tmp/agg \
+            https://github.com/asciinema/agg/releases/download/v1.5.0/agg-x86_64-unknown-linux-gnu
+          echo "59673469d625df6f55c72159c84ffbb7af1348ac379d0e79db43f4b80fb986a3  /tmp/agg" | sha256sum -c -
+          chmod +x /tmp/agg
+          if [ -f tui-migrate.cast ]; then
+            /tmp/agg --idle-time-limit 2 --speed 3 tui-migrate.cast tui-migrate.gif || true
+          fi
+          if [ -f tui-drift.cast ]; then
+            /tmp/agg --idle-time-limit 2 tui-drift.cast tui-drift.gif || true
+          fi
+          ls -la tui-*.gif 2>/dev/null || true
+
+      - name: Upload TUI walkthrough artifacts
+        if: ${{ always() && matrix.scenario.mode == 'tui-migrate' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-walkthrough-${{ strategy.job-index }}
+          path: |
+            tui-migrate.cast
+            tui-drift.cast
+            tui-migrate.gif
+            tui-drift.gif
+            tui-snapshots/
+          if-no-files-found: warn
+          retention-days: 14
+
       # Diagnosis starts from the job summary, not a 30 MB log download:
       # the last phase banner reached, every FAIL/ERROR assertion, and the
       # log tail land in $GITHUB_STEP_SUMMARY on failure.

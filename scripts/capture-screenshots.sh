@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Capture TUI screenshots for the tuna-os/docs website.
 #
+# NOTE: the E2E tui-migrate cell now produces walkthrough artifacts
+# automatically on every run — asciicast recordings, timelapse GIFs, and
+# per-screen text screenshots (see docs/testing.md "TUI testing", the
+# tui-walkthrough CI artifact, and tests/tui-e2e-driver.py --record /
+# --snapshot-dir). This script remains for styled PNG captures via vhs.
+#
 # Prerequisites:
 #   - Install `vhs` (https://github.com/charmbracelet/vhs)
 #     brew install vhs  OR  go install github.com/charmbracelet/vhs@latest

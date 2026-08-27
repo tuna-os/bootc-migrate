@@ -72,20 +72,43 @@ jobs:
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
 
+      # GitHub-hosted runner images ship a podman storage config whose
+      # overlay options leave "Native Overlay Diff: false", so every
+      # layer commit falls back to the naive diff driver — a full
+      # walk-and-compare of the ~10 GB bluefin rootfs, measured at
+      # ~30 min per trivial RUN on the 2026-08-27 probes (disk itself
+      # was fine: 419 MB/s; driver was already overlay, not vfs).
+      # Replace it with a minimal storage.conf (no mount_program, no
+      # ignore_chown_errors) and reset the (still empty at this point)
+      # graph so rootful podman uses native kernel overlayfs diffs.
+      # Probe-gated: the kanpur self-hosted runner keeps its own config.
+      - name: Use native overlay diffs for podman (probe only)
+        if: ${{ inputs.runner != '' }}
+        run: |
+          sudo tee /etc/containers/storage.conf >/dev/null <<'EOF'
+          [storage]
+          driver = "overlay"
+          runroot = "/run/containers/storage"
+          graphroot = "/var/lib/containers/storage"
+          EOF
+          sudo rm -rf /var/lib/containers/storage
+          sudo podman info | grep -iA5 'graphStatus' || true
+
       # Only on probe dispatches (runner override set): surface the I/O
       # facts that decide whether a hosted runner is viable — podman's
-      # storage driver (a vfs fallback copies the whole ~10 GB base image
-      # on every layer commit) and raw disk write throughput (Azure burst
-      # credit exhaustion shows up here). Pure diagnosis, no mutation.
+      # storage driver ("Native Overlay Diff: false" means naive
+      # walk-the-whole-image layer commits) and raw disk write
+      # throughput (Azure burst credit exhaustion shows up here).
       - name: Runner I/O diagnostics (probe only)
         if: ${{ inputs.runner != '' }}
         run: |
           echo "=== podman storage driver ==="
           sudo podman info --format '{{.Store.GraphDriverName}} rootless={{.Host.Security.Rootless}}' || true
-          sudo podman info | grep -iA3 'graphDriverName\|graphRoot' || true
+          sudo podman info | grep -iA5 'graphDriverName\|graphRoot\|graphStatus' || true
           echo "=== filesystems ==="
           df -hT / /var/lib/containers 2>/dev/null || df -hT /
           echo "=== raw write throughput (1 GiB) ==="
+          sudo mkdir -p /var/lib/containers
           sudo dd if=/dev/zero of=/var/lib/containers/ddtest bs=1M count=1024 conv=fdatasync 2>&1 | tail -1
           sudo rm -f /var/lib/containers/ddtest
 
@@ -131,6 +154,46 @@ jobs:
             DISK_SIZE="${{ inputs.disk_size }}" \
             E2E_MODE="${{ inputs.mode }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
+
+      # tui-migrate runs record both interactive flows as asciicast v2
+      # (tests/tui-e2e-driver.py --record) and save a plain-text
+      # screenshot per wizard screen. Render the casts to timelapse GIFs
+      # with agg (pinned by sha256) and publish everything as artifacts —
+      # the automated successor to scripts/capture-screenshots.sh.
+      - name: Render TUI timelapse GIFs
+        if: ${{ always() && inputs.mode == 'tui-migrate' }}
+        run: |
+          if [ ! -f tui-migrate.cast ] && [ ! -f tui-drift.cast ]; then
+            echo "no asciicast produced (run failed before the TUI flows)"; exit 0
+          fi
+          curl -sSL -o /tmp/agg \
+            https://github.com/asciinema/agg/releases/download/v1.5.0/agg-x86_64-unknown-linux-gnu
+          echo "59673469d625df6f55c72159c84ffbb7af1348ac379d0e79db43f4b80fb986a3  /tmp/agg" | sha256sum -c -
+          chmod +x /tmp/agg
+          # idle-time-limit collapses the long quiet phases (image pulls,
+          # sealing) so a ~20-min migration plays back in a couple of
+          # minutes — the timelapse effect.
+          if [ -f tui-migrate.cast ]; then
+            /tmp/agg --idle-time-limit 2 --speed 3 tui-migrate.cast tui-migrate.gif || true
+          fi
+          if [ -f tui-drift.cast ]; then
+            /tmp/agg --idle-time-limit 2 tui-drift.cast tui-drift.gif || true
+          fi
+          ls -la tui-*.gif 2>/dev/null || true
+
+      - name: Upload TUI walkthrough artifacts
+        if: ${{ always() && inputs.mode == 'tui-migrate' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-walkthrough
+          path: |
+            tui-migrate.cast
+            tui-drift.cast
+            tui-migrate.gif
+            tui-drift.gif
+            tui-snapshots/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Failure triage into job summary
         if: failure()

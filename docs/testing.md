@@ -76,6 +76,17 @@ pure logic proven cheap, live behavior proven on a real system:
    wizard; two hard-won rules live in its docstring — match against a
    grid, never the raw stream (ratatui diff-draws), and never type while
    a forced-repaint winsize nudge is in flight (the key gets dropped).
+
+   The cell also documents itself: the driver records each flow as an
+   asciicast v2 file (`--record`) and saves a plain-text screenshot of
+   every wizard screen it reaches (`--snapshot-dir`). CI renders the
+   casts into timelapse GIFs with `agg` (long quiet phases collapsed via
+   `--idle-time-limit`) and publishes casts + GIFs + screenshots as the
+   `tui-walkthrough` artifact on every tui-migrate run, pass or fail —
+   the automated successor to the manual vhs capture in
+   `scripts/capture-screenshots.sh`. Replay a cast locally with
+   `asciinema play tui-migrate.cast` or re-render with
+   `agg tui-migrate.cast out.gif`.
 3. **Exploratory, by hand**: Corral VMs (AGENTS.md), for anything the
    scripted flow doesn't reach (resize behavior, colors, feel).
 
