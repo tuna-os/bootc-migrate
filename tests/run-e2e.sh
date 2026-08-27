@@ -1168,26 +1168,33 @@ HB_PID=""
 MIGRATE_RC=$(cat /tmp/e2e-migrate.rc 2>/dev/null | cut -d= -f2)
 rm -f /tmp/e2e-migrate.rc
 step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=${MIGRATE_RC:-?})"
-if [ "${MIGRATE_RC:-1}" != "0" ]; then
-    echo "ERROR: migration binary exited with rc=${MIGRATE_RC:-?}" >&2
-    if [ "$E2E_MODE" = "tui-migrate" ]; then
-        echo "--- TUI wizard final screen ---" >&2
-        ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-wizard-transcript.txt" 2>/dev/null >&2 || true
-    fi
-    exit "${MIGRATE_RC:-1}"
-fi
-
-# Pull the TUI walkthrough artifacts out of the guest now, before the
-# reboot: the asciicast recordings of both interactive flows (render a
-# timelapse with `asciinema play` or `agg … .gif` — CI does the latter)
-# and the per-screen text screenshots. Best-effort: a failed copy must
-# not fail an otherwise green migration.
-if [ "$E2E_MODE" = "tui-migrate" ]; then
+# Pull the TUI walkthrough artifacts out of the guest: the asciicast
+# recordings of both interactive flows (render a timelapse with
+# `asciinema play` or `agg … .gif` — CI does the latter) and the
+# per-screen text screenshots. Runs on failure too — a failed run's
+# recording is exactly the debugging evidence wanted — and before the
+# reboot on success. Best-effort: a failed copy must not fail an
+# otherwise green migration.
+fetch_tui_artifacts() {
     step "=== tui-migrate: fetching recordings + screenshots from VM ==="
     scp $SCP_OPTS root@localhost:/var/tmp/tui-migrate.cast \
         root@localhost:/var/tmp/tui-drift.cast "$WORKSPACE_DIR"/ 2>/dev/null || true
     scp $SCP_OPTS -r root@localhost:/var/tmp/tui-snapshots "$WORKSPACE_DIR"/ 2>/dev/null || true
     ls -la "$WORKSPACE_DIR"/tui-*.cast "$WORKSPACE_DIR"/tui-snapshots 2>/dev/null || true
+}
+
+if [ "${MIGRATE_RC:-1}" != "0" ]; then
+    echo "ERROR: migration binary exited with rc=${MIGRATE_RC:-?}" >&2
+    if [ "$E2E_MODE" = "tui-migrate" ]; then
+        echo "--- TUI wizard final screen ---" >&2
+        ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-wizard-transcript.txt" 2>/dev/null >&2 || true
+        fetch_tui_artifacts
+    fi
+    exit "${MIGRATE_RC:-1}"
+fi
+
+if [ "$E2E_MODE" = "tui-migrate" ]; then
+    fetch_tui_artifacts
 fi
 
 # e2e-sshd.socket baked into the base image (see MODIFIED_IMAGE above) is
