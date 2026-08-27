@@ -206,6 +206,8 @@ class TuiDriver:
         self.snapshot_count = 0
         if snapshot_dir:
             os.makedirs(snapshot_dir, exist_ok=True)
+        # Monotonic time of the last pty output chunk (see synced_check).
+        self.last_data = 0.0
         # Monotonic time of the last winsize nudge. A key written while
         # the TUI is still handling the resulting SIGWINCH/resize event
         # can be dropped by its input backend (observed reproducibly), so
@@ -251,6 +253,7 @@ class TuiDriver:
             raise
         if not chunk:
             return False
+        self.last_data = time.monotonic()
         if self.record_file:
             self.record_file.write(json.dumps([
                 round(time.monotonic() - self.record_start, 6),
@@ -308,6 +311,24 @@ class TuiDriver:
 
         return self._wait(check, timeout, repr(patterns))
 
+    def synced_check(self, check, timeout: float = 8):
+        """Evaluate `check()` against a SETTLED frame: force a repaint,
+        wait until its redraw burst has arrived and gone quiet, then
+        look. Ordinary checks can read stale rows (regions a screen
+        change never overwrote) or half-painted frames (a redraw arrives
+        split across ~4 KB pty chunks) — both were observed steering the
+        driver wrong on slow guests. Presence-of-the-next-screen waits
+        don't need this (the token can only come from a real frame);
+        decisions that key off the CURRENT screen's state do."""
+        start = time.monotonic()
+        self.force_repaint()
+        deadline = start + timeout
+        while time.monotonic() < deadline:
+            self._drain(0.2)
+            if self.last_data > start and time.monotonic() - self.last_data >= 0.5:
+                return check()
+        return check()  # best effort at the deadline
+
     def row_containing(self, *substrs):
         """The first grid row containing every substring, or None."""
         for row in self.screen.rows_text():
@@ -331,9 +352,8 @@ class TuiDriver:
                 self._drain(0.3)
                 self.snapshot(label)
                 return which
-            still_there = self._wait(
-                lambda: True if self.row_containing(from_pattern) else None,
-                4, f"still-on {from_pattern!r}")
+            still_there = self.synced_check(
+                lambda: True if self.row_containing(from_pattern) else None)
             if not still_there:
                 # Transition left the from-screen but the target hasn't
                 # shown yet — give it one long, press-free wait.
@@ -355,16 +375,9 @@ class TuiDriver:
         Checking before pressing keeps toggles from oscillating when the
         grid merely lagged the first press."""
         for _ in range(attempts):
-            if self._wait(check, per_wait, label) is not None:
-                # Guard against reading a half-repainted grid: a forced
-                # repaint starts with a clear, which makes an absence
-                # check trivially true until the redraw lands. Let the
-                # stream settle and confirm before trusting it.
-                self._drain(0.4)
-                if check() is not None:
-                    log(f"state reached ({label})")
-                    return
-                continue
+            if self.synced_check(check, per_wait) is not None:
+                log(f"state reached ({label})")
+                return
             self.send(keys, label)
         self.fail(f"state never reached after {attempts}x {keys!r} ({label})")
 
@@ -493,8 +506,7 @@ def move_options_cursor(driver: TuiDriver, target: int) -> None:
     """Step the ▶ marker to `target`, correcting in either direction —
     self-healing against a dropped j/k."""
     for _ in range(12):
-        cur = driver._wait(lambda: options_cursor_index(driver), 4,
-                           "options cursor marker")
+        cur = driver.synced_check(lambda: options_cursor_index(driver))
         if cur is None:
             driver.fail("options cursor marker (\u25b6) not found")
         if cur == target:
