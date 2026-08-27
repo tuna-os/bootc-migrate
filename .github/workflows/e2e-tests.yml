@@ -232,7 +232,6 @@ jobs:
           echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}" >> "$GITHUB_ENV"
           echo "DISK_SIZE=${{ matrix.scenario.disk_size || '20G' }}" >> "$GITHUB_ENV"
           echo "E2E_MODE=${{ matrix.scenario.mode || 'composefs-migrate' }}" >> "$GITHUB_ENV"
-          echo "E2E_CROSS_BASE=${{ matrix.scenario.cross_base && '1' || '0' }}" >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
         run: df -h /
