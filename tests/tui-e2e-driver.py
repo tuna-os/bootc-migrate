@@ -267,35 +267,106 @@ class TuiDriver:
                 return i
         return None
 
-    def try_find(self, patterns, timeout: float):
-        """Wait for any of `patterns` on the screen; None on timeout.
-        EOF is not fatal — the final screen state is still scanned."""
-        if isinstance(patterns, str):
-            patterns = [patterns]
+    def _wait(self, check, timeout: float, label: str):
+        """Run the passive-then-repaint wait loop until `check()` returns
+        a non-None value or `timeout` passes (returns None). Scans
+        passively first: a fresh screen's own draw usually carries what
+        we're looking for, and nudging a repaint while the key that
+        triggered the transition is still in flight can make the TUI
+        drop it (see last_winch). EOF is not fatal — the final screen
+        state is still scanned."""
         start = time.monotonic()
         deadline = start + timeout
         last_heartbeat = start
-        # Scan passively first: a fresh screen's own draw usually carries
-        # the pattern, and nudging a repaint while the key that triggered
-        # the transition is still in flight can make the TUI drop it (see
-        # last_winch). Only after a quiet second do we start nudging.
         next_repaint = start + 1.0
         eof = False
         while True:
-            which = self._find(patterns)
-            if which is not None:
-                log(f"matched {patterns[which]!r}")
-                return which
+            result = check()
+            if result is not None:
+                return result
             now = time.monotonic()
             if now >= deadline or eof:
                 return None
             if now - last_heartbeat >= 30:
-                log(f"still waiting for {patterns!r} ({int(deadline - now)}s left)")
+                log(f"still waiting for {label} ({int(deadline - now)}s left)")
                 last_heartbeat = now
             if now >= next_repaint:
                 self.force_repaint()
                 next_repaint = now + 5
             eof = not self._drain(min(0.5, deadline - now))
+
+    def try_find(self, patterns, timeout: float):
+        """Wait for any of `patterns` on the screen; None on timeout."""
+        if isinstance(patterns, str):
+            patterns = [patterns]
+
+        def check():
+            which = self._find(patterns)
+            if which is not None:
+                log(f"matched {patterns[which]!r}")
+            return which
+
+        return self._wait(check, timeout, repr(patterns))
+
+    def row_containing(self, *substrs):
+        """The first grid row containing every substring, or None."""
+        for row in self.screen.rows_text():
+            if all(s in row for s in substrs):
+                return row
+        return None
+
+    def advance(self, keys, from_pattern, to_patterns, label,
+                attempts: int = 4, per_wait: float = 10) -> int:
+        """Press `keys` to move between screens, verified: re-press only
+        while the from-screen is still visibly on screen — the recovery
+        for a key dropped in the resize race — and never re-press once
+        it is gone (a blind second press would fire on the next screen
+        and skip ahead)."""
+        if isinstance(to_patterns, str):
+            to_patterns = [to_patterns]
+        for _ in range(attempts):
+            self.send(keys, label)
+            which = self.try_find(to_patterns, per_wait)
+            if which is not None:
+                self._drain(0.3)
+                self.snapshot(label)
+                return which
+            still_there = self._wait(
+                lambda: True if self.row_containing(from_pattern) else None,
+                4, f"still-on {from_pattern!r}")
+            if not still_there:
+                # Transition left the from-screen but the target hasn't
+                # shown yet — give it one long, press-free wait.
+                which = self.try_find(to_patterns, 30)
+                if which is not None:
+                    self._drain(0.3)
+                    self.snapshot(label)
+                    return which
+                self.fail(f"left {from_pattern!r} but {to_patterns!r} "
+                          f"never appeared ({label})")
+            log(f"{keys!r} appears swallowed (still on {from_pattern!r}); retrying")
+        self.fail(f"{to_patterns!r} never appeared after {attempts}x {keys!r} ({label})")
+        return 1  # unreachable
+
+    def ensure_state(self, check, keys, label, attempts: int = 7,
+                     per_wait: float = 4) -> None:
+        """Check-first toggle loop: if `check()` (over the grid) is
+        already satisfied, done; otherwise press `keys` and re-check.
+        Checking before pressing keeps toggles from oscillating when the
+        grid merely lagged the first press."""
+        for _ in range(attempts):
+            if self._wait(check, per_wait, label) is not None:
+                # Guard against reading a half-repainted grid: a forced
+                # repaint starts with a clear, which makes an absence
+                # check trivially true until the redraw lands. Let the
+                # stream settle and confirm before trusting it.
+                self._drain(0.4)
+                if check() is not None:
+                    log(f"state reached ({label})")
+                    return
+                continue
+            self.send(keys, label)
+        self.fail(f"state never reached after {attempts}x {keys!r} ({label})")
 
     def snapshot(self, label: str) -> None:
         """Save the reconstructed screen as a numbered plain-text
@@ -337,7 +408,9 @@ class TuiDriver:
         self.fail(f"{patterns!r} never appeared after {attempts}x {keys!r} ({label})")
         return 1  # unreachable
 
-    WINCH_SETTLE = 1.0
+    # 1.0s was enough on an idle dev box but a loaded VM guest still
+    # dropped a key typed 1s after a nudge (first tui-migrate cell run).
+    WINCH_SETTLE = 2.5
 
     def send(self, keys: str, label: str) -> None:
         # Never type while a winsize nudge may still be mid-flight in the
@@ -397,40 +470,106 @@ def make_driver(args, argv):
                      record_path=args.record, snapshot_dir=args.snapshot_dir)
 
 
-def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> None:
-    """Welcome → Preflight → SelectImage (custom target) → Options → Review."""
-    driver.expect("Step 1 of 5", 30, "welcome screen")
-    driver.send(ENTER, "welcome -> preflight")
-    # Preflight gathers real system data (repo size scan) before this
-    # screen appears, so give it room.
-    driver.expect("System Preflight", 180, "preflight screen")
-    driver.send(ENTER, "preflight -> select image")
-    driver.expect("Select Target Image", 30, "select image screen")
+# The options screen's rows in cursor order — the "▶ " marker plus the
+# "[x]"/"[ ]" boxes these labels sit on are what the verified navigation
+# below reads back instead of trusting blind keystrokes.
+OPTION_ROWS = [
+    "Dry-run (recommended first run)",
+    "Skip Phase 1 OSTree import",
+    "Bootloader",
+    "Skip preflight checks",
+    "Force (ignore non-fatal warnings)",
+]
 
-    # Walk past every preset to the "Custom…" row (the cursor clamps at
-    # the last row, so overshooting is safe), open the editor, type the
-    # target, and confirm it landed before advancing.
-    driver.send("j" * 8, "cursor to custom row")
-    driver.send(ENTER, "open custom image editor")
+
+def options_cursor_index(driver: TuiDriver):
+    for i, label in enumerate(OPTION_ROWS):
+        if driver.row_containing(label, "\u25b6"):
+            return i
+    return None
+
+
+def move_options_cursor(driver: TuiDriver, target: int) -> None:
+    """Step the ▶ marker to `target`, correcting in either direction —
+    self-healing against a dropped j/k."""
+    for _ in range(12):
+        cur = driver._wait(lambda: options_cursor_index(driver), 4,
+                           "options cursor marker")
+        if cur is None:
+            driver.fail("options cursor marker (\u25b6) not found")
+        if cur == target:
+            return
+        driver.send("j" if cur < target else "k",
+                    f"cursor toward {OPTION_ROWS[target]}")
+    driver.fail(f"cursor never reached {OPTION_ROWS[target]}")
+
+
+def set_checkbox(driver: TuiDriver, row_label: str, checked: bool) -> None:
+    box = "[x]" if checked else "[ ]"
+    driver.ensure_state(
+        lambda: True if driver.row_containing(row_label, box) else None,
+        " ", f"set {row_label} to {box}")
+
+
+def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> None:
+    """Welcome → Preflight → SelectImage (custom target) → Options →
+    Review, with every transition and toggle verified against the
+    reconstructed screen (see TuiDriver.advance / ensure_state)."""
+    driver.expect("Step 1 of 5", 30, "welcome screen")
+    # Preflight gathers real system data (repo size scan) synchronously
+    # before its screen appears, so this transition gets a long per-press
+    # wait — a re-press during the scan would queue and skip a screen.
+    driver.advance(ENTER, "Step 1 of 5", "System Preflight",
+                   "welcome -> preflight", per_wait=60)
+    driver.snapshot("preflight screen")
+    driver.advance(ENTER, "System Preflight", "Select Target Image",
+                   "preflight -> select image")
+
+    # Step the ▶ marker down to the "Custom…" row (self-healing against
+    # dropped keys), open the editor — the █ block cursor in the input
+    # box is the proof it is really open, without which the typed image
+    # would be interpreted as hotkeys — type the target, and confirm the
+    # text landed before closing.
+    driver.ensure_state(
+        lambda: True if driver.row_containing("Custom", "\u25b6") else None,
+        "j", "cursor to custom row", attempts=8)
+    driver.ensure_state(
+        lambda: True if driver.row_containing("\u2588") else None,
+        ENTER, "open custom image editor")
     driver.send(args.target_image, "type target image")
-    driver.expect(args.target_image, 10, "typed image visible")
-    driver.send(ENTER, "close editor")
-    driver.send(ENTER, "select image -> options")
-    driver.expect("Configure Options", 30, "options screen")
+    driver.expect(args.target_image, 15, "typed image visible")
+    # From here Enter always progresses: the first closes the editor,
+    # the next advances to the options screen — advance() presses again
+    # only while the select screen is still visibly on screen, so it
+    # walks through both without a separate (and unverifiable: absence
+    # checks can read a half-painted frame) "editor closed" state.
+    driver.advance(ENTER, "Select Target Image", "Configure Options",
+                   "close editor / select image -> options",
+                   attempts=5, per_wait=6)
 
     if configure_live_run:
         # Mirror the scripted invocation the four MVP cells use:
-        # dry-run off (unless asked for), skip-import on, force on.
-        if not args.dry_run:
-            driver.send(" ", "toggle dry-run off")
-        driver.send("j", "cursor to skip-import")
-        driver.send(" ", "toggle skip-import on")
-        driver.send("jjj", "cursor to force")
-        driver.send(" ", "toggle force on")
-    driver.send("n", "options -> review")
-    driver.expect("Review & Run", 30, "review screen")
-    # The review screen must show the command we actually configured.
+        # dry-run off (unless asked for), skip-import on, force on —
+        # each verified against the row's checkbox, not assumed.
+        move_options_cursor(driver, 0)
+        set_checkbox(driver, OPTION_ROWS[0], args.dry_run)
+        move_options_cursor(driver, 1)
+        set_checkbox(driver, OPTION_ROWS[1], True)
+        move_options_cursor(driver, 4)
+        set_checkbox(driver, OPTION_ROWS[4], True)
+    else:
+        # Defaults expected: pin dry-run ON so a stray extra Enter on
+        # this screen (cursor starts on that row) can never silently
+        # turn a self-test into a live run.
+        move_options_cursor(driver, 0)
+        set_checkbox(driver, OPTION_ROWS[0], True)
+    driver.advance("n", "Configure Options", "Review & Run",
+                   "options -> review")
+    # The review screen must show the exact command we configured.
     driver.expect(args.target_image, 10, "target image in review command")
+    if configure_live_run:
+        driver.expect("--skip-import", 10, "skip-import in review command")
+        driver.expect("--force", 10, "force flag in review command")
 
 
 def run_wizard(args) -> None:
@@ -438,11 +577,11 @@ def run_wizard(args) -> None:
     navigate_to_review(driver, args, configure_live_run=True)
     if not args.dry_run:
         driver.expect("LIVE MIGRATION", 10, "live mode tag")
-    driver.send(ENTER, "start migration")
     # "Phase 2 · OCI pull" only exists on the running screen's phase
     # sidebar (the options screen also says "OSTree import", so that
     # label would false-positive before the repaint).
-    driver.expect("Phase 2 · OCI pull", 30, "running screen phase sidebar")
+    driver.advance(ENTER, "Review & Run", "Phase 2 \u00b7 OCI pull",
+                   "start migration")
 
     driver.expect("MIGRATION COMPLETED", args.migration_timeout, "completion banner")
     driver.press_until(ENTER, "Migration Complete!", 20, "running -> complete")
@@ -461,8 +600,8 @@ def run_wizard_expect_failure(args) -> None:
     exits cleanly."""
     driver = make_driver(args, [args.binary, "tui"])
     navigate_to_review(driver, args, configure_live_run=False)
-    driver.send(ENTER, "start migration (will fail preflight)")
-    driver.expect("Phase 2 · OCI pull", 30, "running screen phase sidebar")
+    driver.advance(ENTER, "Review & Run", "Phase 2 · OCI pull",
+                   "start migration (will fail preflight)")
     driver.press_until(ENTER, "Migration Failed", 20, "running -> failed")
     driver.send("q", "exit TUI")
     rc = driver.wait_exit(30)
