@@ -89,6 +89,7 @@ e2e-cross-base: build test
     sudo -E BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
       TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
       DISK_SIZE="40G" \
+      FILESYSTEM="ext4" \
       E2E_MODE="ostree-rebase" \
       E2E_CROSS_BASE="1" \
       ./tests/run-e2e.sh

@@ -141,6 +141,18 @@ jobs:
             target: ghcr.io/projectbluefin/dakota:stable
             mode: ostree-rebase
             cross_base: true
+            # MUST be set explicitly, and must not be btrfs. The matrix
+            # default is btrfs, which suits the Fedora-based bluefin:stable
+            # cells; LTS is CentOS Stream 10 and ships XFS
+            # (docs/filesystem-support.md), and its initramfs cannot find a
+            # btrfs root — the first run of this cell inherited the default
+            # and died in GRUB with "no such device: <root-uuid>" before the
+            # guest ever booted, so the cross-base code never ran.
+            #
+            # ext4 matches the sibling LTS composefs cell (which passes) and
+            # keeps the XFS ext4-loopback store out of a cell whose subject is
+            # cross-base identity handling, not storage.
+            filesystem: ext4
             disk_size: 40G
             # Exploratory on its first outing, following the aurora cell's
             # precedent: this is the first execution of two unproven
