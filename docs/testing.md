@@ -86,6 +86,40 @@ Failed screen and must exit cleanly:
     python3 tests/tui-e2e-driver.py --mode wizard-expect-failure \
       --binary target/debug/bootc-migrate --target-image quay.io/x/y:z
 
+## KVM runner options
+
+The whole E2E matrix needs `/dev/kvm` (TCG is ~10× slower and blows the
+45-minute timeout), which GitHub-hosted runners don't expose. Both E2E
+workflows gate on the `KVM_E2E_ENABLED` org variable and pick their
+runner from one expression, so there are two ways to turn the matrix on:
+
+1. **Self-hosted** (the original setup): register a KVM-capable machine
+   (e.g. kanpur) as an org runner labelled `kvm`, set
+   `KVM_E2E_ENABLED=true`, leave `E2E_RUNSON_SPEC` unset.
+2. **RunsOn on AWS** (https://runs-on.com — ephemeral EC2 runners in
+   your own AWS account, useful when you have AWS credits and no
+   hardware): install the RunsOn GitHub App, deploy its CloudFormation
+   stack **including the nested launch templates** (an existing stack
+   must be upgraded before `nested-virt` jobs run — plain EC2 VMs have
+   no nested virtualization, so this is what exposes `/dev/kvm` without
+   paying for `.metal` instances), then set two variables:
+
+       KVM_E2E_ENABLED=true
+       E2E_RUNSON_SPEC=family=c8i+m8i+r8i/cpu=8/ram=32/volume=120gb/nested-virt/image=ubuntu24-full-x64/spot=false
+
+   The workflows prepend the `runs-on=<run-id>` routing key RunsOn
+   requires; everything after it is yours to tune in the variable
+   without touching workflow YAML. Constraints worth keeping:
+   `nested-virt` needs an x64 image on a supported family
+   (c8i/m8i/r8i); `volume=120gb` covers the 60G sparse guest disk plus
+   both ~5 GB images and the Rust target; `spot=false` (or
+   `retry=when-interrupted`) because a 30-45-minute cell is a bad spot
+   candidate. The `Enable KVM access` step already probes `/dev/kvm`
+   and warns rather than failing, so a mis-sized spec degrades loudly,
+   not silently.
+
+Flipping between the two is a variable change, no workflow edit.
+
 ## Narrow dispatch (implemented)
 
 `e2e-single.yml` dispatches exactly one cell with chosen parameters:

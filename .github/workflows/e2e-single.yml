@@ -35,13 +35,19 @@ on:
         type: choice
         options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate]
 
-# Dispatch-only debug workflow — same QEMU/KVM requirement as e2e-tests.yml:
-# gated on the kanpur "kvm" self-hosted runner via KVM_E2E_ENABLED.
+# Dispatch-only debug workflow — same QEMU/KVM requirement and runner
+# selection as e2e-tests.yml: gated via KVM_E2E_ENABLED, targeting either
+# the "kvm"-labelled self-hosted runner or RunsOn-on-AWS nested-virt
+# runners when E2E_RUNSON_SPEC is set (see e2e-tests.yml's job comment and
+# docs/testing.md "KVM runner options").
 jobs:
   e2e:
     if: ${{ vars.KVM_E2E_ENABLED == 'true' }}
     name: "${{ inputs.base }} -> ${{ inputs.target }} (${{ inputs.filesystem }}, ${{ inputs.mode }})"
-    runs-on: [self-hosted, kvm]
+    runs-on: >-
+      ${{ vars.E2E_RUNSON_SPEC != '' &&
+          format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
+          fromJSON('["self-hosted", "kvm"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout

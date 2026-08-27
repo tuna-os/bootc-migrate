@@ -17,12 +17,23 @@ concurrency:
 
 # The scenarios boot full VMs via QEMU and need hardware KVM acceleration.
 # GitHub-hosted runners (including larger runners) do NOT expose /dev/kvm, so
-# these jobs gate on a KVM-capable self-hosted runner (kanpur) via the
-# KVM_E2E_ENABLED org variable. Fork pull requests are deliberately excluded:
-# this job runs privileged containers and QEMU on the runner host. While the
-# var is unset the matrix is skipped and e2e-gate/required-checks pass
-# trivially. To re-enable: register kanpur as an org runner labelled "kvm" and
-# set KVM_E2E_ENABLED=true.
+# these jobs gate on a KVM-capable runner via the KVM_E2E_ENABLED org
+# variable. Fork pull requests are deliberately excluded: this job runs
+# privileged containers and QEMU on the runner host. While the var is unset
+# the matrix is skipped and e2e-gate/required-checks pass trivially.
+#
+# Two ways to provide the runner (see docs/testing.md "KVM runner options"):
+# - Self-hosted: register a KVM-capable machine (e.g. kanpur) as an org
+#   runner labelled "kvm", set KVM_E2E_ENABLED=true, leave E2E_RUNSON_SPEC
+#   unset.
+# - RunsOn on AWS (https://runs-on.com): deploy the RunsOn stack (with the
+#   nested launch templates), set E2E_RUNSON_SPEC to the label spec after
+#   the routing key — e.g.
+#   family=c8i+m8i+r8i/cpu=8/ram=32/volume=120gb/nested-virt/image=ubuntu24-full-x64/spot=false
+#   (nested-virt needs an x64 image on a supported family; spot=false or
+#   retry=when-interrupted because these jobs run 30-45 min) — and set
+#   KVM_E2E_ENABLED=true. The expression below prepends the per-run
+#   routing key RunsOn requires.
 jobs:
   e2e:
     if: >-
@@ -30,7 +41,10 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
     name: ${{ matrix.scenario.name }}
-    runs-on: [self-hosted, kvm]
+    runs-on: >-
+      ${{ vars.E2E_RUNSON_SPEC != '' &&
+          format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
+          fromJSON('["self-hosted", "kvm"]') }}
     timeout-minutes: 45
     # Exploratory cells (aurora: see below) opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without dragging
@@ -153,7 +167,8 @@ jobs:
             swtpm \
             swtpm-tools \
 
-      # This job only runs on the kanpur self-hosted runner (label "kvm").
+      # Runs on a KVM-capable runner (self-hosted "kvm" label, or RunsOn
+      # with nested-virt — see the job comment above).
       # Make /dev/kvm world-accessible so QEMU can use KVM acceleration (TCG
       # fallback is ~10x slower and blows the 45-minute job timeout — proven on
       # GitHub-hosted 2-core runners, where SSH banner exchanges time out).
