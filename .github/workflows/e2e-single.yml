@@ -33,7 +33,7 @@ on:
         required: false
         default: composefs-migrate
         type: choice
-        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase]
+        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate]
 
 # Dispatch-only debug workflow — same QEMU/KVM requirement as e2e-tests.yml:
 # gated on the kanpur "kvm" self-hosted runner via KVM_E2E_ENABLED.

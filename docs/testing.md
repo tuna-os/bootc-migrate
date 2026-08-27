@@ -39,6 +39,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
+| bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | exploratory (allow_failure) until proven, then gating |
 
 Planned, one per milestone exit (see ROADMAP.md):
 
@@ -56,6 +57,34 @@ Planned, one per milestone exit (see ROADMAP.md):
 Cell design rules: new capability ⇒ new cell (never widen an MVP cell);
 prefer `E2E_MODE` branches in one harness over new harnesses; every cell
 must be runnable locally (`just e2e*` with env overrides).
+
+## TUI testing (three layers)
+
+Interactive code splits the same way the rest of the project does —
+pure logic proven cheap, live behavior proven on a real system:
+
+1. **State machines + rendering, headless**: every checklist/wizard's key
+   handling is a pure function (`handle_key`) and every frame draws into
+   ratatui's `TestBackend` for content assertions — `tui::tests` and
+   `drift_review::tests` in `bootc-migrate`, `boot_entry_review::tests`
+   in `bootc-rebase`. Runs in `cargo test`, no terminal involved.
+2. **The raw terminal event loop, in the VM**: `tests/tui-e2e-driver.py`
+   (stdlib-only python3, runs on the system under test) spawns the TUI on
+   a pty, reconstructs the screen from the emitted escape sequences, and
+   types like a human. The `tui-migrate` cell uses it to drive
+   `etc-drift --interactive` and then a full migration through the
+   wizard; two hard-won rules live in its docstring — match against a
+   grid, never the raw stream (ratatui diff-draws), and never type while
+   a forced-repaint winsize nudge is in flight (the key gets dropped).
+3. **Exploratory, by hand**: Corral VMs (AGENTS.md), for anything the
+   scripted flow doesn't reach (resize behavior, colors, feel).
+
+The driver self-tests on any non-OSTree dev box — the wizard runs to the
+Failed screen and must exit cleanly:
+
+    cargo build
+    python3 tests/tui-e2e-driver.py --mode wizard-expect-failure \
+      --binary target/debug/bootc-migrate --target-image quay.io/x/y:z
 
 ## Narrow dispatch (implemented)
 

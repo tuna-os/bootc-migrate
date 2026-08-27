@@ -102,6 +102,22 @@ jobs:
             mode: ostree-rebase
             disk_size: 40G
             allow_failure: true
+          - name: bluefin -> dakota (TUI-driven migration)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            target: ghcr.io/projectbluefin/dakota:stable
+            # The composefs pipeline with a simulated human at the
+            # controls: tests/tui-e2e-driver.py drives the interactive
+            # Config Drift Review checklist (#15) and then the whole
+            # migration through the TUI wizard on a pty inside the VM;
+            # every downstream assertion of the default mode runs
+            # unchanged. This is the only cell that exercises the
+            # terminal event loops (ROADMAP M5 "no TUI assertions" gap).
+            # Exploratory while it earns trust — promote to gating (drop
+            # allow_failure) after a few green runs, like the aurora
+            # cell's contract.
+            mode: tui-migrate
+            disk_size: 40G
+            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration

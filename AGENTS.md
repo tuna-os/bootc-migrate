@@ -57,6 +57,7 @@ Also available via just: `just watch log="e2e-luks.log"`
 | xfs + loopback | bluefin:lts | dakota:stable | xfs+ext4loop | 20G |
 | LUKS + xfs | bluefin:lts | dakota:stable | xfs+crypt | 40G |
 | LVM-on-LUKS + /var | bluefin:lts | dakota:stable | xfs+lvm+crypt | 40G |
+| TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 40G |
 
 ## Two-candidate CI races
 

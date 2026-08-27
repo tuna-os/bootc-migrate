@@ -25,7 +25,12 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # ostree→ostree re-base (#63): boot the source VM, assert bootc-rebase
 # resolves the OstreeDeploy route on a real OSTree system, and exit —
 # upgraded to the full re-base + validation when Strategy::OstreeDeploy
-# lands (#64).
+# lands (#64). "tui-migrate" is the composefs pipeline with the human at
+# the controls simulated: the interactive Config Drift Review checklist
+# (#15) and then the whole migration are driven through the TUI wizard by
+# tests/tui-e2e-driver.py on the VM, and every downstream assertion of
+# the default mode runs unchanged — this is the cell that proves the
+# terminal event loops CI could previously only compile (ROADMAP M5).
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
@@ -1102,12 +1107,55 @@ step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
 ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
 
+# TUI mode: same migration, but a simulated human drives it. Upload the
+# pty driver, prove the interactive Config Drift Review checklist first
+# (it's read-only and, like a real "Phase 0.5", runs before migration),
+# then let the wizard-driven run below replace the plain CLI invocation.
+if [ "$E2E_MODE" = "tui-migrate" ]; then
+    step "=== tui-migrate: uploading TUI driver ==="
+    scp $SCP_OPTS "$SCRIPT_DIR/tui-e2e-driver.py" root@localhost:/var/tmp/tui-e2e-driver.py
+
+    step "=== tui-migrate: driving etc-drift --interactive (#15 checklist) ==="
+    if ! ssh $SSH_OPTS root@localhost \
+        "python3 /var/tmp/tui-e2e-driver.py --mode drift --binary /var/tmp/bootc-migrate --output /var/tmp/etc-drift-manifest.json --transcript /var/tmp/tui-drift-transcript.txt" \
+        2>&1 | sed 's/^/[tui-drift] /'; then
+        echo "FAIL: TUI drift review driver failed; final screen follows"
+        ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-drift-transcript.txt" 2>/dev/null || true
+        exit 1
+    fi
+    # The /etc fixtures injected above guarantee real drift (hostname,
+    # hosts, sshd_config.d, sudoers.d), and the driver unchecked exactly
+    # one entry — assert the manifest recorded both kinds of decision.
+    # (The manifest is deliberately NOT passed to the migration: this
+    # cell must keep the default merge behavior the downstream fixture
+    # assertions were written for.)
+    ssh $SSH_OPTS root@localhost python3 <<'DRIFTCHECK'
+import json
+with open("/var/tmp/etc-drift-manifest.json") as f:
+    decisions = json.load(f)["decisions"]
+assert decisions, "FAIL: drift manifest has no decisions"
+taken = sum(1 for keep in decisions.values() if not keep)
+assert taken == 1, f"FAIL: expected exactly 1 take-target decision, got {taken}"
+print(f"OK: drift manifest has {len(decisions)} decision(s), "
+      f"{len(decisions) - taken} keep-current, {taken} take-target")
+DRIFTCHECK
+fi
+
 # Run the migration in the background so we can interleave a heartbeat. Pipe the
 # binary's output through a prefixer so its `=== Phase N ===` lines show up as
 # `[migrate]` in the CI log, distinct from script-level `[e2e …]` markers.
+# In tui-migrate mode the same run is driven through the TUI wizard on a
+# pty instead (custom image typed in, dry-run off, skip-import + force
+# toggled on — the exact configuration of the CLI invocation), so the
+# `[migrate]` stream carries the driver's screen-by-screen progress.
+if [ "$E2E_MODE" = "tui-migrate" ]; then
+    MIGRATE_CMD="python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt"
+else
+    MIGRATE_CMD="/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
+fi
 MIGRATE_START=$SECONDS
 {
-    ssh $SSH_OPTS root@localhost "/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import" 2>&1 \
+    ssh $SSH_OPTS root@localhost "$MIGRATE_CMD" 2>&1 \
       | awk '{ print "[migrate] " $0; fflush() }'
     echo "MIGRATE_RC=${PIPESTATUS[0]}" > /tmp/e2e-migrate.rc
 } &
@@ -1122,6 +1170,10 @@ rm -f /tmp/e2e-migrate.rc
 step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=${MIGRATE_RC:-?})"
 if [ "${MIGRATE_RC:-1}" != "0" ]; then
     echo "ERROR: migration binary exited with rc=${MIGRATE_RC:-?}" >&2
+    if [ "$E2E_MODE" = "tui-migrate" ]; then
+        echo "--- TUI wizard final screen ---" >&2
+        ssh $SSH_OPTS root@localhost "cat /var/tmp/tui-wizard-transcript.txt" 2>/dev/null >&2 || true
+    fi
     exit "${MIGRATE_RC:-1}"
 fi
 
