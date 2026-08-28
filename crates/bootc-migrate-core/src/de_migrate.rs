@@ -464,6 +464,19 @@ pub struct HookResult {
     pub exit_code: Option<i32>,
 }
 
+/// Report each hook's outcome. Shared by the `de-migrate` subcommand and by
+/// the re-base desktop-migration steps so both render hooks identically.
+pub fn print_hook_results(results: &[HookResult]) {
+    if results.is_empty() {
+        println!("No hooks found.");
+        return;
+    }
+    for r in results {
+        let status = if r.success { "ok" } else { "FAILED" };
+        println!("  hook {} [{status}]", r.path);
+    }
+}
+
 /// Run each hook in order with the given env vars set, stopping only for
 /// I/O errors spawning a hook — a hook that exits non-zero is recorded in
 /// its [`HookResult`] but does not abort the remaining hooks (matches

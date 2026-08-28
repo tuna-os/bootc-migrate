@@ -5,14 +5,17 @@
 //! Every filesystem operation and hook execution is delegated to
 //! `bootc_migrate_core::de_migrate`; nothing here decides *what* to stash.
 //!
-//! `parse_de` and `print_hook_results` live here rather than in `main.rs`
-//! because the automatic controller path needs them too, and #159 asks for
-//! exactly one copy — a second implementation is how the manual and
-//! automatic paths would drift apart on which desktops are accepted or how
-//! a failed hook is reported.
+//! `parse_de` lives here rather than in `main.rs` because #159 asks for
+//! exactly one copy — a second implementation is how the manual and automatic
+//! paths would drift apart on which desktops are accepted. Hook-result
+//! reporting is shared for the same reason, but from
+//! `bootc_migrate_core::de_migrate::print_hook_results`, since the automatic
+//! controller path in the core crate needs it too.
 
 use anyhow::{Context, Result};
 use std::path::Path;
+
+use bootc_migrate_core::de_migrate::print_hook_results;
 
 use crate::DeMigrateAction;
 use crate::DeMigrateArgs;
@@ -106,17 +109,6 @@ pub fn parse_de(name: &str) -> Result<bootc_migrate_core::de_migrate::DesktopEnv
              (expected gnome, kde, cosmic, niri, or xfce)"
         )
     })
-}
-
-pub fn print_hook_results(results: &[bootc_migrate_core::de_migrate::HookResult]) {
-    if results.is_empty() {
-        println!("No hooks found.");
-        return;
-    }
-    for r in results {
-        let status = if r.success { "ok" } else { "FAILED" };
-        println!("  hook {} [{status}]", r.path);
-    }
 }
 
 #[cfg(test)]
