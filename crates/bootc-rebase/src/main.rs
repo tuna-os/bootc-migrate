@@ -6,15 +6,12 @@
 //! is planned. See issues #30 and #45 in tuna-os/bootc-migrate for
 //! the roadmap.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
-use bootc_migrate_core::cross_base;
-use bootc_migrate_core::de_controller::DesktopMigrationController;
 use bootc_migrate_core::preflight;
 use bootc_migrate_core::rebase_controller::{
-    self, CoreMigrationConfig, ImageSwapConfig, validate_target_image,
+    CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig,
 };
-use bootc_migrate_core::selinux;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -413,17 +410,6 @@ fn main() -> Result<()> {
     }
 }
 
-/// Build the cross-base UID/GID remap plan for `target_image` (issue #67
-/// part 1), by comparing this host's base identity against the target
-/// image's. `Ok(None)` means "not cross-base" (or identity couldn't be
-/// established on either side, which is treated the same way — nothing to
-/// gate on unknown information). A registry probe this early in a
-/// freshly-booted system can race the guest's own network coming up (seen
-/// in E2E: `bootc switch`'s own pull moments later succeeds against the
-/// same registry), so a handful of retries absorb that before falling back
-/// to the same "can't establish identity, don't gate" degradation used for
-/// a target with no parseable os-release — printing a warning either way so
-/// the degradation isn't silent.
 /// Scenario A' (issue #66): swap the image on a composefs-backed system.
 /// The route itself lives in the core rebase controller; this only checks
 /// privilege and translates flags.
@@ -439,110 +425,19 @@ fn run_image_swap(args: &Args) -> Result<()> {
 }
 
 /// Scenario A (issue #30): re-base to another image as a plain OSTree
-/// deployment. `bootc switch` already does the heavy lifting on an
-/// OSTree-backed system — staging the target with OSTree's native 3-way /etc
-/// merge and shared /var — so this route is preflight + gating + `bootc
-/// switch` + verification. The previous deployment stays as the rollback
-/// entry, matching the engine's two-phase contract.
-///
-/// The one place that merge is second-guessed is a cross-base re-base, where
-/// "keep the user's value" is the wrong answer for a path whose vendor
-/// default also moved — see [`cross_base::apply_cross_base_etc_policy`].
-///
-/// Bootloader: per the decision on issue #64, this route will migrate to
-/// systemd-boot when the system is ready — wired in once #65's audited
-/// bootloader entry point lands. Until then the current bootloader is kept.
+/// deployment. The route itself lives in the core rebase controller; this
+/// only checks privilege and translates flags.
 fn run_ostree_deploy(args: &Args) -> Result<()> {
     check_root_privilege()?;
-    validate_target_image(&args.target_image)?;
-
-    if args.dry_run {
-        println!("*** DRY RUN MODE — no changes will be made ***");
+    OstreeDeployConfig {
+        target_image: &args.target_image,
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_preflight: args.skip_preflight,
+        accept_cross_base: args.accept_cross_base,
+        de_migrate: args.de_migrate,
     }
-    println!("Checking system state...");
-    let report = preflight::run_preflight_checks()?;
-
-    if !report.is_bootc_ostree && !args.force {
-        bail!("System is not booted into an OSTree deployment. Cannot perform an ostree re-base.");
-    }
-    if report.pending_transaction != preflight::PendingTransactionStatus::Clean
-        && !args.force
-        && !args.skip_preflight
-    {
-        bail!(
-            "Pending OSTree transaction detected: {}. Complete or undeploy it first \
-             (see `ostree admin status`).",
-            report.pending_transaction
-        );
-    }
-    if report.esp_ready_for_systemd_boot && report.nvram_writable {
-        println!(
-            "Note: system is ready for systemd-boot; bootloader migration will be \
-             integrated into this route via the migrate-bootloader work (#65). \
-             Keeping the current bootloader for this re-base."
-        );
-    }
-
-    // Cross-base gate (#67 part 1): always print the remap report before
-    // anything is staged, and refuse without --accept-cross-base so the
-    // blast radius is visible first — including in --dry-run.
-    let cross_base_plan =
-        cross_base::gate_cross_base(&args.target_image, args.accept_cross_base, args.force)?;
-
-    // #80: advisory identity-DB gap check, independent of cross-base status
-    // (the motivating case — Bluefin GNOME → Aurora KDE — is same-base).
-    cross_base::warn_identity_merge_gap(&args.target_image);
-
-    // #68: decide the DE step before staging so a --dry-run shows it too.
-    let de = DesktopMigrationController::new(args.de_migrate, &args.target_image);
-    let de_plan = de.plan_or_report();
-
-    if args.dry_run {
-        if let Some(plan) = &de_plan {
-            de.preview(plan)?;
-        }
-        println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
-        return Ok(());
-    }
-
-    let _sleep_guard = Some(bootc_migrate_core::migration::SleepGuard::new(
-        "bootc ostree re-base in progress",
-    ));
-
-    if let Some(plan) = &de_plan {
-        de.run_pre_switch(plan, false)?;
-    }
-
-    rebase_controller::stage_via_bootc_switch(&args.target_image)?;
-
-    if let Some(plan) = &cross_base_plan {
-        let staged_root = cross_base::staged_deployment_root()
-            .context("failed to locate the staged deployment for cross-base post-processing")?;
-        cross_base::apply_cross_base_remap(&staged_root, plan)?;
-        cross_base::apply_cross_base_etc_policy(&staged_root)?;
-
-        // #67: when the base family changes, the SELinux policy type may
-        // differ — schedule /.autorelabel so the target's policy is applied
-        // to every file on first boot.
-        match selinux::check_and_schedule_autorelabel(&staged_root) {
-            Ok(true) => println!(
-                "SELinux policy type changed for the cross-base target; \
-                 scheduled /.autorelabel in the staged deployment."
-            ),
-            Ok(false) => {}
-            Err(e) => eprintln!("Warning: failed to check SELinux policy compatibility: {e:#}"),
-        }
-    }
-
-    if let Some(plan) = &de_plan {
-        de.run_post_switch(plan, false)?;
-    }
-
-    println!(
-        "Re-base staged. Reboot to enter the new deployment; the previous \
-         deployment remains in the boot menu as rollback."
-    );
-    Ok(())
+    .run()
 }
 
 #[cfg(test)]
