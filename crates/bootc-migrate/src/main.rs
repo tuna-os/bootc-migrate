@@ -482,7 +482,7 @@ fn main() {
 
     if args.review_drift {
         println!("=== Phase 0.5: Config Drift Review ===");
-        match migration::deploy::compute_etc_drift() {
+        match migration::etc_transition::compute_etc_drift() {
             Ok(drift) => match drift_review::run_review(drift) {
                 Ok(Some(manifest)) => etc_overrides = Some(manifest),
                 Ok(None) => {
@@ -546,7 +546,7 @@ fn run_rollback(reboot: bool, dry_run: bool) -> Result<()> {
 /// (issue #15). Read-only; does not require root (only reads /proc/cmdline,
 /// /sysroot/ostree/deploy/.../usr/etc, and /etc).
 fn run_etc_drift(json: bool) -> Result<()> {
-    let drift = migration::deploy::compute_etc_drift()?;
+    let drift = migration::etc_transition::compute_etc_drift()?;
     if json {
         println!(
             "{}",
@@ -574,7 +574,7 @@ fn run_etc_drift(json: bool) -> Result<()> {
 /// Run the interactive Config Drift Review checklist and write the
 /// resulting manifest to `output` (issue #15).
 fn run_etc_drift_interactive(output: &std::path::Path) -> Result<()> {
-    let drift = migration::deploy::compute_etc_drift()?;
+    let drift = migration::etc_transition::compute_etc_drift()?;
     match drift_review::run_review(drift)? {
         Some(manifest) => {
             write_etc_drift_manifest(output, &manifest)?;
