@@ -3,12 +3,40 @@
 All notable changes to `bootc-migrate` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions correspond to GitHub Releases; the binary embeds the git SHA at
-build time (`bootc-migrate --version`).
+The binary embeds the git SHA at build time (`bootc-migrate --version`).
+
+> **Release history correction (#171).** Sections below did *not* all
+> correspond to GitHub Releases. Only `v0.1.1`, `v0.1.2` and `v0.2.0` were
+> ever tagged; the `v0.1.0`, `v0.3.0` and `v0.4.0` sections describe work that
+> landed on `main` but was never released, and their links pointed at tags
+> that return 404. They are kept as the record of what changed and marked
+> accordingly. `v0.5.0` is numbered above both the highest tag (`v0.2.0`) and
+> the highest documented section (`v0.4.0`), so no reader of either sees a
+> version go backwards.
 
 ---
 
 ## [Unreleased]
+
+_Nothing yet._
+
+---
+
+## [v0.5.0] — 2026-08
+
+First release since the repository was renamed from `bootc-migrate-composefs`,
+and the first whose E2E matrix runs on every push (seven cells, hosted
+runners). Ships the `bootc-migrate` binary only; `bootc-rebase` remains
+**experimental and unreleased** — see "Scope" below.
+
+### Scope
+
+- **Released:** `bootc-migrate` — the OSTree → ComposeFS migrator. Covered by
+  the full E2E matrix including rollback and commit.
+- **Not released:** `bootc-rebase`. Its capabilities are implemented but
+  several are unvalidated on real hardware; `ROADMAP.md`'s "Unvalidated paths"
+  table enumerates them. `release.yml` packages only `bootc-migrate`, so this
+  is the existing behaviour, now stated rather than implied.
 
 ### Added
 - `bootc-rebase de-migrate stash|restore` — move a user's desktop-environment
@@ -89,7 +117,7 @@ build time (`bootc-migrate --version`).
 
 ---
 
-## [v0.4.0] — 2026-06
+## [v0.4.0] — never released; 2026-06
 
 ### Added
 - **LVM-on-LUKS E2E scenario** — full coverage for Bluefin LTS systems with a
@@ -112,7 +140,7 @@ build time (`bootc-migrate --version`).
 
 ---
 
-## [v0.3.0] — 2026-05
+## [v0.3.0] — never released; 2026-05
 
 ### Added
 - **LUKS + XFS E2E scenario** (xfs+crypt, 40 GB disk with swtpm TPM2
@@ -139,7 +167,9 @@ build time (`bootc-migrate --version`).
 
 ---
 
-## [v0.2.0] — 2026-04
+## [v0.2.0] — 2026-07-04
+
+_(Section previously dated 2026-04; the tag was created 2026-07-04. #171.)_
 
 ### Added
 - **XFS + ext4 loopback E2E scenario** (Bluefin LTS path).
@@ -165,7 +195,7 @@ build time (`bootc-migrate --version`).
 
 ---
 
-## [v0.1.0] — 2026-03
+## [v0.1.0] — never released; 2026-03
 
 ### Added
 - Initial implementation of the OSTree → ComposeFS in-place migration for
@@ -177,8 +207,8 @@ build time (`bootc-migrate --version`).
 - E2E CI: btrfs scenario on every push to `main`.
 - `justfile` with build, test, E2E, lint, and cleanup recipes.
 
-[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/HEAD...main
-[v0.4.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.4.0
-[v0.3.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.3.0
+[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/v0.5.0...main
+[v0.5.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.5.0
 [v0.2.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.2.0
-[v0.1.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.1.0
+<!-- v0.1.0, v0.3.0 and v0.4.0 were never tagged; linking them to
+     releases/tag/... returned 404. Left unlinked deliberately (#171). -->

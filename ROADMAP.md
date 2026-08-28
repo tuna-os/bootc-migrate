@@ -74,6 +74,9 @@ evidence level visible to adopters. After this release, cadence and the
 
 ## Unvalidated paths (single list for release notes)
 
+Consumed by [RELEASING.md](RELEASING.md), which records the release contract
+(#171): what ships, how versions are chosen, and the pre-tag checklist.
+
 The next release gate requires enumerating "every live or interactive path
 that lacks automated coverage". Assembling that from five milestone
 narratives is error-prone, so it is collected here. #186 tracks the fact that

@@ -379,7 +379,7 @@ pub fn phase5_setup_bootloader(
                 // Must happen before patch_origin_boot_digest so the hash covers
                 // the LVM-enabled initrd bytes, not the original Dakota initrd.
                 if have_initrd
-                    && let Err(e) = rebuild_initrd_with_lvm_if_needed(
+                    && let Err(e) = super::initrd::rebuild_initrd_with_lvm_if_needed(
                         &kver,
                         &mount_path,
                         target_image,
@@ -503,8 +503,12 @@ pub fn phase5_setup_bootloader(
             .context("failed to copy kernel/initrd from target image (GRUB2 path)")?;
 
         if have_grub_initrd
-            && let Err(e) =
-                rebuild_initrd_with_lvm_if_needed(&kver, &mount_path, target_image, &grub_initrd)
+            && let Err(e) = super::initrd::rebuild_initrd_with_lvm_if_needed(
+                &kver,
+                &mount_path,
+                target_image,
+                &grub_initrd,
+            )
         {
             eprintln!("[phase5] Warning: LVM initrd rebuild failed: {e:#}");
         }
