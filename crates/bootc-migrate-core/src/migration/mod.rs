@@ -1,6 +1,7 @@
 pub mod boot;
 pub mod bootloader;
 pub mod deploy;
+pub mod deploy_layout;
 pub mod etc_transition;
 pub mod host_storage;
 pub mod image_access;
@@ -28,8 +29,7 @@ pub(crate) use seal::{build_origin_content, patch_boot_digest_in_content};
 
 use crate::VerityDigest;
 use crate::preflight::PreflightReport;
-use crate::registry::{extract_files_via_registry, extract_subtree_via_registry};
-use crate::xattr;
+use crate::registry::extract_files_via_registry;
 use anyhow::{Context, Result, anyhow};
 use kernel_options::get_kernel_options;
 use os_release::{bls_entry_filename, bls_entry_title, read_os_release};
