@@ -135,7 +135,9 @@ pub fn phase4_stage_deploy(
 
     // Write .imginfo file
     println!("Writing .imginfo file...");
-    if let Ok(config_json) = crate::migration::inspect_image(&pulled_image.config_digest) {
+    if let Ok(config_json) =
+        crate::migration::image_access::inspect_image(&pulled_image.config_digest)
+    {
         let imginfo_path = deploy_dir.join(format!("{}.imginfo", verity.as_hex()));
         if let Err(e) = fs::write(&imginfo_path, &config_json) {
             eprintln!(
@@ -350,32 +352,14 @@ fn perform_etc_merge(
     // (see phase5_setup_bootloader), the mount is empty here. Fall back to a
     // `podman image mount` of the already-cached image — local, real content, and
     // no dependency on reaching the registry mid-migration.
-    let composefs_mounted = match mount_image_for(target_image, sealed_config, &mount_path) {
-        Ok(()) if mount_path.join("etc").is_dir() => true,
-        _ => {
-            eprintln!(
-                "[phase4] composefs /etc mount unavailable; falling back to podman image mount"
-            );
-            false
-        }
-    };
-    let _cfs_guard = if composefs_mounted {
-        Some(MountGuard::new(&mount_path))
-    } else {
-        None
-    };
-    let _podman_guard = if composefs_mounted {
-        None
-    } else {
-        let pm = PodmanImageMount::new(target_image)
-            .context("composefs /etc mount unavailable and podman image mount fallback failed")?;
-        println!(
-            "[phase4] using podman image mount at {} for /etc",
-            pm.path.display()
-        );
-        mount_path = pm.path.clone();
-        Some(pm)
-    };
+    let target = super::image_access::open_target(
+        target_image,
+        sealed_config,
+        &mount_path,
+        "etc",
+        "phase4",
+    )?;
+    mount_path = target.path().to_path_buf();
 
     let old_default_etc = find_ostree_etc_default()?;
     let current_etc = Path::new("/etc");

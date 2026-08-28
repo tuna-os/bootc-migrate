@@ -197,48 +197,15 @@ pub fn phase5_setup_bootloader(
     // own private mount namespace (MS_REC|MS_PRIVATE), which is torn down the
     // instant the subprocess exits — leaving us an empty directory. A zero exit is
     // therefore not enough; we verify the mount actually exposes content here.
-    let composefs_mounted = match mount_image_for(target_image, sealed_config, &mount_path) {
-        Ok(()) if mount_path.join("usr/lib/modules").is_dir() => true,
-        Ok(()) => {
-            eprintln!(
-                "[phase5] composefs mount reported success but exposed no content \
-                 (bootc mounted in a private namespace that did not persist); \
-                 falling back to podman image mount"
-            );
-            false
-        }
-        Err(e) => {
-            eprintln!(
-                "[phase5] composefs overlay mount failed ({e}); \
-                 falling back to podman image mount"
-            );
-            false
-        }
-    };
-    // Only guard the composefs overlay mount when it actually persisted into our
-    // namespace; otherwise umount would just warn about a mount that isn't ours.
-    let _cfs_guard = if composefs_mounted {
-        Some(MountGuard::new(&mount_path))
-    } else {
-        None
-    };
+    let target = super::image_access::open_target(
+        target_image,
+        sealed_config,
+        &mount_path,
+        "usr/lib/modules",
+        "phase5",
+    )?;
+    mount_path = target.path().to_path_buf();
 
-    // Fallback: mount the already-cached image (Phase 2 podman pull) and read boot
-    // artifacts straight off local storage — no network, real file content. This
-    // sidesteps both the private-namespace composefs mount and the registry-stream
-    // path (which fails on hosts that can't reach the upstream registry mid-migration).
-    let _podman_guard = if composefs_mounted {
-        None
-    } else {
-        let pm = PodmanImageMount::new(target_image)
-            .context("composefs mount unavailable and podman image mount fallback also failed")?;
-        println!(
-            "[phase5] using podman image mount at {} for boot artifacts",
-            pm.path.display()
-        );
-        mount_path = pm.path.clone();
-        Some(pm)
-    };
     // We now have a usable rootfs at mount_path (composefs overlay or podman mount).
     let mount_ok = true;
 

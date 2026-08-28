@@ -2,6 +2,7 @@ pub mod boot;
 pub mod bootloader;
 pub mod deploy;
 pub mod host_storage;
+pub mod image_access;
 pub mod import;
 pub mod initrd;
 pub mod kernel_options;
@@ -322,135 +323,6 @@ pub fn run_migration(
         }
     }
     Ok(())
-}
-
-pub fn inspect_image(image_id: &str) -> Result<String> {
-    let output = Command::new("bootc")
-        .args(["internals", "cfs", "--system", "oci", "inspect", image_id])
-        .output()
-        .context("failed to execute bootc internals cfs oci inspect")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("inspect failed: {}", stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Generation-aware composefs overlay mount for phases 4/5.
-///
-/// On a **legacy-CLI host** this is exactly [`mount_image`] with the sealed
-/// config digest — byte-identical to historical behavior.
-///
-/// On a **new-generation host** (no `create-image`/`seal` — issue #72) the
-/// sealed-config identifier resolves nothing (`oci mount` now takes a tag or
-/// manifest digest), and a legacy-delegate-written store additionally lacks
-/// the config-splitstream EROFS named ref that new-gen resolution requires.
-/// Both are fixed by one free operation, verified empirically (see
-/// docs/cfs-cli-generations.md): re-pull the image from `containers-storage:`
-/// — 0 new objects, deduped, rewrites config+manifest splitstreams with the
-/// EROFS ref, and the EROFS id is deterministic so existing BLS/`.origin`
-/// digests stay valid — then mount by the pulled ref. Any failure falls back
-/// to the legacy path (and its raw-EROFS + caller-side podman fallbacks).
-pub fn mount_image_for(target_image: &str, sealed_config: &str, mount_path: &Path) -> Result<()> {
-    if !crate::composefs::host_cfs_is_legacy() {
-        let cs_ref = format!("containers-storage:{target_image}");
-        let pulled = Command::new("bootc")
-            .args(["internals", "cfs", "--system", "oci", "pull", &cs_ref])
-            .output();
-        match pulled {
-            Ok(o) if o.status.success() => {
-                if let Some(mount_str) = mount_path.to_str() {
-                    let mnt = Command::new("bootc")
-                        .args([
-                            "internals",
-                            "cfs",
-                            "--system",
-                            "oci",
-                            "mount",
-                            &cs_ref,
-                            mount_str,
-                        ])
-                        .output();
-                    match mnt {
-                        Ok(m) if m.status.success() => return Ok(()),
-                        Ok(m) => eprintln!(
-                            "[mount] new-gen mount by ref failed ({}); trying legacy identifiers",
-                            String::from_utf8_lossy(&m.stderr).trim()
-                        ),
-                        Err(e) => eprintln!(
-                            "[mount] new-gen mount by ref failed ({e}); trying legacy identifiers"
-                        ),
-                    }
-                }
-            }
-            Ok(o) => eprintln!(
-                "[mount] new-gen containers-storage re-pull failed ({}); \
-                 trying legacy identifiers",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            Err(e) => eprintln!(
-                "[mount] new-gen containers-storage re-pull failed ({e}); \
-                 trying legacy identifiers"
-            ),
-        }
-    }
-    mount_image(sealed_config, mount_path)
-}
-
-pub fn mount_image(image_id: &str, mount_path: &Path) -> Result<()> {
-    let mount_str = mount_path
-        .to_str()
-        .ok_or_else(|| anyhow!("invalid mount path"))?;
-
-    // Always prefer the bootc composefs overlay mount: it stacks the EROFS
-    // metadata layer on top of the content-addressed object tree at
-    // /sysroot/composefs/objects so files read back with their actual content.
-    // A bare `mount -t erofs` returns metadata-only views (sizes look right but
-    // file contents are zero-filled), which silently corrupts every artifact
-    // Phase 5 copies out of the mount (kernel, initrd, systemd-bootx64.efi…).
-    let output = Command::new("bootc")
-        .args([
-            "internals",
-            "cfs",
-            "--system",
-            "oci",
-            "mount",
-            image_id,
-            mount_str,
-        ])
-        .output()
-        .context("failed to execute bootc internals cfs oci mount")?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    // Last-resort fallback: raw EROFS mount. This works only if every file
-    // copied out of the mount happens to be inline (small enough to live in
-    // the EROFS metadata). Reserved for environments where bootc is missing.
-    let bootc_err = String::from_utf8_lossy(&output.stderr).into_owned();
-    let image_path = Path::new("/sysroot/composefs/images").join(image_id);
-    if image_path.exists() {
-        let fallback = Command::new("/usr/bin/mount")
-            .args([
-                "-t",
-                "erofs",
-                "-o",
-                "ro,loop",
-                image_path.to_str().unwrap_or(""),
-                mount_str,
-            ])
-            .output()
-            .context("failed to mount erofs image (bootc cfs fallback)")?;
-        if fallback.status.success() {
-            eprintln!(
-                "Warning: bootc cfs mount failed ({}), fell back to raw EROFS — \
-                 file content beyond the inline threshold will read as zeros.",
-                bootc_err.trim()
-            );
-            return Ok(());
-        }
-    }
-    Err(anyhow!("mount failed: {}", bootc_err))
 }
 
 #[cfg(test)]
