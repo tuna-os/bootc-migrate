@@ -7,9 +7,16 @@
 //! instead of sequencing the individual cleanup steps itself.
 //!
 //! Target-specific hardware and NetworkManager policy lives in
-//! [`super::target_compat`]; this module only calls into it.
+//! [`target_compat`]; this module only calls into it.
 
-use super::*;
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
+
+use crate::migration::{image_access, target_compat};
+use crate::registry::{extract_files_via_registry, extract_subtree_via_registry};
+use crate::xattr;
 
 /// Typed inputs for the `/etc` transition.
 pub(crate) struct EtcTransition<'a> {
@@ -155,13 +162,8 @@ fn perform_etc_merge(
     // (see phase5_setup_bootloader), the mount is empty here. Fall back to a
     // `podman image mount` of the already-cached image — local, real content, and
     // no dependency on reaching the registry mid-migration.
-    let target = super::image_access::open_target(
-        target_image,
-        sealed_config,
-        &mount_path,
-        "etc",
-        "phase4",
-    )?;
+    let target =
+        image_access::open_target(target_image, sealed_config, &mount_path, "etc", "phase4")?;
     mount_path = target.path().to_path_buf();
 
     let old_default_etc = find_ostree_etc_default()?;
@@ -198,8 +200,7 @@ fn perform_etc_merge(
     )
     .context("3-way /etc merge failed")?;
 
-    match super::target_compat::apply_target_gbm_backend_compat(target_image, &mount_path, etc_dir)
-    {
+    match target_compat::apply_target_gbm_backend_compat(target_image, &mount_path, etc_dir) {
         Ok(true) => println!(
             "[phase4] added Mesa's GBM backend directory for hybrid NVIDIA graphics compatibility"
         ),
