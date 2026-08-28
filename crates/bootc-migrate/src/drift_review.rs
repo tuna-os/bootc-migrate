@@ -1,7 +1,7 @@
 //! Interactive "Config Drift Review" checklist (issue #15, "Phase 0.5").
 //!
 //! Presents the `/etc` config drift computed by
-//! [`bootc_migrate_core::migration::deploy::compute_etc_drift`] as a
+//! [`bootc_migrate_core::migration::etc_transition::compute_etc_drift`] as a
 //! checkable list before migration mutates anything. A checked entry keeps
 //! the user's live version — today's default behavior; unchecking an entry
 //! takes the target image's new default instead. Confirming produces an

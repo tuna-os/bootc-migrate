@@ -1,6 +1,7 @@
 pub mod boot;
 pub mod bootloader;
 pub mod deploy;
+pub mod etc_transition;
 pub mod host_storage;
 pub mod image_access;
 pub mod import;
