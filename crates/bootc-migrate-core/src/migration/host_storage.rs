@@ -106,7 +106,18 @@ pub fn check_free_space(reflink_available: bool) -> Result<()> {
 /// and cfsctl; our hand-built XFS-loopback repo must carry it.
 const COMPOSEFS_REPO_META_JSON: &str = "{\n  \"version\": 1,\n  \"algorithm\": \"fsverity-sha512-12\",\n  \"features\": {\n    \"compatible\": [],\n    \"read-only-compatible\": [],\n    \"incompatible\": []\n  }\n}\n";
 
-pub(crate) fn prepare_composefs_storage(report: &PreflightReport) -> Result<Option<MountGuard>> {
+pub(crate) fn prepare_composefs_storage(
+    report: &PreflightReport,
+    dry_run: bool,
+) -> Result<Option<MountGuard>> {
+    if dry_run {
+        // Report against the same predicate a real run uses, so the dry run
+        // cannot disagree with it.
+        if needs_loopback(report.fs_type.as_deref()) {
+            println!("[DRY RUN] Would set up ext4 loopback at /sysroot/composefs for fs-verity.");
+        }
+        return Ok(None);
+    }
     if needs_loopback(report.fs_type.as_deref()) {
         let target = "/sysroot/composefs";
         let img_path = "/sysroot/composefs-loopback.ext4";

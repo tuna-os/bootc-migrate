@@ -8,6 +8,8 @@ pub mod image_access;
 pub mod import;
 pub mod initrd;
 pub mod kernel_options;
+pub mod lifecycle;
+pub mod mount;
 pub mod os_release;
 pub mod pull;
 pub mod rollback;
@@ -24,7 +26,11 @@ pub use rollback::run_rollback;
 pub use seal::phase3_create_image;
 
 pub use boot::find_esp_or_mount;
+// Public API: bootc-rebase constructs this as `migration::SleepGuard`.
+pub use lifecycle::SleepGuard;
 
+pub(crate) use lifecycle::MigrationLifecycle;
+pub(crate) use mount::{MountGuard, PodmanImageMount};
 pub(crate) use seal::{build_origin_content, patch_boot_digest_in_content};
 
 use crate::VerityDigest;
@@ -33,150 +39,10 @@ use crate::registry::extract_files_via_registry;
 use anyhow::{Context, Result, anyhow};
 use kernel_options::get_kernel_options;
 use os_release::{bls_entry_filename, bls_entry_title, read_os_release};
-use rustix::fs::{FlockOperation, flock};
-use rustix::io::Errno;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-
-// ---- Lock file ----
-
-const LOCK_PATH: &str = "/var/run/bootc-migrate.lock";
-
-fn acquire_lock() -> Result<File> {
-    let lock = File::create(LOCK_PATH).context("failed to create lock file")?;
-    // Non-blocking exclusive advisory lock, released when this fd is closed
-    // (i.e. on process exit). Guards against concurrent migration runs.
-    match flock(&lock, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => {}
-        Err(Errno::WOULDBLOCK | Errno::ACCESS) => {
-            return Err(anyhow!(
-                "Another instance of bootc-migrate is already running (lock held at {}).",
-                LOCK_PATH
-            ));
-        }
-        Err(e) => return Err(e).context("failed to acquire lock"),
-    }
-    // Write PID so admins can inspect.
-    let _ = writeln!(&lock, "{}", std::process::id());
-    Ok(lock)
-}
-
-// ---- Mount guard (Optional: safe cleanup of TempDir-backed mounts) ----
-
-pub(crate) struct MountGuard {
-    mount_path: PathBuf,
-}
-
-impl MountGuard {
-    fn new(mount_path: &Path) -> Self {
-        MountGuard {
-            mount_path: mount_path.to_path_buf(),
-        }
-    }
-}
-
-impl Drop for MountGuard {
-    fn drop(&mut self) {
-        let status = Command::new("umount").arg(&self.mount_path).status();
-        match status {
-            Ok(s) if s.success() => {}
-            _ => eprintln!(
-                "Warning: failed to unmount {} — a stale mount may remain. Use 'umount {}' manually.",
-                self.mount_path.display(),
-                self.mount_path.display(),
-            ),
-        }
-    }
-}
-
-/// Inhibits system sleep/suspend during migration using systemd-inhibit if available (issue #27).
-#[derive(Debug)]
-pub struct SleepGuard {
-    child: Option<std::process::Child>,
-}
-
-impl SleepGuard {
-    pub fn new(why: &str) -> Self {
-        let child = Command::new("systemd-inhibit")
-            .args([
-                "--what=sleep",
-                &format!("--why={why}"),
-                "--mode=block",
-                "sleep",
-                "infinity",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
-
-        if child.is_some() {
-            println!("Acquired systemd sleep inhibitor lock.");
-        } else {
-            eprintln!("Note: systemd-inhibit unavailable; sleep inhibitor lock was not acquired.");
-        }
-
-        SleepGuard { child }
-    }
-}
-
-impl Drop for SleepGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            println!("Released systemd sleep inhibitor lock.");
-        }
-    }
-}
-
-/// RAII guard around `podman image mount`. Mounts a locally-cached OCI image and
-/// exposes its merged rootfs at `path`, unmounting on drop. Used as the Phase 5
-/// fallback when the composefs overlay mount yields no usable content (bootc
-/// mounts in a private namespace that does not persist to our process). Because
-/// Phase 2 also `podman pull`s the image, this needs no network.
-pub(crate) struct PodmanImageMount {
-    image: String,
-    path: PathBuf,
-}
-
-impl PodmanImageMount {
-    fn new(image: &str) -> Result<Self> {
-        let out = Command::new("podman")
-            .args(["image", "mount", image])
-            .output()
-            .context("failed to execute podman image mount")?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "podman image mount {} failed: {}",
-                image,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-        if !path.is_dir() {
-            return Err(anyhow!(
-                "podman image mount returned non-directory path: {}",
-                path.display()
-            ));
-        }
-        Ok(PodmanImageMount {
-            image: image.to_string(),
-            path,
-        })
-    }
-}
-
-impl Drop for PodmanImageMount {
-    fn drop(&mut self) {
-        let _ = Command::new("podman")
-            .args(["image", "unmount", &self.image])
-            .status();
-    }
-}
 
 // ---- Public API ----
 
@@ -195,47 +61,8 @@ pub fn run_migration(
     force: bool,
     etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
 ) -> Result<()> {
-    // Acquire exclusive lock.
-    let _lock = if !dry_run {
-        Some(acquire_lock()?)
-    } else {
-        None
-    };
-
-    // Acquire systemd sleep inhibitor lock (issue #27).
-    let _sleep_guard = if !dry_run {
-        Some(SleepGuard::new("OSTree to ComposeFS migration in progress"))
-    } else {
-        None
-    };
-
-    if dry_run {
-        println!("[DRY RUN] Would execute migration phases without making changes.");
-    }
-
-    // Mount /sysroot and /boot read-write.
-    if !dry_run {
-        let sysroot_status = Command::new("/usr/bin/mount")
-            .args(["-o", "remount,rw", "/sysroot"])
-            .status()
-            .context("failed to execute mount remount,rw /sysroot")?;
-        if !sysroot_status.success() {
-            return Err(anyhow!(
-                "failed to remount /sysroot read-write — cannot proceed with migration"
-            ));
-        }
-        let boot_status = Command::new("/usr/bin/mount")
-            .args(["-o", "remount,rw", "/boot"])
-            .status()
-            .context("failed to execute mount remount,rw /boot")?;
-        if !boot_status.success() {
-            return Err(anyhow!(
-                "failed to remount /boot read-write — cannot proceed with migration"
-            ));
-        }
-    } else {
-        println!("[DRY RUN] Would remount /sysroot and /boot read-write.");
-    }
+    // Hold the mutation guards for the whole run; a dry run holds none.
+    let _lifecycle = MigrationLifecycle::acquire(dry_run)?;
 
     // ---- Phase 0: preflight free-space check ----
     println!("=== Phase 0: Free-space check ===");
@@ -246,15 +73,7 @@ pub fn run_migration(
     }
 
     // ---- XFS workaround: ensure composefs store supports fs-verity ----
-    let _loopback_guard: Option<MountGuard> = if !dry_run {
-        host_storage::prepare_composefs_storage(report)?
-    } else {
-        let fs_type = report.fs_type.as_deref().unwrap_or("unknown");
-        if fs_type == "xfs" {
-            println!("[DRY RUN] Would set up ext4 loopback at /sysroot/composefs for fs-verity.");
-        }
-        None
-    };
+    let _loopback_guard = host_storage::prepare_composefs_storage(report, dry_run)?;
 
     // ---- Phase 1: Import OSTree objects (optional / deletable) ----
     // Ensure composefs repository directory exists before any phase touches it.
@@ -324,15 +143,4 @@ pub fn run_migration(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sleep_guard_creation_and_drop() {
-        let guard = SleepGuard::new("unit test migration");
-        drop(guard);
-    }
 }
