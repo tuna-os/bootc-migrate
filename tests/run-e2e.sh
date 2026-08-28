@@ -1133,7 +1133,9 @@ REBASEFIX
         # "UiApp" and "EFI Internal Shell", which live in the firmware volume.
         # So the planner has genuinely nothing to do here and the executor would
         # never run. Seed the fixture #31 actually targets — one live install
-        # plus one stale leftover — and tear it down again afterwards.
+        # plus one stale leftover — and tear it down again afterwards. Nothing
+        # here mounts the ESP: the audit resolves its own ESP mount, and a
+        # second mount/umount of the same device breaks that resolution.
         if ! ssh $SSH_OPTS root@localhost 'bash -s' > /tmp/be-seed.log 2>&1 <<'SEED'
 set -euo pipefail
 ESP_DEV=$(lsblk -no PATH,PARTTYPE \
@@ -1141,12 +1143,13 @@ ESP_DEV=$(lsblk -no PATH,PARTTYPE \
 [ -n "$ESP_DEV" ] || { echo "no EFI System Partition found via PARTTYPE"; exit 1; }
 ESP_DISK="/dev/$(lsblk -no PKNAME "$ESP_DEV")"
 ESP_PART=$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition")
-mkdir -p /var/tmp/esp-seed
-mountpoint -q /var/tmp/esp-seed || mount "$ESP_DEV" /var/tmp/esp-seed
-REL=$(cd /var/tmp/esp-seed && find EFI -iname '*.efi' | head -1)
-umount /var/tmp/esp-seed
-[ -n "$REL" ] || { echo "no .efi loader present on the ESP"; exit 1; }
-LOADER="\\$(printf '%s' "$REL" | tr '/' '\\')"
+# Reuse a loader path this machine already boots from rather than mounting
+# the ESP to find one. Mounting it a second time and unmounting disturbs the
+# mount `find_esp_or_mount` resolves the audit against, and any path already
+# in NVRAM is real by construction. The pattern matches both renderings:
+# File(\EFI\..) and a bare trailing \EFI\.. component.
+LOADER=$(efibootmgr -v | grep -o '\\EFI\\[^ )]*\.efi' | head -1)
+[ -n "$LOADER" ] || { echo "no existing loader path in NVRAM to reuse"; exit 1; }
 echo "esp=$ESP_DEV disk=$ESP_DISK part=$ESP_PART live-loader=$LOADER"
 # Save BootOrder first: --create prepends, and leaving a stale entry at the
 # front would strand the VM on the next boot.
@@ -1168,8 +1171,15 @@ SEED
         # stale entry as dead — that is what puts it in the default delete
         # selection. Check it here rather than inferring it from a downstream
         # "Nothing to do", which looks identical to a planner that declined.
-        ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase boot-entries --json" \
-            > /tmp/be-seeded.json 2>/dev/null || true
+        if ! ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase boot-entries --json" \
+            > /tmp/be-seeded.json 2>/tmp/be-seeded.err; then
+            echo "FAIL: boot-entries --json exited nonzero after seeding, so the"
+            echo "      audit below could not even be read. Its stderr:"
+            sed 's/^/[boot-entries] /' /tmp/be-seeded.err
+            ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null \
+                | sed 's/^/[efibootmgr-v] /'
+            exit 1
+        fi
         if ! python3 -c '
 import json, sys
 audited = json.load(open("/tmp/be-seeded.json"))
@@ -1183,6 +1193,7 @@ sys.exit(0 if "dead" in stale[0]["flags"] else 1)
             echo "FAIL: the seeded stale entry is not classified dead, so the"
             echo "      planner has nothing to select and the round trip below"
             echo "      would prove nothing. Raw NVRAM follows."
+            sed 's/^/[boot-entries stderr] /' /tmp/be-seeded.err
             ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null \
                 | sed 's/^/[efibootmgr-v] /'
             exit 1
