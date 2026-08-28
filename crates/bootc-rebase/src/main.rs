@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use bootc_migrate_core::cross_base;
 use bootc_migrate_core::de_controller::DesktopMigrationController;
 use bootc_migrate_core::preflight;
-use bootc_migrate_core::rebase_controller::{CoreMigrationConfig, validate_target_image};
+use bootc_migrate_core::rebase_controller::{
+    self, CoreMigrationConfig, ImageSwapConfig, validate_target_image,
+};
 use bootc_migrate_core::selinux;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -411,145 +413,6 @@ fn main() -> Result<()> {
     }
 }
 
-/// Reject target images whose characters would corrupt the `.origin` ini.
-/// Stage `target_image` with `bootc switch` and verify via `bootc status
-/// --json` that the staged deployment is exactly the requested image. Shared
-/// by the OstreeDeploy and ImageSwap strategies — on both backends, `bootc
-/// switch` performs the native staging (3-way /etc merge, shared /var) and
-/// leaves the previous deployment as the rollback entry.
-fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
-    println!("Staging deployment of {target_image} via `bootc switch`...");
-    let status = std::process::Command::new("bootc")
-        .args(["switch", target_image])
-        .status()
-        .map_err(|e| anyhow::anyhow!("failed to execute bootc switch: {e}"))?;
-    if !status.success() {
-        bail!("bootc switch {target_image} failed (exit {status})");
-    }
-
-    let out = std::process::Command::new("bootc")
-        .args(["status", "--json"])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to execute bootc status: {e}"))?;
-    if !out.status.success() {
-        bail!(
-            "bootc status failed after switch: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| anyhow::anyhow!("parsing bootc status json: {e}"))?;
-    match staged_image_from_status(&json) {
-        Some(img) if staged_image_matches(target_image, img) => {
-            println!("Staged deployment verified: {img}");
-            Ok(())
-        }
-        Some(img) => {
-            bail!("bootc switch staged '{img}' but the requested target was '{target_image}'")
-        }
-        None => bail!("no staged deployment found after bootc switch"),
-    }
-}
-
-/// Scenario A' (issue #66): swap the image on a composefs-backed system —
-/// no backend conversion. `bootc switch` stages the target natively; this
-/// route is gating + switch + verification. The degenerate direct-store path
-/// (for targets whose bootc cannot switch) is out of scope until the #13
-/// store-selection work lands.
-fn run_image_swap(args: &Args) -> Result<()> {
-    check_root_privilege()?;
-    validate_target_image(&args.target_image)?;
-
-    if args.dry_run {
-        println!("*** DRY RUN MODE — no changes will be made ***");
-    }
-    println!("Checking system state...");
-
-    // The booted deployment must actually be composefs-backed: the router
-    // may have been told --source-backend composefs explicitly, but staging
-    // relies on the running bootc's composefs support.
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if !cmdline.contains("composefs=") && !args.force {
-        bail!(
-            "System is not booted from a composefs deployment (/proc/cmdline has no \
-             composefs= parameter). Use --force to override, or re-run with \
-             --source-backend auto."
-        );
-    }
-
-    // #68: decide the DE step before staging so a --dry-run shows it too.
-    let de = DesktopMigrationController::new(args.de_migrate, &args.target_image);
-    let de_plan = de.plan_or_report();
-
-    if args.dry_run {
-        if let Some(plan) = &de_plan {
-            de.preview(plan)?;
-        }
-        println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
-        return Ok(());
-    }
-
-    let _sleep_guard = Some(bootc_migrate_core::migration::SleepGuard::new(
-        "bootc image swap in progress",
-    ));
-
-    if let Some(plan) = &de_plan {
-        de.run_pre_switch(plan, false)?;
-    }
-
-    stage_via_bootc_switch(&args.target_image)?;
-
-    if let Some(plan) = &de_plan {
-        de.run_post_switch(plan, false)?;
-    }
-
-    println!(
-        "Image swap staged. Reboot to enter the new deployment; the previous \
-         deployment remains in the boot menu as rollback."
-    );
-    Ok(())
-}
-
-/// The staged deployment's image spec from `bootc status --json`, if any.
-/// (Schema: `.status.staged.image.image.image` — ImageStatus → ImageReference
-/// → image spec string; stable across bootc 1.x.)
-fn staged_image_from_status(status: &serde_json::Value) -> Option<&str> {
-    status
-        .pointer("/status/staged/image/image/image")
-        .and_then(|v| v.as_str())
-}
-
-/// Whether the image bootc reports as staged is the one the user asked for.
-///
-/// Compares by equality after stripping the transport prefix from both sides
-/// (`docker://`, `ostree-unverified-registry:`, …) — bootc's status output
-/// omits the transport the user may have typed. Deliberately NOT a substring
-/// match: `bluefin:gts-testing` must not "verify" a request for
-/// `bluefin:gts`.
-fn staged_image_matches(requested: &str, staged: &str) -> bool {
-    fn strip_transport(image: &str) -> &str {
-        // `scheme://rest` transports first, then the `prefix:name` transports
-        // whose remainder still contains a registry path (so a plain
-        // `registry/image:tag` — whose only ':' precedes the tag — survives).
-        if let Some((_, rest)) = image.split_once("://") {
-            return rest;
-        }
-        for prefix in [
-            "ostree-unverified-registry:",
-            "ostree-image-signed:",
-            "ostree-remote-registry:",
-            "containers-storage:",
-            "registry:",
-        ] {
-            if let Some(rest) = image.strip_prefix(prefix) {
-                return rest;
-            }
-        }
-        image
-    }
-    strip_transport(requested) == strip_transport(staged)
-}
-
 /// Build the cross-base UID/GID remap plan for `target_image` (issue #67
 /// part 1), by comparing this host's base identity against the target
 /// image's. `Ok(None)` means "not cross-base" (or identity couldn't be
@@ -561,6 +424,20 @@ fn staged_image_matches(requested: &str, staged: &str) -> bool {
 /// to the same "can't establish identity, don't gate" degradation used for
 /// a target with no parseable os-release — printing a warning either way so
 /// the degradation isn't silent.
+/// Scenario A' (issue #66): swap the image on a composefs-backed system.
+/// The route itself lives in the core rebase controller; this only checks
+/// privilege and translates flags.
+fn run_image_swap(args: &Args) -> Result<()> {
+    check_root_privilege()?;
+    ImageSwapConfig {
+        target_image: &args.target_image,
+        dry_run: args.dry_run,
+        force: args.force,
+        de_migrate: args.de_migrate,
+    }
+    .run()
+}
+
 /// Scenario A (issue #30): re-base to another image as a plain OSTree
 /// deployment. `bootc switch` already does the heavy lifting on an
 /// OSTree-backed system — staging the target with OSTree's native 3-way /etc
@@ -636,7 +513,7 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
         de.run_pre_switch(plan, false)?;
     }
 
-    stage_via_bootc_switch(&args.target_image)?;
+    rebase_controller::stage_via_bootc_switch(&args.target_image)?;
 
     if let Some(plan) = &cross_base_plan {
         let staged_root = cross_base::staged_deployment_root()
@@ -671,76 +548,6 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn staged_match_exact() {
-        assert!(staged_image_matches(
-            "ghcr.io/projectbluefin/bluefin:gts",
-            "ghcr.io/projectbluefin/bluefin:gts"
-        ));
-    }
-
-    #[test]
-    fn staged_match_strips_requested_transport() {
-        assert!(staged_image_matches(
-            "docker://ghcr.io/projectbluefin/bluefin:gts",
-            "ghcr.io/projectbluefin/bluefin:gts"
-        ));
-        assert!(staged_image_matches(
-            "ostree-unverified-registry:ghcr.io/projectbluefin/bluefin:gts",
-            "ghcr.io/projectbluefin/bluefin:gts"
-        ));
-    }
-
-    #[test]
-    fn staged_match_rejects_tag_extension() {
-        // The old substring check accepted this: gts-testing contains gts.
-        assert!(!staged_image_matches(
-            "ghcr.io/projectbluefin/bluefin:gts",
-            "ghcr.io/projectbluefin/bluefin:gts-testing"
-        ));
-        assert!(!staged_image_matches(
-            "ghcr.io/projectbluefin/bluefin:gts-testing",
-            "ghcr.io/projectbluefin/bluefin:gts"
-        ));
-    }
-
-    #[test]
-    fn staged_match_rejects_different_image() {
-        assert!(!staged_image_matches(
-            "ghcr.io/projectbluefin/bluefin:gts",
-            "ghcr.io/projectbluefin/dakota:stable"
-        ));
-    }
-
-    #[test]
-    fn staged_match_plain_tag_colon_survives_transport_strip() {
-        // A bare registry/image:tag has a ':' but no transport — it must not
-        // get mangled by the prefix stripping.
-        assert!(staged_image_matches(
-            "quay.io/fedora/fedora-bootc:42",
-            "quay.io/fedora/fedora-bootc:42"
-        ));
-    }
-
-    #[test]
-    fn staged_image_extracted_from_status_json() {
-        let json: serde_json::Value = serde_json::from_str(
-            r#"{"status":{"staged":{"image":{"image":{"image":"ghcr.io/projectbluefin/bluefin:gts","transport":"registry"}}}}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            staged_image_from_status(&json),
-            Some("ghcr.io/projectbluefin/bluefin:gts")
-        );
-    }
-
-    #[test]
-    fn staged_image_absent_when_nothing_staged() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"status":{"staged":null,"booted":{}}}"#).unwrap();
-        assert_eq!(staged_image_from_status(&json), None);
-    }
 
     #[test]
     fn accept_cross_base_flag_parses() {
