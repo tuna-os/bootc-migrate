@@ -9,6 +9,7 @@ pub mod os_release;
 pub mod pull;
 pub mod rollback;
 pub mod seal;
+pub mod target_compat;
 pub mod var_layout;
 
 pub use boot::migrate_bootloader_standalone;
@@ -135,7 +136,7 @@ impl Drop for SleepGuard {
 /// fallback when the composefs overlay mount yields no usable content (bootc
 /// mounts in a private namespace that does not persist to our process). Because
 /// Phase 2 also `podman pull`s the image, this needs no network.
-struct PodmanImageMount {
+pub(crate) struct PodmanImageMount {
     image: String,
     path: PathBuf,
 }
