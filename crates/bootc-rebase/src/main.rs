@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 
 use bootc_migrate_core::cross_base;
 use bootc_migrate_core::de_controller::DesktopMigrationController;
-use bootc_migrate_core::migration;
-use bootc_migrate_core::preflight::{self, readiness};
+use bootc_migrate_core::preflight;
+use bootc_migrate_core::rebase_controller::{CoreMigrationConfig, validate_target_image};
 use bootc_migrate_core::selinux;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -298,70 +298,16 @@ fn check_root_privilege() -> Result<()> {
 /// preflight, readiness report, gating, then the phase 0–5 migration.
 fn run_core_migration(args: &Args) -> Result<()> {
     check_root_privilege()?;
-
-    // Validate target_image to prevent INI injection in the .origin file.
-    if args.target_image.contains('\n')
-        || args.target_image.contains('\r')
-        || args.target_image.contains('\0')
-    {
-        bail!("--target-image contains invalid characters (newlines, nulls).");
+    CoreMigrationConfig {
+        target_image: &args.target_image,
+        bootloader: &args.bootloader,
+        dry_run: args.dry_run,
+        skip_import: args.skip_import,
+        skip_preflight: args.skip_preflight,
+        force: args.force,
+        de_migrate: args.de_migrate,
     }
-
-    if args.dry_run {
-        println!("*** DRY RUN MODE — no changes will be made ***");
-    }
-    println!("Checking system state...");
-
-    let report = preflight::run_preflight_checks()?;
-    readiness::print_report(&report);
-    readiness::print_readiness(&report);
-
-    match readiness::gate(&report, args.force, args.skip_preflight) {
-        readiness::MigrationGate::Proceed => {}
-        readiness::MigrationGate::Refuse(reason) => bail!("{reason}"),
-        readiness::MigrationGate::ConfirmFullCopy => {
-            // bootc-rebase is non-interactive by design: no prompt, just a
-            // clear instruction (the migrator binary offers the y/N prompt).
-            bail!(
-                "Reflink support not detected on /sysroot — the migration would perform a \
-                 full copy of repository objects. Re-run with --force to accept the extra \
-                 disk usage."
-            );
-        }
-    }
-
-    // #68: decide the DE step before the pipeline runs so a --dry-run shows
-    // it too, and stash before anything is staged.
-    let de = DesktopMigrationController::new(args.de_migrate, &args.target_image);
-    let de_plan = de.plan_or_report();
-    if args.dry_run {
-        if let Some(plan) = &de_plan {
-            de.preview(plan)?;
-        }
-    } else if let Some(plan) = &de_plan {
-        de.run_pre_switch(plan, false)?;
-    }
-
-    println!("Starting migration to OCI image: {}...", args.target_image);
-    // bootc-rebase has no interactive Config Drift Review wiring yet
-    // (issue #15's TUI lives in the `bootc-migrate` binary); always fall
-    // back to the default 3-way /etc merge.
-    migration::run_migration(
-        &report,
-        &args.target_image,
-        args.dry_run,
-        args.skip_import,
-        &args.bootloader,
-        args.force,
-        None,
-    )?;
-
-    if !args.dry_run
-        && let Some(plan) = &de_plan
-    {
-        de.run_post_switch(plan, false)?;
-    }
-    Ok(())
+    .run()
 }
 
 fn execute_rebase(args: &Args) -> Result<()> {
@@ -466,13 +412,6 @@ fn main() -> Result<()> {
 }
 
 /// Reject target images whose characters would corrupt the `.origin` ini.
-fn validate_target_image(target_image: &str) -> Result<()> {
-    if target_image.contains('\n') || target_image.contains('\r') || target_image.contains('\0') {
-        bail!("--target-image contains invalid characters (newlines, nulls).");
-    }
-    Ok(())
-}
-
 /// Stage `target_image` with `bootc switch` and verify via `bootc status
 /// --json` that the staged deployment is exactly the requested image. Shared
 /// by the OstreeDeploy and ImageSwap strategies — on both backends, `bootc

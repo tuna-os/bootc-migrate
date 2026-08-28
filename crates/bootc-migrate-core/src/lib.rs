@@ -41,6 +41,7 @@ pub mod migration;
 pub mod motd;
 pub mod ostree;
 pub mod preflight;
+pub mod rebase_controller;
 pub mod rebase_plan;
 pub mod reflink;
 pub mod registry;
