@@ -52,31 +52,77 @@ The assertion is the point. `gate_cross_base` returns `None` and prints
 nothing whenever it declines to act, so silence is indistinguishable from
 success and an unasserted cell would pass vacuously.
 
-**There is currently no matrix cell using it**, because running it surfaced a
-blocker (#191): inside the E2E guest the target-image *scan* cannot reach
-ghcr.io, so cross-base detection never runs. `bootc switch` itself pulls fine
-in the same guest, so this is specific to the scan path. Until that is fixed,
-no cell can demonstrate the cross-base code executing, and a permanently-red
-cell would only add noise.
+**There is still no matrix cell using it** (#187). Running one surfaced a
+blocker: inside the E2E guest the target-image *scan* cannot reach ghcr.io,
+so cross-base detection never runs. `bootc switch` itself pulls fine in the
+same guest, so this is specific to the scan path — which uses `curl` against
+the registry API, not bootc's own puller.
 
-That same scan failure is why **every `ostree-rebase` cell now passes
+Two things were fixed to make that blocker diagnosable rather than merely
+observed:
+
+- `RegistryEndpoint::resolve` used to `continue` past each scheme's error and
+  report a single opaque `could not reach registry ghcr.io (tried
+  ["https","http"])`. Curl-not-installed, DNS failure, a TLS rejection, a
+  proxy's 403 and a 401 with no challenge all looked identical — which is
+  exactly the information needed to fix any of them. It now reports what each
+  scheme actually did.
+- The scan retry was 3 attempts at a flat 2s, covering only ~4s of a guest's
+  network coming up. It is now 4 attempts with exponential backoff (~14s), and
+  a non-retryable failure (a missing `curl`) returns immediately instead of
+  burning the window and reporting itself as "after N attempts", which reads
+  like a network fault.
+
+The `ostree-rebase` path also probes the guest's registry reachability
+directly (`[registry-probe]` lines: whether `curl` exists, what
+`https://ghcr.io/v2/` returns, and `/etc/resolv.conf`), so the next run of any
+ostree-rebase cell reports the true cause rather than leaving it to inference.
+
+That same scan failure is why **every `ostree-rebase` cell passes
 `--accept-cross-base`**. Since #191 an unscannable target is a refusal rather
 than a silent proceed, so the harness — which knows its image pairs are
 same-lineage Fedora — has to opt in explicitly, exactly as a human operator
 would. The cells assert the refusal *first*, without the flag, so the gate's
-wiring has live coverage and cannot regress to waving things through; the
-unit tests cover the policy, not the wiring.
-
-The plumbing stays wired — `just e2e-cross-base` locally, and a `cross_base`
-input on `e2e-single.yml` — so the cell can return as one matrix entry once
-#191 clears. Tracked by #187.
+wiring has live coverage and cannot regress to waving things through.
 
 Note also that the intended image pair may not qualify anyway: `is_cross_base`
 is lineage-aware (`scan.rs`), returning false when either side's `ID_LIKE`
 contains the other's `ID`. CentOS declares `ID_LIKE="rhel fedora"`, so
-CentOS → Fedora is same-lineage **by design** — see the existing
-`cross_base_same_family_via_id_like_is_clean` test. That question is still
-open because the scan failure meant `is_cross_base` was never evaluated.
+CentOS → Fedora is same-lineage **by design**. That question is still open
+because the scan failure meant `is_cross_base` was never evaluated.
+
+### Desktop migration (`E2E_DE_MIGRATE=1`) — active on the cross-DE cell
+
+The `bluefin -> aurora` cell (GNOME → KDE) now passes `--de-migrate`. Before
+this, no cell passed it, so the controller reported "skipped (--de-migrate not
+passed)" and #68's stash/restore code never ran — the cell exercised the
+re-base route while proving nothing about desktop migration.
+
+The harness seeds a GNOME config for the first human account, then asserts
+both that a cross-desktop plan was reported *and* that
+`~/.local/share/de-migrate` exists afterwards. The second half matters: a plan
+without a stash is precisely #68's unshipped half. Like the cross-base
+assertion, the failure branches name which of the four silent causes occurred
+(flag not wired, same desktop, no human users, or target scan failed) rather
+than guessing one.
+
+Because desktop detection scans the target image, this cell depends on the
+same registry path as `E2E_CROSS_BASE` — if it fails, the `[registry-probe]`
+output above says why.
+
+### Boot entries (`E2E_BOOT_ENTRIES=1`) — live NVRAM coverage
+
+The gating `bluefin ostree re-base` cell now runs `boot-entries`: a read-only
+`--json` audit, then a `--rename-branding --apply --yes` followed by `--undo`,
+asserting that `efibootmgr -v` output is byte-identical before and after.
+
+This is the first cell to mutate real UEFI NVRAM (#189). Until it existed,
+#31's `efibootmgr` executor had only unit tests of the *plan*; the write path
+and the snapshot-restore path had never run against real firmware variables.
+
+**Scope limit:** #189 also names #65's live bootloader flip. That is *not*
+covered and cannot be — `migrate-bootloader` currently bails with "not
+implemented yet (issue #65)", so there is no flip to exercise.
 
 Planned, one per milestone exit (see ROADMAP.md):
 

@@ -883,6 +883,21 @@ REBASEFIX
     # staging work, so this costs seconds, and it is the only live coverage
     # that the gate actually gates — the unit tests cover the policy, not the
     # wiring.
+    # The scan path (curl -> ghcr.io) has failed inside the guest while
+    # `bootc switch` pulled fine moments later, which blocked both #187 and
+    # #188 without ever naming a cause. Probe it here so the run reports the
+    # truth rather than leaving it to be inferred from a downstream warning.
+    step "=== ostree-rebase: probing the guest's registry reachability (#187) ==="
+    ssh $SSH_OPTS root@localhost '
+        echo "curl binary: $(command -v curl || echo MISSING)"
+        if command -v curl >/dev/null; then
+            code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 https://ghcr.io/v2/ 2>&1) \
+                && echo "ghcr.io/v2/ HTTP status: $code (401 is expected: it means reachable)" \
+                || echo "ghcr.io/v2/ curl FAILED: $code"
+        fi
+        echo "resolv.conf: $(tr "\n" " " < /etc/resolv.conf 2>/dev/null || echo MISSING)"
+    ' 2>&1 | sed 's/^/[registry-probe] /' || true
+
     step "=== ostree-rebase: asserting the cross-base gate refuses an unscannable target (#191) ==="
     GATE_OUT=$(ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" 2>&1 || true)
@@ -899,6 +914,25 @@ REBASEFIX
     # aurora), and the harness knows it, so it is the operator that opts in.
     # That is what --accept-cross-base is for; it is not a way around the gate.
     REBASE_FLAGS="--accept-cross-base"
+
+    # #188: on the cross-DE cell, also ask for desktop migration. Without
+    # --de-migrate the controller reports "skipped (--de-migrate not passed)"
+    # and the stash/restore code never runs, so the cross-DE cell was
+    # exercising the re-base route while proving nothing about #68.
+    if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
+        REBASE_FLAGS="$REBASE_FLAGS --de-migrate"
+        step "=== ostree-rebase: seeding a GNOME config to stash (#188) ==="
+        ssh $SSH_OPTS root@localhost '
+            set -e
+            u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
+            if [ -z "$u" ]; then echo "NO_HUMAN_USER"; exit 0; fi
+            h=$(getent passwd "$u" | cut -d: -f6)
+            mkdir -p "$h/.config/dconf" "$h/.local/share/gnome-shell"
+            echo "e2e-gnome-marker" > "$h/.config/dconf/user"
+            chown -R "$u" "$h/.config" "$h/.local" 2>/dev/null || true
+            echo "SEEDED user=$u home=$h"
+        ' 2>&1 | sed "s/^/[de-seed] /"
+    fi
 
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
@@ -943,6 +977,121 @@ REBASEFIX
             echo "      so EL -> Fedora is same-lineage by design)."
             exit 1
         fi
+    fi
+
+    if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
+        # Same discipline as the cross-base assertion above: the DE step is
+        # silent whenever it declines to act, so an unasserted cell passes
+        # vacuously. Silence has FOUR distinct causes here — report which one
+        # happened rather than naming a single guess.
+        step "=== ostree-rebase: asserting DE stash/restore actually ran (#188) ==="
+        if grep -qE "DE migration: (gnome|kde|cosmic|niri|xfce) -> " /tmp/rebase-out.log; then
+            echo "OK: cross-desktop migration planned and executed."
+
+            # The plan alone is not the deliverable — #68's unshipped half is
+            # the stash itself. Assert the outgoing config actually moved.
+            if ! ssh $SSH_OPTS root@localhost '
+                u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
+                h=$(getent passwd "$u" | cut -d: -f6)
+                test -d "$h/.local/share/de-migrate"
+            '; then
+                echo "FAIL: DE migration reported a plan, but no stash directory"
+                echo "      exists at ~/.local/share/de-migrate. The plan ran and"
+                echo "      the move did not — that is #68's unshipped half."
+                exit 1
+            fi
+            echo "OK: stash directory present; outgoing DE config was moved."
+        elif grep -q "skipped (--de-migrate not passed)" /tmp/rebase-out.log; then
+            echo "FAIL: --de-migrate was in REBASE_FLAGS but the controller still"
+            echo "      reported it as not passed — the flag is not reaching the"
+            echo "      controller. This is a wiring bug, not a policy decision."
+            exit 1
+        elif grep -q "nothing to do (this host:" /tmp/rebase-out.log; then
+            echo "FAIL: the host and target resolved to the same desktop, so the"
+            echo "      cross-DE code never ran. E2E_DE_MIGRATE=1 belongs only on"
+            echo "      a genuinely cross-DE pair (bluefin GNOME -> aurora KDE)."
+            exit 1
+        elif grep -q "no human accounts to stash" /tmp/rebase-out.log; then
+            echo "FAIL: no human account was found, so there was nothing to stash."
+            echo "      The seeding step above should have created one; check the"
+            echo "      [de-seed] output for NO_HUMAN_USER."
+            exit 1
+        else
+            echo "FAIL: E2E_DE_MIGRATE=1 but no DE migration line appeared at all."
+            echo "      The most likely cause is that detect_image_desktop could"
+            echo "      not scan the target image — the same registry path that"
+            echo "      blocks #187. See the [registry-probe] output above."
+            exit 1
+        fi
+    fi
+
+    if [ "${E2E_BOOT_ENTRIES:-0}" = "1" ]; then
+        # #189: until this ran, no cell mutated NVRAM, so #31's efibootmgr
+        # executor had no live coverage at all — only unit tests of the plan.
+        # The apply/undo round trip is what proves the executor and its
+        # snapshot restore actually work against real firmware variables.
+        #
+        # Scope note: #189 also names #65's live bootloader flip. That is NOT
+        # covered here and cannot be — `migrate-bootloader` currently bails
+        # with "not implemented yet (issue #65)", so there is no flip to test.
+        step "=== boot-entries: audit is read-only and machine-readable (#31) ==="
+        if ! ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase boot-entries --json" > /tmp/be-audit.json 2>/tmp/be-audit.err; then
+            sed 's/^/[boot-entries] /' /tmp/be-audit.err
+            echo "FAIL: boot-entries --json exited nonzero"
+            exit 1
+        fi
+        if ! python3 -c "import json,sys; d=json.load(open('/tmp/be-audit.json')); sys.exit(0 if d else 1)"; then
+            echo "FAIL: boot-entries --json did not produce a non-empty audit."
+            echo "      Either NVRAM has no entries (OVMF VARS not persisted —"
+            echo "      see the #189 pflash setup) or the JSON shape changed."
+            sed 's/^/[audit] /' /tmp/be-audit.json | head -20
+            exit 1
+        fi
+        echo "OK: audit returned entries as JSON."
+
+        BEFORE=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+        if [ -z "$BEFORE" ]; then
+            echo "FAIL: efibootmgr returned nothing — this guest has no UEFI"
+            echo "      variables, so the NVRAM path cannot be exercised."
+            exit 1
+        fi
+
+        step "=== boot-entries: apply + undo round trip restores NVRAM (#31) ==="
+        # --rename-branding gives the planner something to actually do on a
+        # stock image (generic "Linux"/"UEFI OS" labels), so the executor is
+        # exercised rather than no-oping.
+        ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase boot-entries --rename-branding --apply --yes" \
+            > /tmp/be-apply.log 2>&1 || true
+        sed 's/^/[apply] /' /tmp/be-apply.log | tail -20
+
+        if ! ssh $SSH_OPTS root@localhost "ls /var/lib/bootc-rebase/nvram-*.json" >/dev/null 2>&1; then
+            echo "FAIL: --apply left no NVRAM snapshot behind. The snapshot is"
+            echo "      the only way back from a bad write; without it --undo"
+            echo "      has nothing to restore."
+            exit 1
+        fi
+        echo "OK: pre-change NVRAM snapshot was written."
+
+        if ! ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase boot-entries --undo --yes" > /tmp/be-undo.log 2>&1; then
+            sed 's/^/[undo] /' /tmp/be-undo.log
+            echo "FAIL: boot-entries --undo exited nonzero; NVRAM may be left"
+            echo "      in the applied state. The snapshot is at"
+            echo "      /var/lib/bootc-rebase/nvram-*.json on the guest."
+            exit 1
+        fi
+        sed 's/^/[undo] /' /tmp/be-undo.log | tail -10
+
+        AFTER=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+        if [ "$BEFORE" != "$AFTER" ]; then
+            echo "FAIL: NVRAM did not return to its pre-apply state after --undo."
+            echo "--- before ---"; echo "$BEFORE"
+            echo "--- after ----"; echo "$AFTER"
+            exit 1
+        fi
+        echo "OK: NVRAM restored exactly; #31's executor and its undo path both ran live."
     fi
 
     step "=== ostree-rebase: verifying staged deployment ==="

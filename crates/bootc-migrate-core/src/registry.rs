@@ -462,6 +462,14 @@ impl RegistryEndpoint {
             &["https", "http"]
         };
 
+        // Keep every scheme's failure. Discarding them (this used to be
+        // `Err(_) => continue`) collapsed curl-not-installed, DNS failure, a
+        // TLS rejection, a proxy's 403, and a 401 with no challenge into one
+        // indistinguishable "could not reach registry" — which is precisely
+        // the information needed to fix any of them. See bootc-migrate#187:
+        // the cross-base E2E cell could not be diagnosed because the guest's
+        // real failure was never reported.
+        let mut failures: Vec<(String, String)> = Vec::new();
         for scheme in candidates {
             let base = format!("{}://{}", scheme, host);
             match probe_v2(&base, &repo) {
@@ -473,14 +481,10 @@ impl RegistryEndpoint {
                         bearer,
                     });
                 }
-                Err(_) => continue,
+                Err(e) => failures.push(((*scheme).to_string(), format!("{e:#}"))),
             }
         }
-        Err(anyhow!(
-            "could not reach registry {} (tried {:?})",
-            host,
-            candidates
-        ))
+        Err(anyhow!(unreachable_registry_message(&host, &failures)))
     }
 
     fn fetch_manifest(&self, reference: &str) -> Result<serde_json::Value> {
@@ -584,6 +588,24 @@ fn host_is_plain_http(host: &str) -> bool {
         && host_only.split('.').count() == 4
 }
 
+/// Build the failure message for a registry we could not reach, naming what
+/// each scheme actually did.
+///
+/// Pure so the shape is testable without a network: the value of this message
+/// is that it distinguishes causes, and a regression to a single opaque line
+/// would be invisible to any test that only checked for "could not reach".
+fn unreachable_registry_message(host: &str, failures: &[(String, String)]) -> String {
+    if failures.is_empty() {
+        return format!("could not reach registry {host}: no scheme was attempted");
+    }
+    let detail = failures
+        .iter()
+        .map(|(scheme, err)| format!("{scheme}: {err}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("could not reach registry {host} ({detail})")
+}
+
 /// Probe `/v2/` (or `/v2/<repo>/tags/list`) to determine if the registry is reachable
 /// and whether it requires a Bearer token. Returns Ok(Some(token)) if a Bearer
 /// challenge was issued and we obtained a token, Ok(None) for anonymous access, Err
@@ -602,7 +624,9 @@ fn probe_v2(base_url: &str, repo: &str) -> Result<Option<String>> {
             &url,
         ])
         .output()
-        .context("curl probe failed")?;
+        .with_context(|| {
+            format!("could not execute `curl` to probe {url} (is curl installed in this image?)")
+        })?;
     if !out.status.success() {
         return Err(anyhow!(
             "curl probe to {} failed: {}",
@@ -773,6 +797,52 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of this message is that it separates causes. #187
+    /// stalled because every failure mode collapsed into one opaque
+    /// "could not reach registry", so a guest that simply lacked `curl` was
+    /// indistinguishable from one with no route to the registry.
+    #[test]
+    fn unreachable_registry_message_names_each_scheme_failure() {
+        let failures = vec![
+            (
+                "https".to_string(),
+                "could not execute `curl` to probe https://ghcr.io/v2/ (is curl installed in this image?): No such file or directory (os error 2)".to_string(),
+            ),
+            (
+                "http".to_string(),
+                "curl probe to http://ghcr.io/v2/ failed: Could not resolve host".to_string(),
+            ),
+        ];
+        let msg = unreachable_registry_message("ghcr.io", &failures);
+
+        assert!(msg.contains("ghcr.io"), "must name the host: {msg}");
+        // Both attempts must survive, and be attributable to their scheme.
+        assert!(
+            msg.contains("https:"),
+            "must attribute the https failure: {msg}"
+        );
+        assert!(
+            msg.contains("http:"),
+            "must attribute the http failure: {msg}"
+        );
+        assert!(
+            msg.contains("is curl installed"),
+            "a missing curl must stay legible rather than reading as a network fault: {msg}"
+        );
+        assert!(
+            msg.contains("Could not resolve host"),
+            "the second scheme's distinct cause must not be dropped: {msg}"
+        );
+    }
+
+    /// Defensive: an empty failure list must not render as a bare, causeless
+    /// "could not reach registry" that looks like the old opaque message.
+    #[test]
+    fn unreachable_registry_message_is_explicit_when_nothing_was_tried() {
+        let msg = unreachable_registry_message("example.test", &[]);
+        assert!(msg.contains("no scheme was attempted"), "{msg}");
+    }
 
     #[test]
     fn image_ref_with_tag() {
