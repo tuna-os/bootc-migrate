@@ -8,11 +8,8 @@
 
 use anyhow::{Context, Result, bail};
 
-use crate::de_migrate_command::print_hook_results;
 use bootc_migrate_core::cross_base;
-use bootc_migrate_core::de_controller::{
-    DesktopMigrationController, DesktopMigrationDecision, DesktopMigrationPlan,
-};
+use bootc_migrate_core::de_controller::DesktopMigrationController;
 use bootc_migrate_core::migration;
 use bootc_migrate_core::preflight::{self, readiness};
 use bootc_migrate_core::selinux;
@@ -609,157 +606,6 @@ fn run_boot_entries_undo(args: &BootEntriesArgs, esp_root: &Path) -> Result<()> 
     Ok(())
 }
 
-/// Where a user's stash lives, relative to their home. Same value as the
-/// `de-migrate stash|restore --stash-dir` default, so a stash written by the
-/// standalone subcommand is found by the `rebase` flow and vice versa.
-const DE_STASH_SUBDIR: &str = ".local/share/de-migrate";
-
-/// Decide whether this re-base needs a DE config stash/restore (#68), always
-/// saying out loud why it does not: a silent no-op here looks identical to a
-/// broken `--de-migrate`.
-///
-/// Every way this can come up short — the flag off, an ambiguous or
-/// unrecognized desktop on either side, an unreachable registry, no human
-/// accounts — degrades to "do nothing" rather than failing the re-base, but
-/// none of them degrade quietly. Errors are reported once, here, so the
-/// stash/restore functions themselves can propagate normally: a *failed*
-/// half-move of a user's config must abort, unlike a decision not to move
-/// anything at all.
-fn plan_desktop_migration(args: &Args) -> Option<DesktopMigrationPlan> {
-    match try_plan_desktop_migration(args) {
-        Ok(plan) => plan,
-        Err(e) => {
-            eprintln!("Warning: DE migration skipped — {e:#}");
-            None
-        }
-    }
-}
-
-fn try_plan_desktop_migration(args: &Args) -> Result<Option<DesktopMigrationPlan>> {
-    let controller = DesktopMigrationController::new(args.de_migrate, &args.target_image);
-    match controller.plan()? {
-        DesktopMigrationDecision::Disabled => {
-            println!(
-                "DE migration: skipped (--de-migrate not passed); per-user desktop config is \
-                 left exactly as it is."
-            );
-            Ok(None)
-        }
-        DesktopMigrationDecision::NotCrossDesktop { host, target } => {
-            println!(
-                "DE migration: nothing to do (this host: {host}, {}: {target}).",
-                args.target_image
-            );
-            Ok(None)
-        }
-        DesktopMigrationDecision::NoUsers { from, to } => {
-            println!(
-                "DE migration: {from} -> {to}, but /etc/passwd has no human accounts to stash."
-            );
-            Ok(None)
-        }
-        DesktopMigrationDecision::Planned(plan) => Ok(Some(plan)),
-    }
-}
-
-/// Stash the outgoing DE's config for every planned user and run the
-/// `pre-switch.d` hooks, before the target is staged. Hook ordering matches
-/// `de-migrate stash --run-hooks`: the stash is in place by the time a hook
-/// runs, so a hook can read what was moved out of the way.
-///
-/// A failure here aborts the re-base before anything is staged, which is the
-/// point of running it first: a half-moved home is worse than no re-base.
-fn run_pre_switch_desktop_migration(plan: &DesktopMigrationPlan, dry_run: bool) -> Result<()> {
-    use bootc_migrate_core::de_migrate;
-
-    println!(
-        "DE migration: {} -> {} for {} user(s){}.",
-        plan.from,
-        plan.to,
-        plan.users.len(),
-        if dry_run { " [DRY RUN]" } else { "" }
-    );
-    let hooks = de_migrate::discover_hooks(Path::new(de_migrate::PRE_SWITCH_HOOK_DIR))
-        .context("discovering pre-switch hooks")?;
-
-    for user in &plan.users {
-        let stash_dir = user.home.join(DE_STASH_SUBDIR);
-        let moved = de_migrate::stash(plan.from, &user.home, &stash_dir, dry_run)
-            .with_context(|| format!("stashing {} config for {}", plan.from, user.name))?;
-        if moved.is_empty() {
-            println!("  {}: no {} config to stash.", user.name, plan.from);
-        } else {
-            println!(
-                "  {}: stashed {} path(s) into {}",
-                user.name,
-                moved.len(),
-                stash_dir.display()
-            );
-            for p in &moved {
-                println!("    {p}");
-            }
-        }
-        // No hooks installed is the common case; don't print an empty
-        // "no hooks" block once per user for it.
-        if !hooks.is_empty() {
-            let env = de_migrate::build_hook_env(plan.from, plan.to, &stash_dir, &user.home);
-            let results = de_migrate::run_hooks(&hooks, &env, dry_run)
-                .with_context(|| format!("running pre-switch hooks for {}", user.name))?;
-            print_hook_results(&results);
-        }
-    }
-    Ok(())
-}
-
-/// Re-expose the incoming DE's stash — the one a previous re-base in the
-/// other direction left behind — and run the `post-switch.d` hooks, after
-/// the target is staged. A first-time switch to a DE simply has no stash to
-/// restore, which is reported, not treated as an error.
-fn run_post_switch_desktop_migration(plan: &DesktopMigrationPlan, dry_run: bool) -> Result<()> {
-    use bootc_migrate_core::de_migrate;
-
-    let hooks = de_migrate::discover_hooks(Path::new(de_migrate::POST_SWITCH_HOOK_DIR))
-        .context("discovering post-switch hooks")?;
-
-    println!(
-        "DE migration: re-exposing any previous {} stash{}.",
-        plan.to,
-        if dry_run { " [DRY RUN]" } else { "" }
-    );
-    for user in &plan.users {
-        let stash_dir = user.home.join(DE_STASH_SUBDIR);
-        let restored = de_migrate::restore(plan.to, &user.home, &stash_dir, dry_run)
-            .with_context(|| format!("restoring {} config for {}", plan.to, user.name))?;
-        if restored.is_empty() {
-            println!(
-                "  {}: no previous {} stash to restore (first switch to it).",
-                user.name, plan.to
-            );
-        } else {
-            println!(
-                "  {}: restored {} previously-stashed {} path(s).",
-                user.name,
-                restored.len(),
-                plan.to
-            );
-        }
-        if !hooks.is_empty() {
-            let env = de_migrate::build_hook_env(plan.from, plan.to, &stash_dir, &user.home);
-            let results = de_migrate::run_hooks(&hooks, &env, dry_run)
-                .with_context(|| format!("running post-switch hooks for {}", user.name))?;
-            print_hook_results(&results);
-        }
-    }
-    Ok(())
-}
-
-/// Run both halves against a plan without staging anything, so `--dry-run`
-/// prints the whole DE step instead of only the part that precedes staging.
-fn preview_desktop_migration(plan: &DesktopMigrationPlan) -> Result<()> {
-    run_pre_switch_desktop_migration(plan, true)?;
-    run_post_switch_desktop_migration(plan, true)
-}
-
 fn parse_backend(s: &str) -> Result<Backend> {
     match s {
         "ostree" => Ok(Backend::Ostree),
@@ -824,13 +670,14 @@ fn run_core_migration(args: &Args) -> Result<()> {
 
     // #68: decide the DE step before the pipeline runs so a --dry-run shows
     // it too, and stash before anything is staged.
-    let de_plan = plan_desktop_migration(args);
+    let de = DesktopMigrationController::new(args.de_migrate, &args.target_image);
+    let de_plan = de.plan_or_report();
     if args.dry_run {
         if let Some(plan) = &de_plan {
-            preview_desktop_migration(plan)?;
+            de.preview(plan)?;
         }
     } else if let Some(plan) = &de_plan {
-        run_pre_switch_desktop_migration(plan, false)?;
+        de.run_pre_switch(plan, false)?;
     }
 
     println!("Starting migration to OCI image: {}...", args.target_image);
@@ -850,7 +697,7 @@ fn run_core_migration(args: &Args) -> Result<()> {
     if !args.dry_run
         && let Some(plan) = &de_plan
     {
-        run_post_switch_desktop_migration(plan, false)?;
+        de.run_post_switch(plan, false)?;
     }
     Ok(())
 }
@@ -1030,11 +877,12 @@ fn run_image_swap(args: &Args) -> Result<()> {
     }
 
     // #68: decide the DE step before staging so a --dry-run shows it too.
-    let de_plan = plan_desktop_migration(args);
+    let de = DesktopMigrationController::new(args.de_migrate, &args.target_image);
+    let de_plan = de.plan_or_report();
 
     if args.dry_run {
         if let Some(plan) = &de_plan {
-            preview_desktop_migration(plan)?;
+            de.preview(plan)?;
         }
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
@@ -1045,13 +893,13 @@ fn run_image_swap(args: &Args) -> Result<()> {
     ));
 
     if let Some(plan) = &de_plan {
-        run_pre_switch_desktop_migration(plan, false)?;
+        de.run_pre_switch(plan, false)?;
     }
 
     stage_via_bootc_switch(&args.target_image)?;
 
     if let Some(plan) = &de_plan {
-        run_post_switch_desktop_migration(plan, false)?;
+        de.run_post_switch(plan, false)?;
     }
 
     println!(
@@ -1168,11 +1016,12 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     cross_base::warn_identity_merge_gap(&args.target_image);
 
     // #68: decide the DE step before staging so a --dry-run shows it too.
-    let de_plan = plan_desktop_migration(args);
+    let de = DesktopMigrationController::new(args.de_migrate, &args.target_image);
+    let de_plan = de.plan_or_report();
 
     if args.dry_run {
         if let Some(plan) = &de_plan {
-            preview_desktop_migration(plan)?;
+            de.preview(plan)?;
         }
         println!("[DRY RUN] Would run: bootc switch {}", args.target_image);
         return Ok(());
@@ -1183,7 +1032,7 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     ));
 
     if let Some(plan) = &de_plan {
-        run_pre_switch_desktop_migration(plan, false)?;
+        de.run_pre_switch(plan, false)?;
     }
 
     stage_via_bootc_switch(&args.target_image)?;
@@ -1208,7 +1057,7 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
     }
 
     if let Some(plan) = &de_plan {
-        run_post_switch_desktop_migration(plan, false)?;
+        de.run_post_switch(plan, false)?;
     }
 
     println!(
