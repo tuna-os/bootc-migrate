@@ -929,7 +929,12 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
                 .status()
                 .context("failed to mount ESP")?;
             if status.success() {
-                println!("Auto-mounted ESP {} at {}", device, mount_point);
+                // stderr, not stdout: `bootc-rebase boot-entries --json` is a
+                // machine-readable interface, and a human line ahead of the
+                // JSON breaks every consumer that pipes it (found by the #189
+                // E2E assertion, which json.load()ed this and got
+                // "Expecting value: line 1 column 1").
+                eprintln!("Auto-mounted ESP {} at {}", device, mount_point);
                 return Ok(mount_point.to_string());
             }
         }
@@ -1003,7 +1008,8 @@ pub fn find_esp_or_mount() -> Result<String> {
         .status()
         .with_context(|| format!("failed to mount ESP {} at {}", device, mount_point))?;
     if status.success() {
-        println!("Auto-mounted ESP {} at {}", device, mount_point);
+        // stderr for the same reason as the sibling call site above.
+        eprintln!("Auto-mounted ESP {} at {}", device, mount_point);
         return Ok(mount_point.to_string());
     }
     anyhow::bail!("Cannot find or mount ESP. Use --bootloader=grub2 to use GRUB2 instead.")
