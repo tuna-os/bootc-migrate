@@ -54,11 +54,18 @@ success and an unasserted cell would pass vacuously.
 
 **There is currently no matrix cell using it**, because running it surfaced a
 blocker (#191): inside the E2E guest the target-image *scan* cannot reach
-ghcr.io, so `gate_cross_base` degrades to a no-op with only a warning and
-cross-base detection never runs. `bootc switch` itself pulls fine in the same
-guest, so this is specific to the scan path. Until that is fixed, no cell can
-demonstrate the cross-base code executing, and a permanently-red cell would
-only add noise.
+ghcr.io, so cross-base detection never runs. `bootc switch` itself pulls fine
+in the same guest, so this is specific to the scan path. Until that is fixed,
+no cell can demonstrate the cross-base code executing, and a permanently-red
+cell would only add noise.
+
+That same scan failure is why **every `ostree-rebase` cell now passes
+`--accept-cross-base`**. Since #191 an unscannable target is a refusal rather
+than a silent proceed, so the harness — which knows its image pairs are
+same-lineage Fedora — has to opt in explicitly, exactly as a human operator
+would. The cells assert the refusal *first*, without the flag, so the gate's
+wiring has live coverage and cannot regress to waving things through; the
+unit tests cover the policy, not the wiring.
 
 The plumbing stays wired — `just e2e-cross-base` locally, and a `cross_base`
 input on `e2e-single.yml` — so the cell can return as one matrix entry once

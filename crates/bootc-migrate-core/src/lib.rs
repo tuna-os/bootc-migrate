@@ -13,6 +13,8 @@
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
 //! - [`etc_conflict`] — cross-base /etc conflict policy applied to a deployment
 //!   already staged by `bootc switch` (target defaults win, `.rebase-old` sidecars)
+//! - [`rebase_plan`] — the backend-pair routing table: which re-bases are
+//!   supported, by what strategy, and in what phase order
 //! - [`reflink`] — CoW-aware file copy (FICLONE with fallback)
 //! - [`xattr`] — xattr-preserving copy helpers
 //! - [`ostree`] — OSTree object scanning and hashing
@@ -39,6 +41,7 @@ pub mod migration;
 pub mod motd;
 pub mod ostree;
 pub mod preflight;
+pub mod rebase_plan;
 pub mod reflink;
 pub mod registry;
 pub mod remap;

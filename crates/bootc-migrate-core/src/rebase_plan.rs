@@ -2,8 +2,13 @@
 //! supported, and by what strategy.
 //!
 //! This is the capability table from issue #30 / #45. Rows are added as
-//! engine support lands; `route()` is the single source of truth the CLI
-//! consults before touching the system.
+//! engine support lands; `route()` is the single source of truth every
+//! frontend consults before touching the system.
+//!
+//! Lives in the core library rather than in `bootc-rebase` so the executable
+//! capability contract has exactly one definition (#160). A frontend that
+//! owned its own copy of this table could disagree with the engine about
+//! which re-bases exist — the table is a safety surface, not presentation.
 
 use std::fmt;
 

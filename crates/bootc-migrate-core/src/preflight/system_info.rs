@@ -502,4 +502,175 @@ mod tests {
 
         assert!(!parse_var_is_separate_mount(""));
     }
+
+    // --- parse_ostree_status_for_pending (#153) ---
+
+    #[test]
+    fn ostree_status_pending_detection_table() {
+        let cases: &[(&str, PendingTransactionStatus, &str)] = &[
+            ("", PendingTransactionStatus::Clean, "empty output"),
+            (
+                "* bluefin abc123.0\n    Version: 41.20250101\n",
+                PendingTransactionStatus::Clean,
+                "a booted deployment alone is clean",
+            ),
+            (
+                "  bluefin abc123.0 (staged)\n",
+                PendingTransactionStatus::StagedDeployment,
+                "staged marker",
+            ),
+            (
+                "  bluefin abc123.0 (pending)\n",
+                PendingTransactionStatus::PendingDeployment,
+                "pending marker",
+            ),
+            (
+                "* bluefin abc.0\n  bluefin def.1 (staged)\n",
+                PendingTransactionStatus::StagedDeployment,
+                "marker found on a later line",
+            ),
+            (
+                "      bluefin abc123.0 (staged)      \n",
+                PendingTransactionStatus::StagedDeployment,
+                "leading/trailing whitespace is trimmed",
+            ),
+            (
+                "* bluefin abc123.0\n    Version: 41 (staged elsewhere)\n",
+                PendingTransactionStatus::Clean,
+                "substring must be the literal marker, not merely similar",
+            ),
+        ];
+        for (input, want, why) in cases {
+            let got = parse_ostree_status_for_pending(input);
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(want),
+                "{why}: got {got:?} for {input:?}"
+            );
+        }
+    }
+
+    /// Precedence is by LINE ORDER, not by severity — the scan returns on the
+    /// first marker it meets. Pinned because it is a real behavioral choice
+    /// that the docstring does not state, and either ordering would look
+    /// plausible to someone editing this later.
+    #[test]
+    fn ostree_status_precedence_is_first_line_wins() {
+        let pending_first = "  a (pending)\n  b (staged)\n";
+        assert!(matches!(
+            parse_ostree_status_for_pending(pending_first),
+            PendingTransactionStatus::PendingDeployment
+        ));
+
+        let staged_first = "  a (staged)\n  b (pending)\n";
+        assert!(matches!(
+            parse_ostree_status_for_pending(staged_first),
+            PendingTransactionStatus::StagedDeployment
+        ));
+    }
+
+    /// These strings reach users in the preflight report and in the refusal
+    /// that blocks a migration, so they are API.
+    #[test]
+    fn pending_status_display_strings() {
+        assert_eq!(
+            PendingTransactionStatus::Clean.to_string(),
+            "no pending transaction"
+        );
+        assert_eq!(
+            PendingTransactionStatus::StagedDeployment.to_string(),
+            "staged deployment (next boot will apply)"
+        );
+        assert_eq!(
+            PendingTransactionStatus::PendingDeployment.to_string(),
+            "pending deployment (update in progress)"
+        );
+        assert_eq!(
+            PendingTransactionStatus::StaleTransactionFiles.to_string(),
+            "stale transaction temp files in OSTree repo"
+        );
+    }
+
+    // --- count_composefs_files (#153) ---
+
+    #[test]
+    fn composefs_object_count_walks_the_two_level_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let objects = tmp.path().join("objects");
+        for (prefix, n) in [("ab", 3), ("cd", 2), ("ef", 1)] {
+            let d = objects.join(prefix);
+            fs::create_dir_all(&d).unwrap();
+            for i in 0..n {
+                fs::write(d.join(format!("obj{i}")), b"x").unwrap();
+            }
+        }
+        assert_eq!(count_composefs_files(&objects), 6);
+    }
+
+    #[test]
+    fn composefs_object_count_ignores_loose_files_and_deeper_nesting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let objects = tmp.path().join("objects");
+        fs::create_dir_all(objects.join("ab")).unwrap();
+        fs::write(objects.join("ab").join("real"), b"x").unwrap();
+        // A file directly under objects/ is not in the two-level layout.
+        fs::write(objects.join("stray"), b"x").unwrap();
+        // A third level is not counted either — only files one level down.
+        fs::create_dir_all(objects.join("ab").join("deeper")).unwrap();
+        fs::write(objects.join("ab").join("deeper").join("nested"), b"x").unwrap();
+
+        assert_eq!(count_composefs_files(&objects), 1);
+    }
+
+    /// A missing store is the normal pre-migration state, not an error — the
+    /// count is used for sizing, and returning 0 keeps the caller simple.
+    #[test]
+    fn composefs_object_count_on_missing_root_is_zero_not_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(count_composefs_files(&tmp.path().join("absent")), 0);
+        // An empty store is likewise zero.
+        let empty = tmp.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(count_composefs_files(&empty), 0);
+    }
+
+    // --- get_free_space (#153) ---
+
+    #[test]
+    fn free_space_reports_a_plausible_figure_and_errors_on_missing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let free = get_free_space(tmp.path()).expect("statvfs on a real dir");
+        assert!(free > 0, "a writable tempdir should report free space");
+
+        assert!(
+            get_free_space(tmp.path().join("does-not-exist")).is_err(),
+            "statvfs on a missing path must be an error, not a silent 0 — \
+             callers use unwrap_or(0) and a silent 0 would read as 'full'"
+        );
+    }
+
+    // --- check_reflink_support (#153) ---
+
+    /// Whatever the filesystem answers, the probe must not leave its scratch
+    /// files behind: it runs against the user's real /sysroot.
+    #[test]
+    fn reflink_probe_cleans_up_after_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = check_reflink_support(tmp.path());
+
+        let leftovers: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "probe left scratch files behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn reflink_probe_on_an_unwritable_location_is_false_not_a_panic() {
+        assert!(!check_reflink_support(Path::new("/proc/nonexistent-dir")));
+    }
 }

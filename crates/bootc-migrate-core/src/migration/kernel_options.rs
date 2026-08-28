@@ -58,8 +58,8 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
     // This must live in the BLS command line, not only in a rebuilt initrd:
     // composefs upgrades copy the current command line while replacing the
     // image-provided initrd, so the mount remains effective on future kernels.
-    if let Some(var) = super::detect_separate_var()? {
-        let mount_arg = super::stateroot_var_mount_kernel_arg(&var);
+    if let Some(var) = super::var_layout::detect_separate_var()? {
+        let mount_arg = super::var_layout::stateroot_var_mount_kernel_arg(&var);
         let already_present = options.iter().any(|option| {
             option.starts_with("rd.systemd.mount-extra=")
                 && option.contains(":/sysroot/state/os/default/var:")
