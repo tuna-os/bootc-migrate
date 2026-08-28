@@ -1164,6 +1164,31 @@ SEED
         fi
         sed 's/^/[seed] /' /tmp/be-seed.log
 
+        # The fixture is only useful if the audit actually classifies the
+        # stale entry as dead — that is what puts it in the default delete
+        # selection. Check it here rather than inferring it from a downstream
+        # "Nothing to do", which looks identical to a planner that declined.
+        ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase boot-entries --json" \
+            > /tmp/be-seeded.json 2>/dev/null || true
+        if ! python3 -c '
+import json, sys
+audited = json.load(open("/tmp/be-seeded.json"))
+stale = [e for e in audited if e["entry"]["label"] == "E2E Stale Install"]
+if not stale:
+    print("the seeded stale entry is absent from the audit entirely")
+    sys.exit(1)
+print("stale entry as parsed: " + json.dumps(stale[0]))
+sys.exit(0 if "dead" in stale[0]["flags"] else 1)
+'; then
+            echo "FAIL: the seeded stale entry is not classified dead, so the"
+            echo "      planner has nothing to select and the round trip below"
+            echo "      would prove nothing. Raw NVRAM follows."
+            ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null \
+                | sed 's/^/[efibootmgr-v] /'
+            exit 1
+        fi
+        echo "OK: the seeded stale entry is audited as dead."
+
         # Captured *after* seeding: this is the state --undo must restore.
         BEFORE=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
 

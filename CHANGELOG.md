@@ -29,6 +29,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `safe_to_preselect()` and therefore candidates for `boot-entries --apply`.
   The markers now cover `"shell"` and `"uiapp"`. Found by the new live NVRAM
   round-trip coverage in the e2e suite.
+- **`FvFile(...)` is no longer read as a loader path** (#31). The device-path
+  parser looked for `File(` anywhere in the node list, which also matches the
+  tail of a firmware volume's `FvFile(`. A firmware entry's volume GUID was
+  therefore treated as an ESP-relative loader path, never resolved, and the
+  entry was reported dead. The parser now requires the match to start a node.
 
 ---
 

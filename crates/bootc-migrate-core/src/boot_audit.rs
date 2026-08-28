@@ -145,8 +145,16 @@ pub fn parse_efibootmgr_entries(output: &str) -> Vec<BootEntry> {
             Some((l, p)) => (l.trim().to_string(), Some(p)),
             None => (label_and_path.trim().to_string(), None),
         };
+        // Match a real `File(...)` node, not the `FvFile(...)` of a
+        // firmware-volume device path: a plain `find("File(")` matches the
+        // tail of "FvFile(" and turns a firmware entry's volume GUID into a
+        // bogus loader path, which then never resolves on the ESP and so
+        // reports the entry as dead.
         let loader_path = path_part.and_then(|p| {
-            let start = p.find("File(")? + "File(".len();
+            let start = p
+                .match_indices("File(")
+                .find(|(i, _)| *i == 0 || !p.as_bytes()[i - 1].is_ascii_alphanumeric())
+                .map(|(i, _)| i + "File(".len())?;
             let rest = &p[start..];
             let end = rest.find(')')?;
             Some(rest[..end].to_string())
@@ -357,6 +365,11 @@ Boot0000* UiApp\tFvVol(7cb8bdc9)/FvFile(462caa21)\n\
 Boot0006* EFI Internal Shell\tFvVol(7cb8bdc9)/File(\\EFI\\Shell.efi)\n";
         let audited = audit_entries(&parse_efibootmgr_entries(ovmf), esp.path());
         assert_eq!(audited.len(), 2, "both OVMF entries should parse");
+        // FvFile() is a firmware-volume node, not a loader on the ESP.
+        assert_eq!(
+            audited[0].entry.loader_path, None,
+            "FvFile() must not be read as a loader path"
+        );
         for a in &audited {
             assert!(
                 a.flags.contains(&AuditFlag::FirmwareManaged),
