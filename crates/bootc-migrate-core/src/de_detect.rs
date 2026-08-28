@@ -611,6 +611,21 @@ mod tests {
     }
 
     #[test]
+    fn collect_evidence_from_root_propagates_config_read_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Create a directory where a display manager config file is expected, so read_to_string fails (EISDIR/Permission error)
+        fs::create_dir_all(root.join("etc/sddm.conf")).unwrap();
+
+        let err = collect_evidence_from_root(root).unwrap_err();
+        assert!(
+            err.to_string().contains("reading display-manager config"),
+            "unexpected error: {err}"
+        );
+    }
+
+
+    #[test]
     fn evidence_paths_cover_every_marker() {
         let paths = evidence_paths();
         for (binary, _) in BINARY_MARKERS {
