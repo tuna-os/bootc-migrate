@@ -52,11 +52,33 @@ The assertion is the point. `gate_cross_base` returns `None` and prints
 nothing whenever it declines to act, so silence is indistinguishable from
 success and an unasserted cell would pass vacuously.
 
-**There is still no matrix cell using it** (#187). Running one surfaced a
-blocker: inside the E2E guest the target-image *scan* cannot reach ghcr.io,
-so cross-base detection never runs. `bootc switch` itself pulls fine in the
-same guest, so this is specific to the scan path — which uses `curl` against
-the registry API, not bootc's own puller.
+**There is still no matrix cell using it** (#187), but the blocker is now
+identified and it is *not* what this file previously claimed.
+
+The diagnostic below produced its first real output on 2026-08-28:
+
+```
+could not reach registry ghcr.io
+  (https: token fetch failed: curl: (22) The requested URL returned error: 403
+ ; http: unexpected status from http://ghcr.io/v2/: 301)
+```
+
+ghcr.io **is** reachable from the guest. The `http` attempt got ghcr.io's
+redirect to HTTPS; the `https` attempt got a `401` challenge, parsed it, and
+requested a token — and that token request returned **403**. So `curl` is
+present, DNS resolves, TLS works, and `/v2/` round-trips. What fails is
+specifically `fetch_bearer_token`.
+
+This file previously said the scan "cannot reach ghcr.io", which sent
+investigations toward guest networking. That was wrong. It also explains why
+`bootc switch` pulls fine moments later: containers/image builds its token
+request differently — never evidence about connectivity, only that our token
+request is malformed in a way bootc's is not.
+
+A 403 (not a 401) from the token endpoint points at a malformed or
+over-scoped request: scope construction (`repository:<owner>/<name>:pull`),
+a synthesized `service` parameter, or header expectations ghcr.io enforces
+more strictly than Docker Hub. Tracked on #187.
 
 Two things were fixed to make that blocker diagnosable rather than merely
 observed:
@@ -107,8 +129,8 @@ assertion, the failure branches name which of the four silent causes occurred
 than guessing one.
 
 Because desktop detection scans the target image, this cell depends on the
-same registry path as `E2E_CROSS_BASE` — if it fails, the `[registry-probe]`
-output above says why.
+same registry path as `E2E_CROSS_BASE`, and is blocked by the same 403 on the
+token fetch described above.
 
 ### Boot entries (`E2E_BOOT_ENTRIES=1`) — live NVRAM coverage
 
