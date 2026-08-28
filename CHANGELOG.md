@@ -18,7 +18,17 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **UEFI boot-entry audit no longer offers to delete the firmware's own
+  setup and shell entries** (#31). EDK2/OVMF labels these "UiApp" and
+  "EFI Internal Shell" and gives both a `File(...)` device path into the
+  firmware volume. That path never resolves on the ESP, and the
+  firmware-label marker list only matched the narrower string `"efi shell"`
+  — so both were classified as merely dead, which made them
+  `safe_to_preselect()` and therefore candidates for `boot-entries --apply`.
+  The markers now cover `"shell"` and `"uiapp"`. Found by the new live NVRAM
+  round-trip coverage in the e2e suite.
 
 ---
 

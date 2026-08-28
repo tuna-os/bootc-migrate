@@ -75,8 +75,16 @@ impl AuditedEntry {
 /// Labels firmware ships for entries that are never a real OS install.
 /// Matched case-insensitively as a substring, since firmware vendors vary
 /// capitalization and add suffixes (e.g. "UEFI: Built-in EFI Shell").
+/// `"shell"` rather than `"efi shell"`: EDK2/OVMF ships the entry as
+/// "EFI Internal Shell", which the narrower marker missed. `"uiapp"` is
+/// EDK2's own name for the firmware setup application, whose label carries
+/// no other marker at all. Both were therefore classified as merely dead
+/// (their loader paths live in the firmware volume, not on the ESP) and so
+/// were pre-selected for removal — exactly the "never auto-remove
+/// firmware/setup entries" rule this list exists to enforce.
 const FIRMWARE_LABEL_MARKERS: &[&str] = &[
-    "efi shell",
+    "shell",
+    "uiapp",
     "pxe",
     "http boot",
     "diagnostic",
@@ -334,6 +342,33 @@ Boot0004  Windows Boot Manager\tHD(1,GPT,999)/File(\\EFI\\Microsoft\\Boot\\bootm
         // flagged Dead — but even if they were, safe_to_preselect excludes
         // FirmwareManaged unconditionally.
         assert!(!diag.safe_to_preselect());
+    }
+
+    /// OVMF (the firmware the e2e VMs boot) labels its setup application
+    /// "UiApp" and its shell "EFI Internal Shell", and gives both a
+    /// `File(...)` device path into the firmware volume. That path never
+    /// resolves on the ESP, so before these markers covered them both were
+    /// flagged Dead-and-not-firmware — i.e. pre-selected for deletion.
+    #[test]
+    fn ovmf_setup_and_shell_entries_are_firmware_not_deletable() {
+        let esp = tempdir().unwrap();
+        let ovmf = "\
+Boot0000* UiApp\tFvVol(7cb8bdc9)/FvFile(462caa21)\n\
+Boot0006* EFI Internal Shell\tFvVol(7cb8bdc9)/File(\\EFI\\Shell.efi)\n";
+        let audited = audit_entries(&parse_efibootmgr_entries(ovmf), esp.path());
+        assert_eq!(audited.len(), 2, "both OVMF entries should parse");
+        for a in &audited {
+            assert!(
+                a.flags.contains(&AuditFlag::FirmwareManaged),
+                "{:?} must be recognized as firmware-managed",
+                a.entry.label
+            );
+            assert!(
+                !a.safe_to_preselect(),
+                "{:?} must never be pre-selected for removal",
+                a.entry.label
+            );
+        }
     }
 
     #[test]

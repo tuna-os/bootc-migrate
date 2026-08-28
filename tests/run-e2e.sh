@@ -1089,21 +1089,58 @@ REBASEFIX
         fi
         echo "OK: audit returned entries as JSON."
 
-        BEFORE=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
-        if [ -z "$BEFORE" ]; then
+        if [ -z "$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)" ]; then
             echo "FAIL: efibootmgr returned nothing — this guest has no UEFI"
             echo "      variables, so the NVRAM path cannot be exercised."
             exit 1
         fi
 
+        step "=== boot-entries: seeding a realistic NVRAM fixture (#31) ==="
+        # This VM's stock OVMF NVRAM holds no real OS entry: it boots via the
+        # removable-media fallback, whose device path carries no File(...)
+        # component. The only entries that DO have a loader path are OVMF's own
+        # "UiApp" and "EFI Internal Shell", which live in the firmware volume.
+        # So the planner has genuinely nothing to do here and the executor would
+        # never run. Seed the fixture #31 actually targets — one live install
+        # plus one stale leftover — and tear it down again afterwards.
+        if ! ssh $SSH_OPTS root@localhost 'bash -s' > /tmp/be-seed.log 2>&1 <<'SEED'
+set -euo pipefail
+ESP_DEV=$(lsblk -no PATH,PARTTYPE \
+    | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print $1; exit}')
+[ -n "$ESP_DEV" ] || { echo "no EFI System Partition found via PARTTYPE"; exit 1; }
+ESP_DISK="/dev/$(lsblk -no PKNAME "$ESP_DEV")"
+ESP_PART=$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition")
+mkdir -p /var/tmp/esp-seed
+mountpoint -q /var/tmp/esp-seed || mount "$ESP_DEV" /var/tmp/esp-seed
+REL=$(cd /var/tmp/esp-seed && find EFI -iname '*.efi' | head -1)
+umount /var/tmp/esp-seed
+[ -n "$REL" ] || { echo "no .efi loader present on the ESP"; exit 1; }
+LOADER="\\$(printf '%s' "$REL" | tr '/' '\\')"
+echo "esp=$ESP_DEV disk=$ESP_DISK part=$ESP_PART live-loader=$LOADER"
+# Save BootOrder first: --create prepends, and leaving a stale entry at the
+# front would strand the VM on the next boot.
+efibootmgr | sed -n 's/^BootOrder: //p' > /var/tmp/e2e-bootorder
+efibootmgr --quiet --create --disk "$ESP_DISK" --part "$ESP_PART" \
+    --label 'E2E Live Install' --loader "$LOADER"
+efibootmgr --quiet --create --disk "$ESP_DISK" --part "$ESP_PART" \
+    --label 'E2E Stale Install' --loader '\EFI\e2e-stale\bootx64.efi'
+SEED
+        then
+            sed 's/^/[seed] /' /tmp/be-seed.log
+            echo "FAIL: could not seed the NVRAM fixture; the round trip below"
+            echo "      would not have exercised the executor at all."
+            exit 1
+        fi
+        sed 's/^/[seed] /' /tmp/be-seed.log
+
+        # Captured *after* seeding: this is the state --undo must restore.
+        BEFORE=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+
         step "=== boot-entries: apply + undo round trip restores NVRAM (#31) ==="
-        # --rename-branding gives the planner something to actually do on a
-        # stock image (generic "Linux"/"UEFI OS" labels), so the executor is
-        # exercised rather than no-oping.
         ssh $SSH_OPTS root@localhost \
-            "/var/tmp/bootc-rebase boot-entries --rename-branding --apply --yes" \
+            "/var/tmp/bootc-rebase boot-entries --apply --yes" \
             > /tmp/be-apply.log 2>&1 || true
-        sed 's/^/[apply] /' /tmp/be-apply.log | tail -20
+        sed 's/^/[apply] /' /tmp/be-apply.log | tail -25
 
         if ! ssh $SSH_OPTS root@localhost "ls /var/lib/bootc-rebase/nvram-*.json" >/dev/null 2>&1; then
             echo "FAIL: --apply left no NVRAM snapshot behind. The snapshot is"
@@ -1112,6 +1149,27 @@ REBASEFIX
             exit 1
         fi
         echo "OK: pre-change NVRAM snapshot was written."
+
+        APPLIED=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+        if echo "$APPLIED" | grep -q "E2E Stale Install"; then
+            echo "FAIL: --apply did not remove the dead 'E2E Stale Install' entry,"
+            echo "      so the executor never actually wrote to NVRAM."
+            echo "$APPLIED"
+            exit 1
+        fi
+        # The firmware's own entries carry a File(...) path into the firmware
+        # volume, which never resolves on the ESP. Classifying them as merely
+        # dead would pre-select OVMF's setup app and shell for deletion — the
+        # one thing #31 says must never happen.
+        for PROTECTED in "UiApp" "EFI Internal Shell" "E2E Live Install"; do
+            if ! echo "$APPLIED" | grep -q "$PROTECTED"; then
+                echo "FAIL: --apply deleted '$PROTECTED', which must never be a"
+                echo "      cleanup candidate (firmware-managed, or a live install)."
+                echo "$APPLIED"
+                exit 1
+            fi
+        done
+        echo "OK: the dead entry was removed and every protected entry survived."
 
         if ! ssh $SSH_OPTS root@localhost \
             "/var/tmp/bootc-rebase boot-entries --undo --yes" > /tmp/be-undo.log 2>&1; then
@@ -1131,6 +1189,28 @@ REBASEFIX
             exit 1
         fi
         echo "OK: NVRAM restored exactly; #31's executor and its undo path both ran live."
+
+        step "=== boot-entries: removing the seeded fixture ==="
+        # Leave NVRAM as this VM found it: later steps reboot into the staged
+        # deployment, and a seeded entry at the head of BootOrder would strand
+        # the guest on a loader that does not exist.
+        ssh $SSH_OPTS root@localhost 'bash -s' > /tmp/be-unseed.log 2>&1 <<'UNSEED' || true
+set -uo pipefail
+for LABEL in 'E2E Live Install' 'E2E Stale Install'; do
+    ID=$(efibootmgr | grep -F "* $LABEL" | head -1 \
+        | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p')
+    [ -n "$ID" ] && efibootmgr --quiet --delete-bootnum --bootnum "$ID"
+done
+[ -s /var/tmp/e2e-bootorder ] && efibootmgr --quiet -o "$(cat /var/tmp/e2e-bootorder)"
+efibootmgr
+UNSEED
+        sed 's/^/[unseed] /' /tmp/be-unseed.log | tail -15
+        if ssh $SSH_OPTS root@localhost "efibootmgr" 2>/dev/null | grep -q "E2E .* Install"; then
+            echo "FAIL: a seeded boot entry survived cleanup. The guest may not"
+            echo "      boot the staged deployment in the steps that follow."
+            exit 1
+        fi
+        echo "OK: seeded entries removed and BootOrder restored."
     fi
 
     step "=== ostree-rebase: verifying staged deployment ==="
