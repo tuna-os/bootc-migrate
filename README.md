@@ -22,17 +22,17 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 swap in `aarch64-unknown-linux-gnu`):
 
 > **Release-naming note.** This repo was renamed from `bootc-migrate-composefs`
-> to `bootc-migrate` after the v0.2.0 release. The released tarballs, the
-> binary inside them, and the container image still carry the old
-> `bootc-migrate-composefs` name — the commands below reflect what v0.2.0
-> actually ships. The next release will publish under the new `bootc-migrate`
-> name.
+> to `bootc-migrate` after v0.2.0. `release.yml` already publishes under the
+> new name, so from **v0.5.0** the tarball, the binary inside it, and the
+> container image are all `bootc-migrate`. The commands below reflect that.
+> To install the older v0.2.0 artifacts, substitute `bootc-migrate-composefs`
+> in the paths.
 
 ```bash
 curl -fsSL -o bmc.tar.gz \
-  https://github.com/tuna-os/bootc-migrate/releases/latest/download/bootc-migrate-composefs-x86_64-unknown-linux-gnu.tar.gz
+  https://github.com/tuna-os/bootc-migrate/releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz
 tar xzf bmc.tar.gz
-sudo install -m755 bootc-migrate-composefs /usr/local/bin/bootc-migrate
+sudo install -m755 bootc-migrate /usr/local/bin/bootc-migrate
 ```
 
 <details><summary>…or pull the container image</summary>
@@ -40,10 +40,10 @@ sudo install -m755 bootc-migrate-composefs /usr/local/bin/bootc-migrate
 A minimal image ships the same binary, useful when GitHub Releases is rate-limited/blocked, or to `COPY --from=` it into another Containerfile:
 
 ```bash
-podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate-composefs:latest
-podman cp bmc-extract:/usr/local/bin/bootc-migrate-composefs .
+podman create --name bmc-extract ghcr.io/tuna-os/bootc-migrate:latest
+podman cp bmc-extract:/usr/local/bin/bootc-migrate .
 podman rm bmc-extract
-sudo install -m755 bootc-migrate-composefs /usr/local/bin/bootc-migrate
+sudo install -m755 bootc-migrate /usr/local/bin/bootc-migrate
 ```
 </details>
 
