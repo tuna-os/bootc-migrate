@@ -107,11 +107,31 @@ same-lineage Fedora — has to opt in explicitly, exactly as a human operator
 would. The cells assert the refusal *first*, without the flag, so the gate's
 wiring has live coverage and cannot regress to waving things through.
 
-Note also that the intended image pair may not qualify anyway: `is_cross_base`
-is lineage-aware (`scan.rs`), returning false when either side's `ID_LIKE`
-contains the other's `ID`. CentOS declares `ID_LIKE="rhel fedora"`, so
-CentOS → Fedora is same-lineage **by design**. That question is still open
-because the scan failure meant `is_cross_base` was never evaluated.
+### The matrix already has a cross-base pair
+
+With the scan working, `is_cross_base` was evaluated for the first time —
+and `bluefin:stable → dakota:stable` **is** cross-base. From the gating
+ostree re-base cell:
+
+```
+=== Cross-base UID/GID remap report ===
+Diverging system accounts (renumbered during the re-base):
+  wheel                    gid 10 -> 997
+2 chown pass(es) will run over /var and preserved /etc.
+Error: Cross-base re-base detected (host and target disagree on ID/ID_LIKE).
+```
+
+This also corrects a second standing assumption. These pairs were described
+here as "same-lineage Fedora", and the worry was that a cross-base cell would
+need an exotic image because `is_cross_base` is lineage-aware and CentOS
+declares `ID_LIKE="rhel fedora"`. Neither the pessimism nor the premise
+survived contact: the existing pair qualifies.
+
+So #187 does not need a dedicated matrix cell. The gating `ostree-rebase`
+cell now asserts, after opting in with `--accept-cross-base`, that the remap
+report actually appears — the cross-base path executing under assertion,
+which is what the issue asks for. `E2E_CROSS_BASE=1` remains available for
+forcing the check on a pair chosen deliberately.
 
 ### Desktop migration (`E2E_DE_MIGRATE=1`) — active on the cross-DE cell
 

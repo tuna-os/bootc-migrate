@@ -898,17 +898,40 @@ REBASEFIX
         echo "resolv.conf: $(tr "\n" " " < /etc/resolv.conf 2>/dev/null || echo MISSING)"
     ' 2>&1 | sed 's/^/[registry-probe] /' || true
 
-    step "=== ostree-rebase: asserting the cross-base gate refuses an unscannable target (#191) ==="
+    # #191: the gate must REFUSE without an explicit opt-in. It has two valid
+    # ways to refuse, and which one fires depends on whether the target scan
+    # reached the registry:
+    #
+    #   - scan succeeded, pair is cross-base -> "Cross-base re-base detected"
+    #   - scan failed, status unknown        -> "Cannot determine whether ..."
+    #
+    # Both satisfy #191. Asserting only the second was correct while the
+    # registry scan was broken, but it started failing the moment the scan
+    # began working (the token-scope fix): the gate refused for the *better*
+    # reason and the assertion called that a failure. What must never happen is
+    # the re-base proceeding unguarded, so that is what this checks.
+    step "=== ostree-rebase: asserting the cross-base gate refuses without opt-in (#191) ==="
     GATE_OUT=$(ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" 2>&1 || true)
-    if ! echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
-        echo "FAIL: expected the cross-base gate to refuse an unscannable target."
-        echo "      Without that refusal the re-base proceeds unguarded — the #191 bug."
+    if echo "$GATE_OUT" | grep -q "Cross-base re-base detected"; then
+        echo "OK: target scanned cleanly and the pair IS cross-base; gate refused."
+        echo "    The remap report above is #67's code executing for real."
+        CROSS_BASE_EXECUTED=1
+    elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
+        echo "OK: target could not be scanned; gate refused on unknown status (#191)."
+        echo "    NOTE: is_cross_base was never evaluated, so this run proves the"
+        echo "    gate's wiring but not the remap path. See the [registry-probe]"
+        echo "    output above for why the scan failed."
+        CROSS_BASE_EXECUTED=0
+    else
+        echo "FAIL: the cross-base gate did not refuse."
+        echo "      Without an explicit --accept-cross-base the re-base must not"
+        echo "      proceed, whether the target is known cross-base or unknown."
+        echo "      Proceeding unguarded is the #191 bug."
         echo "--- bootc-rebase output ---"
         echo "$GATE_OUT" | sed 's/^/[gate] /'
         exit 1
     fi
-    echo "OK: gate refused an unscannable target; opting in explicitly below."
 
     # These image pairs are same-lineage Fedora (bluefin:stable -> dakota /
     # aurora), and the harness knows it, so it is the operator that opts in.
@@ -943,6 +966,22 @@ REBASEFIX
         exit 1
     fi
     sed 's/^/[rebase] /' /tmp/rebase-out.log
+
+    # The gate above already proved this pair is cross-base by scanning it, so
+    # the opted-in re-base must show the remap running. This is #187's actual
+    # deliverable — the cross-base code path executing under assertion — and it
+    # is available on this existing cell, without a dedicated matrix entry,
+    # now that the target scan works (the token-scope fix).
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        step "=== ostree-rebase: asserting the cross-base remap ran after opt-in (#187) ==="
+        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
+            echo "FAIL: the gate identified this pair as cross-base, but the"
+            echo "      opted-in re-base printed no remap report. The refusal"
+            echo "      path ran and the apply path did not."
+            exit 1
+        fi
+        echo "OK: cross-base remap report emitted during the opted-in re-base."
+    fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
         # The whole point of this cell is that the cross-base code RAN. Without
