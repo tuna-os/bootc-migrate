@@ -945,16 +945,32 @@ REBASEFIX
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         REBASE_FLAGS="$REBASE_FLAGS --de-migrate"
         step "=== ostree-rebase: seeding a GNOME config to stash (#188) ==="
+        # The ostree VM is installed straight from the base image, which ships
+        # no human account at all. Without one the controller correctly takes
+        # its "no human accounts to stash" branch and #68's stash never runs,
+        # so create the account here rather than silently proving nothing.
         ssh $SSH_OPTS root@localhost '
             set -e
             u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
-            if [ -z "$u" ]; then echo "NO_HUMAN_USER"; exit 0; fi
+            if [ -z "$u" ]; then
+                u=realuser
+                useradd -m -b /var/home -s /bin/bash "$u"
+                echo "CREATED user=$u"
+            fi
             h=$(getent passwd "$u" | cut -d: -f6)
+            [ -n "$h" ] || { echo "NO_HOME for $u"; exit 1; }
             mkdir -p "$h/.config/dconf" "$h/.local/share/gnome-shell"
             echo "e2e-gnome-marker" > "$h/.config/dconf/user"
             chown -R "$u" "$h/.config" "$h/.local" 2>/dev/null || true
             echo "SEEDED user=$u home=$h"
-        ' 2>&1 | sed "s/^/[de-seed] /"
+        ' > /tmp/de-seed.log 2>&1 || true
+        sed "s/^/[de-seed] /" /tmp/de-seed.log
+        if ! grep -q "^SEEDED " /tmp/de-seed.log; then
+            echo "FAIL: could not seed a GNOME config for a human user. The DE"
+            echo "      assertions below would pass or fail for reasons that have"
+            echo "      nothing to do with #68."
+            exit 1
+        fi
     fi
 
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
@@ -1024,7 +1040,12 @@ REBASEFIX
         # vacuously. Silence has FOUR distinct causes here — report which one
         # happened rather than naming a single guess.
         step "=== ostree-rebase: asserting DE stash/restore actually ran (#188) ==="
-        if grep -qE "DE migration: (gnome|kde|cosmic|niri|xfce) -> " /tmp/rebase-out.log; then
+        # Match the *planned* line specifically ("... -> kde for 1 user(s)").
+        # The controller's refusal branches share the "DE migration: gnome ->
+        # kde" prefix, so a looser pattern reads a refusal as a plan and then
+        # blames the missing stash on #68.
+        if grep -qE "DE migration: (gnome|kde|cosmic|niri|xfce) -> [a-z]+ for [0-9]+ user\(s\)" \
+            /tmp/rebase-out.log; then
             echo "OK: cross-desktop migration planned and executed."
 
             # The plan alone is not the deliverable — #68's unshipped half is
@@ -1032,14 +1053,24 @@ REBASEFIX
             if ! ssh $SSH_OPTS root@localhost '
                 u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
                 h=$(getent passwd "$u" | cut -d: -f6)
-                test -d "$h/.local/share/de-migrate"
+                # The seeded marker must be under the stash, and gone from the
+                # place it was seeded: a copy is not a stash, and an empty
+                # stash directory would satisfy a bare test -d.
+                grep -q e2e-gnome-marker "$h/.local/share/de-migrate/gnome/.config/dconf/user" \
+                    && ! test -e "$h/.config/dconf/user"
             '; then
-                echo "FAIL: DE migration reported a plan, but no stash directory"
-                echo "      exists at ~/.local/share/de-migrate. The plan ran and"
-                echo "      the move did not — that is #68's unshipped half."
+                echo "FAIL: DE migration reported a plan, but the seeded GNOME"
+                echo "      config was not moved into ~/.local/share/de-migrate."
+                echo "      The plan ran and the move did not — that is #68's"
+                echo "      unshipped half."
+                ssh $SSH_OPTS root@localhost '
+                    u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
+                    h=$(getent passwd "$u" | cut -d: -f6)
+                    echo "home=$h"; ls -la "$h/.config/dconf" "$h/.local/share/de-migrate" 2>&1
+                ' 2>&1 | sed "s/^/[de-stash] /" || true
                 exit 1
             fi
-            echo "OK: stash directory present; outgoing DE config was moved."
+            echo "OK: the seeded GNOME config was moved into the stash."
         elif grep -q "skipped (--de-migrate not passed)" /tmp/rebase-out.log; then
             echo "FAIL: --de-migrate was in REBASE_FLAGS but the controller still"
             echo "      reported it as not passed — the flag is not reaching the"
