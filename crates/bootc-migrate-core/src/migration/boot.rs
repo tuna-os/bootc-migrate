@@ -2,6 +2,7 @@
 //!
 //! Also home to the standalone `migrate-bootloader` subcommand (issue #65).
 
+use super::boot_deployments::{BootDeployment, enumerate_deployments};
 use super::*;
 use crate::preflight::SystemInfo;
 
@@ -1060,100 +1061,6 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
 }
 
 // ---- Standalone migrate-bootloader (issue #65) ----
-
-/// A deployment found on the running system — either OSTree or composefs.
-#[derive(Debug)]
-pub struct BootDeployment {
-    pub root: PathBuf,
-    pub checksum: String,
-    pub kver: String,
-    pub vmlinuz: PathBuf,
-    pub initrd: PathBuf,
-    pub is_composefs: bool,
-}
-
-/// Enumerate all bootable deployments (OSTree + composefs) on the running system.
-fn enumerate_deployments() -> Result<Vec<BootDeployment>> {
-    let mut deps = Vec::new();
-
-    // OSTree deployments
-    let deploy_base = Path::new("/sysroot/ostree/deploy/default/deploy");
-    if deploy_base.exists() {
-        for entry in fs::read_dir(deploy_base)? {
-            let entry = entry?;
-            let name_str = entry.file_name().to_string_lossy().into_owned();
-            if !name_str.ends_with(".0") || !entry.path().is_dir() {
-                continue;
-            }
-            let checksum = name_str.trim_end_matches(".0").to_string();
-            let modules_dir = entry.path().join("usr/lib/modules");
-            let kver = match find_kver_in_modules(&modules_dir) {
-                Some(k) => k,
-                None => continue,
-            };
-            let vmlinuz = modules_dir.join(&kver).join("vmlinuz");
-            let initrd = modules_dir.join(&kver).join("initramfs.img");
-            if vmlinuz.exists() {
-                deps.push(BootDeployment {
-                    root: entry.path(),
-                    checksum,
-                    kver: kver.clone(),
-                    vmlinuz,
-                    initrd,
-                    is_composefs: false,
-                });
-            }
-        }
-    }
-
-    // Composefs / bootc state deployments
-    let cfs_deploy_base = Path::new("/sysroot/state/os/default");
-    if cfs_deploy_base.exists() {
-        // Look for deployments under the composefs state dir.
-        // Typical layout: /sysroot/state/os/default/<digest>/
-        for entry in fs::read_dir(cfs_deploy_base)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // Skip the state symlink and non-digest dirs.
-            if name == "state" || name.len() < 12 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            // Only include if it has an origin file (marks a real deployment).
-            let origin = path.join(format!("{name}.origin"));
-            if !origin.exists() {
-                continue;
-            }
-            let modules_dir = path.join("usr/lib/modules");
-            let kver = match find_kver_in_modules(&modules_dir) {
-                Some(k) => k,
-                None => continue,
-            };
-            let vmlinuz = modules_dir.join(&kver).join("vmlinuz");
-            deps.push(BootDeployment {
-                root: path,
-                checksum: name,
-                kver: kver.clone(),
-                vmlinuz,
-                initrd: modules_dir.join(&kver).join("initramfs.img"),
-                is_composefs: true,
-            });
-        }
-    }
-
-    Ok(deps)
-}
-
-fn find_kver_in_modules(modules_dir: &Path) -> Option<String> {
-    fs::read_dir(modules_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-}
 
 /// Standalone `migrate-bootloader` — convert GRUB→systemd-boot or systemd-boot→GRUB2
 /// without touching the rootfs backend (issue #65).
