@@ -873,14 +873,32 @@ mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
 REBASEFIX
 
-    # E2E_CROSS_BASE=1 exercises M3's cross-base path (#67/#187): the UID/GID
-    # remap planner and the etc_conflict post-merge reconciliation pass, which
-    # are gated behind is_cross_base and refused without --accept-cross-base.
-    # Both had shipped without ever executing anywhere.
-    REBASE_FLAGS=""
-    if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
-        REBASE_FLAGS="--accept-cross-base"
+    # The guest cannot reach ghcr.io for the target-image SCAN (#191) — bootc
+    # switch pulls fine, the scan path does not — so gate_cross_base returns
+    # Unknown here. Since #191 that is a refusal rather than a silent
+    # proceed, which is the whole point: a gate that cannot see must not wave
+    # things through.
+    #
+    # Prove it fires before opting out of it. The refusal happens before any
+    # staging work, so this costs seconds, and it is the only live coverage
+    # that the gate actually gates — the unit tests cover the policy, not the
+    # wiring.
+    step "=== ostree-rebase: asserting the cross-base gate refuses an unscannable target (#191) ==="
+    GATE_OUT=$(ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" 2>&1 || true)
+    if ! echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
+        echo "FAIL: expected the cross-base gate to refuse an unscannable target."
+        echo "      Without that refusal the re-base proceeds unguarded — the #191 bug."
+        echo "--- bootc-rebase output ---"
+        echo "$GATE_OUT" | sed 's/^/[gate] /'
+        exit 1
     fi
+    echo "OK: gate refused an unscannable target; opting in explicitly below."
+
+    # These image pairs are same-lineage Fedora (bluefin:stable -> dakota /
+    # aurora), and the harness knows it, so it is the operator that opts in.
+    # That is what --accept-cross-base is for; it is not a way around the gate.
+    REBASE_FLAGS="--accept-cross-base"
 
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
@@ -909,9 +927,12 @@ REBASEFIX
             echo "OK: cross-base detected; remap report emitted."
         elif grep -q "could not scan target image for cross-base identity" /tmp/rebase-out.log; then
             echo "FAIL: the target image could not be scanned, so cross-base"
-            echo "      detection never ran and DEGRADED SILENTLY to a no-op."
-            echo "      This is not a same-family result — is_cross_base was"
-            echo "      never evaluated. See the registry warning above."
+            echo "      detection never ran. Since #191 this is not silent —"
+            echo "      the gate refused and only the explicit"
+            echo "      --accept-cross-base above let the re-base continue —"
+            echo "      but the code under test still did not execute. This is"
+            echo "      NOT a same-family result: is_cross_base was never"
+            echo "      evaluated. See the registry warning above (#191)."
             exit 1
         else
             echo "FAIL: E2E_CROSS_BASE=1 and the target scanned cleanly, but no"
