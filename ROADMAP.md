@@ -86,9 +86,9 @@ validation named in that issue's own scope never shipped.
 | Path | State | Validation gap | Tracking |
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
-| Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | the `efibootmgr` path has never executed; no cell mutates NVRAM | #31, #189 |
+| Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
 | Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | never executes; currently un-coverable in CI — the guest cannot scan the target, so the gate no-ops (#191) | #67, #187, #191 |
-| DE stash/restore (`--de-migrate`) | implemented, detection table-tested | no cell passes `--de-migrate`; stash never created on a real system | #68, #188 |
+| DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory also silently no-ops in CI for the same scan failure (#191) | #80, #191 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
@@ -227,16 +227,15 @@ generation, and retiring the pinned legacy builder, have not been picked up.
 bootc anywhere (host, target, builder); `BMC_CFS_BUILDER` becomes a no-op
 escape hatch.
 
-### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed; the interactive/live pieces exist but are unvalidated**
+### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed; interactive/live coverage is partial**
 
-Three issues, same shape: the pure/reusable core shipped first and is
-unit-tested. The interactive checklists (#15, #31) and #31's live NVRAM
-mutation have since been built on top, but neither is exercisable by this
-project's build/clippy/test/fmt + E2E loop — a passing CI run cannot
-demonstrate that a checklist UI works, and no E2E cell mutates NVRAM. Both
-carry that caveat in their module docs and need manual/corral-VM
-validation; #31's `efibootmgr` path is the same class of risk as #65 and
-should not be trusted until it has been run on a real UEFI system.
+Three issues share the same shape: the pure/reusable core shipped first and
+is unit-tested. The interactive checklist in #15 is now driven through a
+full migration by the gating TUI cell. The gating OSTree re-base cell also
+executes #31's live NVRAM rename and snapshot restore against OVMF and asserts
+that `efibootmgr -v` is byte-identical afterwards. That evidence does not
+cover #65's unimplemented bootloader flip, and real-hardware validation is
+still advisable before treating firmware-specific behavior as universal.
 
 - [#68](https://github.com/tuna-os/bootc-migrate/issues/68) — DE
   config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma,
@@ -280,11 +279,11 @@ should not be trusted until it has been run on a real UEFI system.
   (`boot_cleanup::plan`), and the `efibootmgr` executor
   (`boot_cleanup::live`) only performs what the planner approved. Dry-run
   is the default; `--apply` requires a typed confirmation and writes a
-  restorable NVRAM snapshot first; `--undo` replays it. What has **not**
-  run is the `efibootmgr` path itself: no E2E cell mutates NVRAM, so entry
-  deletion, the create-before-delete rename, and `--undo` need a real UEFI
-  machine or a corral VM before they are trusted — as does the checklist's
-  terminal event loop, like this project's other interactive-only work.
+  restorable NVRAM snapshot first; `--undo` replays it. The gating OSTree
+  re-base cell now covers the create-before-delete rename and `--undo`
+  against live OVMF variables, including a byte-for-byte restoration check.
+  Entry deletion and the checklist's terminal event loop are not exercised
+  by that flow and still need targeted VM or real-hardware validation.
 
 **Exit criteria (not yet met)**: bluefin↔aurora-style switch preserves user
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
