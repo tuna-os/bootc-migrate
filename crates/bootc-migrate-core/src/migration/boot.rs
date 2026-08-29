@@ -976,7 +976,12 @@ pub fn find_esp_or_mount() -> Result<String> {
             && !parts[2].is_empty()
         {
             let mp = parts[2].to_string();
-            println!("Found ESP already mounted at {}", mp);
+            // stderr for the same reason as the mount call sites below: this
+            // function is on the path of `boot-entries --json`, so anything it
+            // writes to stdout lands ahead of the JSON document and breaks
+            // every consumer. This third call site was missed when the other
+            // two were moved to stderr.
+            eprintln!("Found ESP already mounted at {}", mp);
             return Ok(mp);
         }
     }

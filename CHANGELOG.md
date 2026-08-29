@@ -39,6 +39,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   issue exists for was silently inert. Both renderings are now handled. Every
   unit fixture used the classic form, which is why only live e2e coverage
   caught it.
+- **`boot-entries --json` stdout is machine-readable again** (#31/#189).
+  `find_esp_or_mount` printed "Found ESP already mounted at ..." to stdout,
+  which lands ahead of the JSON document and breaks every consumer that pipes
+  it. Two sibling call sites in the same function were moved to stderr
+  earlier; this third one was missed.
 - **`FvFile(...)` is no longer read as a loader path** (#31). The same parser
   looked for `File(` anywhere in the node list, which also matches the tail of
   a firmware volume's `FvFile(`. A firmware entry's volume GUID was therefore

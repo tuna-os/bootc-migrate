@@ -1192,7 +1192,13 @@ sys.exit(0 if "dead" in stale[0]["flags"] else 1)
 '; then
             echo "FAIL: the seeded stale entry is not classified dead, so the"
             echo "      planner has nothing to select and the round trip below"
-            echo "      would prove nothing. Raw NVRAM follows."
+            echo "      would prove nothing."
+            # The stdout that failed to parse, verbatim: an empty document and
+            # a human line printed ahead of the JSON look identical from the
+            # decoder's error alone ("Expecting value: line 1 column 1").
+            echo "--- boot-entries stdout ($(wc -c < /tmp/be-seeded.json) bytes) ---"
+            head -c 400 /tmp/be-seeded.json | sed 's/^/[stdout] /'
+            echo "--- boot-entries stderr ---"
             sed 's/^/[boot-entries stderr] /' /tmp/be-seeded.err
             ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null \
                 | sed 's/^/[efibootmgr-v] /'
