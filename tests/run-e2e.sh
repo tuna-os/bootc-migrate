@@ -1215,13 +1215,27 @@ sys.exit(0 if "dead" in stale[0]["flags"] else 1)
             > /tmp/be-apply.log 2>&1 || true
         sed 's/^/[apply] /' /tmp/be-apply.log | tail -25
 
-        if ! ssh $SSH_OPTS root@localhost "ls /var/lib/bootc-rebase/nvram-*.json" >/dev/null 2>&1; then
-            echo "FAIL: --apply left no NVRAM snapshot behind. The snapshot is"
+        # Take the path from the tool's own report rather than guessing at the
+        # layout: snapshots live under a boot-entry-backups/ subdirectory
+        # (boot_cleanup::live::BACKUP_DIR), and an assertion that hardcodes the
+        # wrong glob fails identically to an executor that never wrote one.
+        SNAPSHOT=$(sed -n 's/.*NVRAM snapshot written to \([^ ]*\).*/\1/p' \
+            /tmp/be-apply.log | head -1)
+        if [ -z "$SNAPSHOT" ]; then
+            echo "FAIL: --apply reported no NVRAM snapshot path. The snapshot is"
             echo "      the only way back from a bad write; without it --undo"
             echo "      has nothing to restore."
             exit 1
         fi
-        echo "OK: pre-change NVRAM snapshot was written."
+        if ! ssh $SSH_OPTS root@localhost "test -f '$SNAPSHOT'"; then
+            echo "FAIL: --apply reported a snapshot at $SNAPSHOT but no such file"
+            echo "      exists on the guest."
+            ssh $SSH_OPTS root@localhost \
+                "ls -la /var/lib/bootc-rebase/boot-entry-backups 2>&1" \
+                | sed 's/^/[backups] /' || true
+            exit 1
+        fi
+        echo "OK: pre-change NVRAM snapshot written to $SNAPSHOT."
 
         APPLIED=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
         if echo "$APPLIED" | grep -q "E2E Stale Install"; then
