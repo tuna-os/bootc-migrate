@@ -883,22 +883,95 @@ REBASEFIX
     # staging work, so this costs seconds, and it is the only live coverage
     # that the gate actually gates — the unit tests cover the policy, not the
     # wiring.
-    step "=== ostree-rebase: asserting the cross-base gate refuses an unscannable target (#191) ==="
+    # The scan path (curl -> ghcr.io) has failed inside the guest while
+    # `bootc switch` pulled fine moments later, which blocked both #187 and
+    # #188 without ever naming a cause. Probe it here so the run reports the
+    # truth rather than leaving it to be inferred from a downstream warning.
+    step "=== ostree-rebase: probing the guest's registry reachability (#187) ==="
+    ssh $SSH_OPTS root@localhost '
+        echo "curl binary: $(command -v curl || echo MISSING)"
+        if command -v curl >/dev/null; then
+            code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 https://ghcr.io/v2/ 2>&1) \
+                && echo "ghcr.io/v2/ HTTP status: $code (401 is expected: it means reachable)" \
+                || echo "ghcr.io/v2/ curl FAILED: $code"
+        fi
+        echo "resolv.conf: $(tr "\n" " " < /etc/resolv.conf 2>/dev/null || echo MISSING)"
+    ' 2>&1 | sed 's/^/[registry-probe] /' || true
+
+    # #191: the gate must REFUSE without an explicit opt-in. It has two valid
+    # ways to refuse, and which one fires depends on whether the target scan
+    # reached the registry:
+    #
+    #   - scan succeeded, pair is cross-base -> "Cross-base re-base detected"
+    #   - scan failed, status unknown        -> "Cannot determine whether ..."
+    #
+    # Both satisfy #191. Asserting only the second was correct while the
+    # registry scan was broken, but it started failing the moment the scan
+    # began working (the token-scope fix): the gate refused for the *better*
+    # reason and the assertion called that a failure. What must never happen is
+    # the re-base proceeding unguarded, so that is what this checks.
+    step "=== ostree-rebase: asserting the cross-base gate refuses without opt-in (#191) ==="
     GATE_OUT=$(ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" 2>&1 || true)
-    if ! echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
-        echo "FAIL: expected the cross-base gate to refuse an unscannable target."
-        echo "      Without that refusal the re-base proceeds unguarded — the #191 bug."
+    if echo "$GATE_OUT" | grep -q "Cross-base re-base detected"; then
+        echo "OK: target scanned cleanly and the pair IS cross-base; gate refused."
+        echo "    The remap report above is #67's code executing for real."
+        CROSS_BASE_EXECUTED=1
+    elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
+        echo "OK: target could not be scanned; gate refused on unknown status (#191)."
+        echo "    NOTE: is_cross_base was never evaluated, so this run proves the"
+        echo "    gate's wiring but not the remap path. See the [registry-probe]"
+        echo "    output above for why the scan failed."
+        CROSS_BASE_EXECUTED=0
+    else
+        echo "FAIL: the cross-base gate did not refuse."
+        echo "      Without an explicit --accept-cross-base the re-base must not"
+        echo "      proceed, whether the target is known cross-base or unknown."
+        echo "      Proceeding unguarded is the #191 bug."
         echo "--- bootc-rebase output ---"
         echo "$GATE_OUT" | sed 's/^/[gate] /'
         exit 1
     fi
-    echo "OK: gate refused an unscannable target; opting in explicitly below."
 
     # These image pairs are same-lineage Fedora (bluefin:stable -> dakota /
     # aurora), and the harness knows it, so it is the operator that opts in.
     # That is what --accept-cross-base is for; it is not a way around the gate.
     REBASE_FLAGS="--accept-cross-base"
+
+    # #188: on the cross-DE cell, also ask for desktop migration. Without
+    # --de-migrate the controller reports "skipped (--de-migrate not passed)"
+    # and the stash/restore code never runs, so the cross-DE cell was
+    # exercising the re-base route while proving nothing about #68.
+    if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
+        REBASE_FLAGS="$REBASE_FLAGS --de-migrate"
+        step "=== ostree-rebase: seeding a GNOME config to stash (#188) ==="
+        # The ostree VM is installed straight from the base image, which ships
+        # no human account at all. Without one the controller correctly takes
+        # its "no human accounts to stash" branch and #68's stash never runs,
+        # so create the account here rather than silently proving nothing.
+        ssh $SSH_OPTS root@localhost '
+            set -e
+            u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
+            if [ -z "$u" ]; then
+                u=realuser
+                useradd -m -b /var/home -s /bin/bash "$u"
+                echo "CREATED user=$u"
+            fi
+            h=$(getent passwd "$u" | cut -d: -f6)
+            [ -n "$h" ] || { echo "NO_HOME for $u"; exit 1; }
+            mkdir -p "$h/.config/dconf" "$h/.local/share/gnome-shell"
+            echo "e2e-gnome-marker" > "$h/.config/dconf/user"
+            chown -R "$u" "$h/.config" "$h/.local" 2>/dev/null || true
+            echo "SEEDED user=$u home=$h"
+        ' > /tmp/de-seed.log 2>&1 || true
+        sed "s/^/[de-seed] /" /tmp/de-seed.log
+        if ! grep -q "^SEEDED " /tmp/de-seed.log; then
+            echo "FAIL: could not seed a GNOME config for a human user. The DE"
+            echo "      assertions below would pass or fail for reasons that have"
+            echo "      nothing to do with #68."
+            exit 1
+        fi
+    fi
 
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
@@ -909,6 +982,22 @@ REBASEFIX
         exit 1
     fi
     sed 's/^/[rebase] /' /tmp/rebase-out.log
+
+    # The gate above already proved this pair is cross-base by scanning it, so
+    # the opted-in re-base must show the remap running. This is #187's actual
+    # deliverable — the cross-base code path executing under assertion — and it
+    # is available on this existing cell, without a dedicated matrix entry,
+    # now that the target scan works (the token-scope fix).
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        step "=== ostree-rebase: asserting the cross-base remap ran after opt-in (#187) ==="
+        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
+            echo "FAIL: the gate identified this pair as cross-base, but the"
+            echo "      opted-in re-base printed no remap report. The refusal"
+            echo "      path ran and the apply path did not."
+            exit 1
+        fi
+        echo "OK: cross-base remap report emitted during the opted-in re-base."
+    fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
         # The whole point of this cell is that the cross-base code RAN. Without
@@ -943,6 +1032,272 @@ REBASEFIX
             echo "      so EL -> Fedora is same-lineage by design)."
             exit 1
         fi
+    fi
+
+    if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
+        # Same discipline as the cross-base assertion above: the DE step is
+        # silent whenever it declines to act, so an unasserted cell passes
+        # vacuously. Silence has FOUR distinct causes here — report which one
+        # happened rather than naming a single guess.
+        step "=== ostree-rebase: asserting DE stash/restore actually ran (#188) ==="
+        # Match the *planned* line specifically ("... -> kde for 1 user(s)").
+        # The controller's refusal branches share the "DE migration: gnome ->
+        # kde" prefix, so a looser pattern reads a refusal as a plan and then
+        # blames the missing stash on #68.
+        if grep -qE "DE migration: (gnome|kde|cosmic|niri|xfce) -> [a-z]+ for [0-9]+ user\(s\)" \
+            /tmp/rebase-out.log; then
+            echo "OK: cross-desktop migration planned and executed."
+
+            # The plan alone is not the deliverable — #68's unshipped half is
+            # the stash itself. Assert the outgoing config actually moved.
+            if ! ssh $SSH_OPTS root@localhost '
+                u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
+                h=$(getent passwd "$u" | cut -d: -f6)
+                # The seeded marker must be under the stash, and gone from the
+                # place it was seeded: a copy is not a stash, and an empty
+                # stash directory would satisfy a bare test -d.
+                grep -q e2e-gnome-marker "$h/.local/share/de-migrate/gnome/.config/dconf/user" \
+                    && ! test -e "$h/.config/dconf/user"
+            '; then
+                echo "FAIL: DE migration reported a plan, but the seeded GNOME"
+                echo "      config was not moved into ~/.local/share/de-migrate."
+                echo "      The plan ran and the move did not — that is #68's"
+                echo "      unshipped half."
+                ssh $SSH_OPTS root@localhost '
+                    u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
+                    h=$(getent passwd "$u" | cut -d: -f6)
+                    echo "home=$h"; ls -la "$h/.config/dconf" "$h/.local/share/de-migrate" 2>&1
+                ' 2>&1 | sed "s/^/[de-stash] /" || true
+                exit 1
+            fi
+            echo "OK: the seeded GNOME config was moved into the stash."
+        elif grep -q "skipped (--de-migrate not passed)" /tmp/rebase-out.log; then
+            echo "FAIL: --de-migrate was in REBASE_FLAGS but the controller still"
+            echo "      reported it as not passed — the flag is not reaching the"
+            echo "      controller. This is a wiring bug, not a policy decision."
+            exit 1
+        elif grep -q "nothing to do (this host:" /tmp/rebase-out.log; then
+            echo "FAIL: the host and target resolved to the same desktop, so the"
+            echo "      cross-DE code never ran. E2E_DE_MIGRATE=1 belongs only on"
+            echo "      a genuinely cross-DE pair (bluefin GNOME -> aurora KDE)."
+            exit 1
+        elif grep -q "no human accounts to stash" /tmp/rebase-out.log; then
+            echo "FAIL: no human account was found, so there was nothing to stash."
+            echo "      The seeding step above should have created one; check the"
+            echo "      [de-seed] output for NO_HUMAN_USER."
+            exit 1
+        else
+            echo "FAIL: E2E_DE_MIGRATE=1 but no DE migration line appeared at all."
+            echo "      The most likely cause is that detect_image_desktop could"
+            echo "      not scan the target image — the same registry path that"
+            echo "      blocks #187. See the [registry-probe] output above."
+            exit 1
+        fi
+    fi
+
+    if [ "${E2E_BOOT_ENTRIES:-0}" = "1" ]; then
+        # #189: until this ran, no cell mutated NVRAM, so #31's efibootmgr
+        # executor had no live coverage at all — only unit tests of the plan.
+        # The apply/undo round trip is what proves the executor and its
+        # snapshot restore actually work against real firmware variables.
+        #
+        # Scope note: #189 also names #65's live bootloader flip. That is NOT
+        # covered here and cannot be — `migrate-bootloader` currently bails
+        # with "not implemented yet (issue #65)", so there is no flip to test.
+        step "=== boot-entries: audit is read-only and machine-readable (#31) ==="
+        if ! ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase boot-entries --json" > /tmp/be-audit.json 2>/tmp/be-audit.err; then
+            sed 's/^/[boot-entries] /' /tmp/be-audit.err
+            echo "FAIL: boot-entries --json exited nonzero"
+            exit 1
+        fi
+        if ! python3 -c "import json,sys; d=json.load(open('/tmp/be-audit.json')); sys.exit(0 if d else 1)"; then
+            echo "FAIL: boot-entries --json did not produce a non-empty audit."
+            echo "      Either NVRAM has no entries (OVMF VARS not persisted —"
+            echo "      see the #189 pflash setup) or the JSON shape changed."
+            sed 's/^/[audit] /' /tmp/be-audit.json | head -20
+            exit 1
+        fi
+        echo "OK: audit returned entries as JSON."
+
+        if [ -z "$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)" ]; then
+            echo "FAIL: efibootmgr returned nothing — this guest has no UEFI"
+            echo "      variables, so the NVRAM path cannot be exercised."
+            exit 1
+        fi
+
+        step "=== boot-entries: seeding a realistic NVRAM fixture (#31) ==="
+        # This VM's stock OVMF NVRAM holds no real OS entry: it boots via the
+        # removable-media fallback, whose device path carries no File(...)
+        # component. The only entries that DO have a loader path are OVMF's own
+        # "UiApp" and "EFI Internal Shell", which live in the firmware volume.
+        # So the planner has genuinely nothing to do here and the executor would
+        # never run. Seed the fixture #31 actually targets — one live install
+        # plus one stale leftover — and tear it down again afterwards. Nothing
+        # here mounts the ESP: the audit resolves its own ESP mount, and a
+        # second mount/umount of the same device breaks that resolution.
+        if ! ssh $SSH_OPTS root@localhost 'bash -s' > /tmp/be-seed.log 2>&1 <<'SEED'
+set -euo pipefail
+ESP_DEV=$(lsblk -no PATH,PARTTYPE \
+    | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print $1; exit}')
+[ -n "$ESP_DEV" ] || { echo "no EFI System Partition found via PARTTYPE"; exit 1; }
+ESP_DISK="/dev/$(lsblk -no PKNAME "$ESP_DEV")"
+ESP_PART=$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition")
+# Reuse a loader path this machine already boots from rather than mounting
+# the ESP to find one. Mounting it a second time and unmounting disturbs the
+# mount `find_esp_or_mount` resolves the audit against, and any path already
+# in NVRAM is real by construction. The pattern matches both renderings:
+# File(\EFI\..) and a bare trailing \EFI\.. component.
+LOADER=$(efibootmgr -v | grep -o '\\EFI\\[^ )]*\.efi' | head -1)
+[ -n "$LOADER" ] || { echo "no existing loader path in NVRAM to reuse"; exit 1; }
+echo "esp=$ESP_DEV disk=$ESP_DISK part=$ESP_PART live-loader=$LOADER"
+# Save BootOrder first: --create prepends, and leaving a stale entry at the
+# front would strand the VM on the next boot.
+efibootmgr | sed -n 's/^BootOrder: //p' > /var/tmp/e2e-bootorder
+efibootmgr --quiet --create --disk "$ESP_DISK" --part "$ESP_PART" \
+    --label 'E2E Live Install' --loader "$LOADER"
+efibootmgr --quiet --create --disk "$ESP_DISK" --part "$ESP_PART" \
+    --label 'E2E Stale Install' --loader '\EFI\e2e-stale\bootx64.efi'
+SEED
+        then
+            sed 's/^/[seed] /' /tmp/be-seed.log
+            echo "FAIL: could not seed the NVRAM fixture; the round trip below"
+            echo "      would not have exercised the executor at all."
+            exit 1
+        fi
+        sed 's/^/[seed] /' /tmp/be-seed.log
+
+        # The fixture is only useful if the audit actually classifies the
+        # stale entry as dead — that is what puts it in the default delete
+        # selection. Check it here rather than inferring it from a downstream
+        # "Nothing to do", which looks identical to a planner that declined.
+        if ! ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase boot-entries --json" \
+            > /tmp/be-seeded.json 2>/tmp/be-seeded.err; then
+            echo "FAIL: boot-entries --json exited nonzero after seeding, so the"
+            echo "      audit below could not even be read. Its stderr:"
+            sed 's/^/[boot-entries] /' /tmp/be-seeded.err
+            ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null \
+                | sed 's/^/[efibootmgr-v] /'
+            exit 1
+        fi
+        if ! python3 -c '
+import json, sys
+audited = json.load(open("/tmp/be-seeded.json"))
+stale = [e for e in audited if e["entry"]["label"] == "E2E Stale Install"]
+if not stale:
+    print("the seeded stale entry is absent from the audit entirely")
+    sys.exit(1)
+print("stale entry as parsed: " + json.dumps(stale[0]))
+sys.exit(0 if "dead" in stale[0]["flags"] else 1)
+'; then
+            echo "FAIL: the seeded stale entry is not classified dead, so the"
+            echo "      planner has nothing to select and the round trip below"
+            echo "      would prove nothing."
+            # The stdout that failed to parse, verbatim: an empty document and
+            # a human line printed ahead of the JSON look identical from the
+            # decoder's error alone ("Expecting value: line 1 column 1").
+            echo "--- boot-entries stdout ($(wc -c < /tmp/be-seeded.json) bytes) ---"
+            head -c 400 /tmp/be-seeded.json | sed 's/^/[stdout] /'
+            echo "--- boot-entries stderr ---"
+            sed 's/^/[boot-entries stderr] /' /tmp/be-seeded.err
+            ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null \
+                | sed 's/^/[efibootmgr-v] /'
+            exit 1
+        fi
+        echo "OK: the seeded stale entry is audited as dead."
+
+        # Captured *after* seeding: this is the state --undo must restore.
+        BEFORE=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+
+        step "=== boot-entries: apply + undo round trip restores NVRAM (#31) ==="
+        ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase boot-entries --apply --yes" \
+            > /tmp/be-apply.log 2>&1 || true
+        sed 's/^/[apply] /' /tmp/be-apply.log | tail -25
+
+        # Take the path from the tool's own report rather than guessing at the
+        # layout: snapshots live under a boot-entry-backups/ subdirectory
+        # (boot_cleanup::live::BACKUP_DIR), and an assertion that hardcodes the
+        # wrong glob fails identically to an executor that never wrote one.
+        SNAPSHOT=$(sed -n 's/.*NVRAM snapshot written to \([^ ]*\).*/\1/p' \
+            /tmp/be-apply.log | head -1)
+        if [ -z "$SNAPSHOT" ]; then
+            echo "FAIL: --apply reported no NVRAM snapshot path. The snapshot is"
+            echo "      the only way back from a bad write; without it --undo"
+            echo "      has nothing to restore."
+            exit 1
+        fi
+        if ! ssh $SSH_OPTS root@localhost "test -f '$SNAPSHOT'"; then
+            echo "FAIL: --apply reported a snapshot at $SNAPSHOT but no such file"
+            echo "      exists on the guest."
+            ssh $SSH_OPTS root@localhost \
+                "ls -la /var/lib/bootc-rebase/boot-entry-backups 2>&1" \
+                | sed 's/^/[backups] /' || true
+            exit 1
+        fi
+        echo "OK: pre-change NVRAM snapshot written to $SNAPSHOT."
+
+        APPLIED=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+        if echo "$APPLIED" | grep -q "E2E Stale Install"; then
+            echo "FAIL: --apply did not remove the dead 'E2E Stale Install' entry,"
+            echo "      so the executor never actually wrote to NVRAM."
+            echo "$APPLIED"
+            exit 1
+        fi
+        # The firmware's own entries carry a File(...) path into the firmware
+        # volume, which never resolves on the ESP. Classifying them as merely
+        # dead would pre-select OVMF's setup app and shell for deletion — the
+        # one thing #31 says must never happen.
+        for PROTECTED in "UiApp" "EFI Internal Shell" "E2E Live Install"; do
+            if ! echo "$APPLIED" | grep -q "$PROTECTED"; then
+                echo "FAIL: --apply deleted '$PROTECTED', which must never be a"
+                echo "      cleanup candidate (firmware-managed, or a live install)."
+                echo "$APPLIED"
+                exit 1
+            fi
+        done
+        echo "OK: the dead entry was removed and every protected entry survived."
+
+        if ! ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase boot-entries --undo --yes" > /tmp/be-undo.log 2>&1; then
+            sed 's/^/[undo] /' /tmp/be-undo.log
+            echo "FAIL: boot-entries --undo exited nonzero; NVRAM may be left"
+            echo "      in the applied state. The snapshot is at"
+            echo "      /var/lib/bootc-rebase/nvram-*.json on the guest."
+            exit 1
+        fi
+        sed 's/^/[undo] /' /tmp/be-undo.log | tail -10
+
+        AFTER=$(ssh $SSH_OPTS root@localhost "efibootmgr -v" 2>/dev/null || true)
+        if [ "$BEFORE" != "$AFTER" ]; then
+            echo "FAIL: NVRAM did not return to its pre-apply state after --undo."
+            echo "--- before ---"; echo "$BEFORE"
+            echo "--- after ----"; echo "$AFTER"
+            exit 1
+        fi
+        echo "OK: NVRAM restored exactly; #31's executor and its undo path both ran live."
+
+        step "=== boot-entries: removing the seeded fixture ==="
+        # Leave NVRAM as this VM found it: later steps reboot into the staged
+        # deployment, and a seeded entry at the head of BootOrder would strand
+        # the guest on a loader that does not exist.
+        ssh $SSH_OPTS root@localhost 'bash -s' > /tmp/be-unseed.log 2>&1 <<'UNSEED' || true
+set -uo pipefail
+for LABEL in 'E2E Live Install' 'E2E Stale Install'; do
+    ID=$(efibootmgr | grep -F "* $LABEL" | head -1 \
+        | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p')
+    [ -n "$ID" ] && efibootmgr --quiet --delete-bootnum --bootnum "$ID"
+done
+[ -s /var/tmp/e2e-bootorder ] && efibootmgr --quiet -o "$(cat /var/tmp/e2e-bootorder)"
+efibootmgr
+UNSEED
+        sed 's/^/[unseed] /' /tmp/be-unseed.log | tail -15
+        if ssh $SSH_OPTS root@localhost "efibootmgr" 2>/dev/null | grep -q "E2E .* Install"; then
+            echo "FAIL: a seeded boot entry survived cleanup. The guest may not"
+            echo "      boot the staged deployment in the steps that follow."
+            exit 1
+        fi
+        echo "OK: seeded entries removed and BootOrder restored."
     fi
 
     step "=== ostree-rebase: verifying staged deployment ==="
