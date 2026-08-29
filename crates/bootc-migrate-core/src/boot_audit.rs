@@ -75,8 +75,16 @@ impl AuditedEntry {
 /// Labels firmware ships for entries that are never a real OS install.
 /// Matched case-insensitively as a substring, since firmware vendors vary
 /// capitalization and add suffixes (e.g. "UEFI: Built-in EFI Shell").
+/// `"shell"` rather than `"efi shell"`: EDK2/OVMF ships the entry as
+/// "EFI Internal Shell", which the narrower marker missed. `"uiapp"` is
+/// EDK2's own name for the firmware setup application, whose label carries
+/// no other marker at all. Both were therefore classified as merely dead
+/// (their loader paths live in the firmware volume, not on the ESP) and so
+/// were pre-selected for removal — exactly the "never auto-remove
+/// firmware/setup entries" rule this list exists to enforce.
 const FIRMWARE_LABEL_MARKERS: &[&str] = &[
-    "efi shell",
+    "shell",
+    "uiapp",
     "pxe",
     "http boot",
     "diagnostic",
@@ -111,6 +119,39 @@ pub fn read_efibootmgr_verbose() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Pull the ESP-relative loader path out of one entry's device-path column.
+///
+/// Two renderings are in the wild and both have to parse:
+///
+/// * `HD(1,GPT,123)/File(\EFI\fedora\shimx64.efi)` — the classic form.
+/// * `HD(2,GPT,...)/\EFI\fedora\shimx64.efi` — newer `efibootmgr` prints
+///   the file path as a bare trailing component with no `File()` wrapper.
+///
+/// Only handling the first form makes the audit silently inert on any host
+/// whose `efibootmgr` uses the second: every entry parses with no loader
+/// path, nothing can ever be flagged [`AuditFlag::Dead`], and the cleanup
+/// issue #31 exists for has nothing to offer. EFI paths use backslashes, so
+/// a `/`-separated component beginning with one is unambiguously the path.
+///
+/// `File(` is matched only where it starts a node, so the `FvFile(...)` of a
+/// firmware-volume path is not mistaken for a loader on the ESP.
+fn parse_loader_path(device_path: &str) -> Option<String> {
+    let wrapped = device_path
+        .match_indices("File(")
+        .find(|(i, _)| *i == 0 || !device_path.as_bytes()[i - 1].is_ascii_alphanumeric())
+        .and_then(|(i, _)| {
+            let rest = &device_path[i + "File(".len()..];
+            rest.find(')').map(|end| rest[..end].to_string())
+        });
+    if wrapped.is_some() {
+        return wrapped;
+    }
+    device_path
+        .split('/')
+        .find(|component| component.starts_with('\\'))
+        .map(|component| component.trim().to_string())
+}
+
 /// Parse `efibootmgr -v` output into structured entries. Malformed lines
 /// (not matching `BootXXXX[*] label\t...`) are skipped — an audit must not
 /// fail outright on an unexpected firmware quirk.
@@ -137,12 +178,7 @@ pub fn parse_efibootmgr_entries(output: &str) -> Vec<BootEntry> {
             Some((l, p)) => (l.trim().to_string(), Some(p)),
             None => (label_and_path.trim().to_string(), None),
         };
-        let loader_path = path_part.and_then(|p| {
-            let start = p.find("File(")? + "File(".len();
-            let rest = &p[start..];
-            let end = rest.find(')')?;
-            Some(rest[..end].to_string())
-        });
+        let loader_path = path_part.and_then(parse_loader_path);
         entries.push(BootEntry {
             id,
             label,
@@ -334,6 +370,104 @@ Boot0004  Windows Boot Manager\tHD(1,GPT,999)/File(\\EFI\\Microsoft\\Boot\\bootm
         // flagged Dead — but even if they were, safe_to_preselect excludes
         // FirmwareManaged unconditionally.
         assert!(!diag.safe_to_preselect());
+    }
+
+    /// OVMF (the firmware the e2e VMs boot) labels its setup application
+    /// "UiApp" and its shell "EFI Internal Shell", and gives both a
+    /// `File(...)` device path into the firmware volume. That path never
+    /// resolves on the ESP, so before these markers covered them both were
+    /// flagged Dead-and-not-firmware — i.e. pre-selected for deletion.
+    #[test]
+    fn ovmf_setup_and_shell_entries_are_firmware_not_deletable() {
+        let esp = tempdir().unwrap();
+        let ovmf = "\
+Boot0000* UiApp\tFvVol(7cb8bdc9)/FvFile(462caa21)\n\
+Boot0006* EFI Internal Shell\tFvVol(7cb8bdc9)/File(\\EFI\\Shell.efi)\n";
+        let audited = audit_entries(&parse_efibootmgr_entries(ovmf), esp.path());
+        assert_eq!(audited.len(), 2, "both OVMF entries should parse");
+        // FvFile() is a firmware-volume node, not a loader on the ESP.
+        assert_eq!(
+            audited[0].entry.loader_path, None,
+            "FvFile() must not be read as a loader path"
+        );
+        for a in &audited {
+            assert!(
+                a.flags.contains(&AuditFlag::FirmwareManaged),
+                "{:?} must be recognized as firmware-managed",
+                a.entry.label
+            );
+            assert!(
+                !a.safe_to_preselect(),
+                "{:?} must never be pre-selected for removal",
+                a.entry.label
+            );
+        }
+    }
+
+    /// Verbatim from the e2e ostree VM's `efibootmgr -v`. This build prints
+    /// the loader as a bare trailing component rather than wrapping it in
+    /// `File(...)`, and the firmware entries as `FvVol(..)/FvFile(..)`.
+    /// Against the old `File(`-only parser every one of these produced no
+    /// loader path, so nothing could ever be flagged dead and `boot-entries`
+    /// had nothing to propose on such a host.
+    const EFIBOOTMGR_BARE_PATH_OUTPUT: &str = "\
+BootCurrent: 0001\n\
+BootOrder: 0009,0008,0007,0000,0001\n\
+Boot0000* UiApp\tFvVol(7cb8bdc9-f8eb-4f34-aaea-3ee4af6516a1)/FvFile(462caa21-7614-4503-836e-8ab6f4662331)\n\
+Boot0001* UEFI Misc Device\tPciRoot(0x0)/Pci(0x3,0x0){auto_created_boot_option}\n\
+Boot0007* Fedora\tHD(2,GPT,1dedbea7-3280-4e19-84cc-faf1439f7665,0x1000,0x100000)/\\EFI\\fedora\\shimx64.efi\n\
+Boot0009* E2E Stale Install\tHD(2,GPT,1dedbea7-3280-4e19-84cc-faf1439f7665,0x1000,0x100000)/\\EFI\\e2e-stale\\bootx64.efi\n";
+
+    #[test]
+    fn parses_a_loader_path_efibootmgr_prints_without_a_file_wrapper() {
+        let entries = parse_efibootmgr_entries(EFIBOOTMGR_BARE_PATH_OUTPUT);
+        let by_label = |l: &str| {
+            entries
+                .iter()
+                .find(|e| e.label == l)
+                .unwrap_or_else(|| panic!("{l} should parse"))
+        };
+        assert_eq!(
+            by_label("Fedora").loader_path.as_deref(),
+            Some("\\EFI\\fedora\\shimx64.efi")
+        );
+        assert_eq!(
+            by_label("E2E Stale Install").loader_path.as_deref(),
+            Some("\\EFI\\e2e-stale\\bootx64.efi")
+        );
+        // A firmware-volume node is not a loader on the ESP, and a device
+        // path with no file component at all still yields nothing.
+        assert_eq!(by_label("UiApp").loader_path, None);
+        assert_eq!(by_label("UEFI Misc Device").loader_path, None);
+    }
+
+    /// The whole point of parsing the path: an entry whose loader is absent
+    /// from the ESP must come back dead, in either rendering.
+    #[test]
+    fn a_bare_path_entry_whose_loader_is_missing_is_flagged_dead() {
+        let esp = tempdir().unwrap();
+        std::fs::create_dir_all(esp.path().join("EFI/fedora")).unwrap();
+        std::fs::write(esp.path().join("EFI/fedora/shimx64.efi"), b"loader").unwrap();
+
+        let audited = audit_entries(
+            &parse_efibootmgr_entries(EFIBOOTMGR_BARE_PATH_OUTPUT),
+            esp.path(),
+        );
+        let flags = |l: &str| {
+            &audited
+                .iter()
+                .find(|a| a.entry.label == l)
+                .unwrap_or_else(|| panic!("{l} should parse"))
+                .flags
+        };
+        assert!(
+            !flags("Fedora").contains(&AuditFlag::Dead),
+            "a loader present on the ESP is alive"
+        );
+        assert!(
+            flags("E2E Stale Install").contains(&AuditFlag::Dead),
+            "a loader absent from the ESP is dead"
+        );
     }
 
     #[test]

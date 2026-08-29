@@ -108,6 +108,12 @@ jobs:
             # bootc switch pulls the full target into ostree storage inside
             # the guest — needs headroom beyond the tracer's 20G.
             disk_size: 40G
+            # #189: the first cell to mutate real UEFI NVRAM. It runs #31's
+            # efibootmgr executor and then restores from the snapshot, so the
+            # write path and the undo path both get live coverage. Safe here
+            # because the guest boots with a persistent OVMF VARS pflash and
+            # is discarded afterwards.
+            boot_entries: true
           - name: bluefin -> aurora ostree re-base (GNOME -> KDE, OstreeDeploy)
             base: ghcr.io/projectbluefin/bluefin:stable
             # Exploratory, non-gating: Aurora is ublue-os's KDE spin
@@ -120,6 +126,11 @@ jobs:
             target: ghcr.io/ublue-os/aurora:stable
             mode: ostree-rebase
             disk_size: 40G
+            # #188: this is the only genuinely cross-DE pair in the matrix, so
+            # it is the only cell that can prove #68's stash/restore half. The
+            # harness seeds a GNOME config, passes --de-migrate, and asserts
+            # the stash directory exists afterwards.
+            de_migrate: true
             allow_failure: true
           - name: bluefin -> dakota (TUI-driven migration)
             base: ghcr.io/projectbluefin/bluefin:stable
@@ -227,11 +238,15 @@ jobs:
           set -eux
           sudo podman pull "${{ matrix.scenario.base }}"
           sudo podman pull "${{ matrix.scenario.target }}"
-          echo "BASE_IMAGE=${{ matrix.scenario.base }}" >> "$GITHUB_ENV"
-          echo "TARGET_IMAGE=${{ matrix.scenario.target }}" >> "$GITHUB_ENV"
-          echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}" >> "$GITHUB_ENV"
-          echo "DISK_SIZE=${{ matrix.scenario.disk_size || '20G' }}" >> "$GITHUB_ENV"
-          echo "E2E_MODE=${{ matrix.scenario.mode || 'composefs-migrate' }}" >> "$GITHUB_ENV"
+          {
+            echo "BASE_IMAGE=${{ matrix.scenario.base }}"
+            echo "TARGET_IMAGE=${{ matrix.scenario.target }}"
+            echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}"
+            echo "DISK_SIZE=${{ matrix.scenario.disk_size || '20G' }}"
+            echo "E2E_MODE=${{ matrix.scenario.mode || 'composefs-migrate' }}"
+            echo "E2E_DE_MIGRATE=${{ matrix.scenario.de_migrate && '1' || '0' }}"
+            echo "E2E_BOOT_ENTRIES=${{ matrix.scenario.boot_entries && '1' || '0' }}"
+          } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
         run: df -h /

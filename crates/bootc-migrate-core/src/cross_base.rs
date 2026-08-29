@@ -26,15 +26,24 @@ pub fn scan_target_capabilities_with_retries(
     target_image: &str,
     purpose: &str,
 ) -> Option<scan::Capabilities> {
-    const SCAN_ATTEMPTS: u32 = 3;
-    const SCAN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
     let mut last_err = None;
     for attempt in 1..=SCAN_ATTEMPTS {
         match scan::scan_target_image(target_image) {
             Ok(c) => return Some(c),
             Err(e) => {
+                // A missing `curl` is not going to appear between attempts.
+                // Retrying it burns the whole backoff window and buries the
+                // real cause under a "after N attempts" preamble that reads
+                // like a network fault.
+                if !is_retryable_scan_error(&e) {
+                    eprintln!(
+                        "Warning: could not scan target image for {purpose} ({e:#}); \
+                         this failure will not resolve on retry. Proceeding without it."
+                    );
+                    return None;
+                }
                 if attempt < SCAN_ATTEMPTS {
-                    std::thread::sleep(SCAN_RETRY_DELAY);
+                    std::thread::sleep(scan_retry_delay(attempt));
                 }
                 last_err = Some(e);
             }
@@ -42,10 +51,38 @@ pub fn scan_target_capabilities_with_retries(
     }
     eprintln!(
         "Warning: could not scan target image for {purpose} after {SCAN_ATTEMPTS} attempt(s) \
-         ({}); proceeding without it.",
+         over ~{}s ({}); proceeding without it.",
+        total_backoff_secs(),
         last_err.expect("None is returned only after at least one failed attempt")
     );
     None
+}
+
+/// Attempts, and the backoff between them.
+///
+/// The previous 3 attempts at a flat 2s covered only ~4s of a guest's network
+/// coming up, which is tight for a cold VM on a contended CI runner —
+/// `bootc switch`'s own pull moments later succeeds against the same
+/// registry. Exponential backoff widens the window to ~14s without making a
+/// genuinely-broken registry much slower to report.
+const SCAN_ATTEMPTS: u32 = 4;
+
+fn scan_retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(2u64.pow(attempt.min(3)))
+}
+
+fn total_backoff_secs() -> u64 {
+    (1..SCAN_ATTEMPTS)
+        .map(|a| scan_retry_delay(a).as_secs())
+        .sum()
+}
+
+/// Whether a scan failure could plausibly succeed on a later attempt.
+///
+/// Transport failures (no route yet, DNS not up, a timeout) are retryable.
+/// A missing `curl` binary is not — no amount of waiting installs it.
+fn is_retryable_scan_error(err: &anyhow::Error) -> bool {
+    !format!("{err:#}").contains("is curl installed")
 }
 
 /// What cross-base planning could establish about this re-base.
@@ -403,6 +440,46 @@ pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing `curl` cannot fix itself between attempts. Retrying it wastes
+    /// the backoff window and buries the real cause under an "after N
+    /// attempts" preamble that reads like a network fault — which is how
+    /// bootc-migrate#187 stayed misdiagnosed as unreachable-registry.
+    #[test]
+    fn a_missing_curl_is_not_retried_but_a_transport_failure_is() {
+        let missing_curl = anyhow::anyhow!(
+            "could not execute `curl` to probe https://ghcr.io/v2/ (is curl installed in this image?)"
+        );
+        assert!(!is_retryable_scan_error(&missing_curl));
+
+        for transient in [
+            "curl probe to https://ghcr.io/v2/ failed: Could not resolve host",
+            "curl probe to https://ghcr.io/v2/ failed: Connection timed out",
+            "unexpected status from https://ghcr.io/v2/: 503",
+        ] {
+            let e = anyhow::anyhow!("{transient}");
+            assert!(is_retryable_scan_error(&e), "should retry: {transient}");
+        }
+    }
+
+    /// The window has to be wide enough for a cold guest's network to come up.
+    /// The flat 2s x 3 it replaced covered only ~4s.
+    #[test]
+    fn scan_backoff_widens_and_covers_a_cold_boot_window() {
+        let delays: Vec<u64> = (1..SCAN_ATTEMPTS)
+            .map(|a| scan_retry_delay(a).as_secs())
+            .collect();
+        assert_eq!(
+            delays,
+            vec![2_u64, 4, 8],
+            "expected exponential backoff, got {delays:?}"
+        );
+        assert!(
+            total_backoff_secs() >= 14,
+            "window must exceed the ~4s it replaced, got {}s",
+            total_backoff_secs()
+        );
+    }
 
     #[test]
     fn staged_deployment_root_picks_non_starred_line() {

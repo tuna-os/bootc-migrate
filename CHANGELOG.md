@@ -18,7 +18,37 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **UEFI boot-entry audit no longer offers to delete the firmware's own
+  setup and shell entries** (#31). EDK2/OVMF labels these "UiApp" and
+  "EFI Internal Shell" and gives both a `File(...)` device path into the
+  firmware volume. That path never resolves on the ESP, and the
+  firmware-label marker list only matched the narrower string `"efi shell"`
+  — so both were classified as merely dead, which made them
+  `safe_to_preselect()` and therefore candidates for `boot-entries --apply`.
+  The markers now cover `"shell"` and `"uiapp"`. Found by the new live NVRAM
+  round-trip coverage in the e2e suite.
+- **The boot-entry audit now parses loader paths on every `efibootmgr`**
+  (#31). The device-path parser only understood the classic
+  `HD(...)/File(\EFI\fedora\shimx64.efi)` rendering. Newer `efibootmgr`
+  prints the path as a bare trailing component —
+  `HD(...)/\EFI\fedora\shimx64.efi` — with no `File()` wrapper. On such a
+  host *every* entry parsed with no loader path, so nothing could ever be
+  flagged dead and `boot-entries` had nothing to propose: the cleanup this
+  issue exists for was silently inert. Both renderings are now handled. Every
+  unit fixture used the classic form, which is why only live e2e coverage
+  caught it.
+- **`boot-entries --json` stdout is machine-readable again** (#31/#189).
+  `find_esp_or_mount` printed "Found ESP already mounted at ..." to stdout,
+  which lands ahead of the JSON document and breaks every consumer that pipes
+  it. Two sibling call sites in the same function were moved to stderr
+  earlier; this third one was missed.
+- **`FvFile(...)` is no longer read as a loader path** (#31). The same parser
+  looked for `File(` anywhere in the node list, which also matches the tail of
+  a firmware volume's `FvFile(`. A firmware entry's volume GUID was therefore
+  treated as an ESP-relative loader path, never resolved, and the entry was
+  reported dead. The match must now start a node.
 
 ---
 
