@@ -614,8 +614,12 @@ mod tests {
     fn collect_evidence_from_root_propagates_config_read_error() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // Create a directory where a display manager config file is expected, so read_to_string fails (EISDIR/Permission error)
-        fs::create_dir_all(root.join("etc/sddm.conf")).unwrap();
+        // A directory named like a drop-in reaches read_to_string and fails
+        // with EISDIR. It has to be a drop-in rather than one of the
+        // well-known DISPLAY_MANAGER_CONFIG_FILES: those are filtered by
+        // `is_file()` in display_manager_config_files, so a directory at
+        // etc/sddm.conf is skipped and never reaches the read at all.
+        fs::create_dir_all(root.join("etc/sddm.conf.d/10-autologin.conf")).unwrap();
 
         let err = collect_evidence_from_root(root).unwrap_err();
         assert!(
@@ -623,7 +627,6 @@ mod tests {
             "unexpected error: {err}"
         );
     }
-
 
     #[test]
     fn evidence_paths_cover_every_marker() {
