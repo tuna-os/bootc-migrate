@@ -124,21 +124,36 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     needs: [validate]
+    # Must exceed maxWait below, so an overrun surfaces as the script's own
+    # message rather than an opaque job cancellation.
+    timeout-minutes: 310
     steps:
       - name: Wait for E2E workflow
         uses: actions/github-script@v7
         with:
           script: |
-            // Wait up to 100 minutes for the E2E workflow to complete.
-            // The matrix runs on hosted runners with a 90-minute per-job
-            // timeout (the tui-migrate cell measured 65 min end to end),
-            // so this window must clear that plus queue time — at 50 it
-            // would have failed every PR the moment the matrix started
-            // gating.
+            // Wait for the E2E workflow to complete.
+            //
+            // Sizing this against a single job's timeout is the trap. The
+            // matrix is 7 scenarios at timeout-minutes: 90 with no
+            // max-parallel, so wall-clock is set by how many runners are free,
+            // not by the slowest cell. 50 was raised to 100 for that reason and
+            // 100 is still short:
+            //
+            //   run 33211609609 — matrix spanned 21:43 to 01:02 (~3h20m), all
+            //   seven scenarios green. This gate started at 23:00 and needed to
+            //   wait ~122 min. It gave up at 00:40 and failed the PR, throwing
+            //   away three hours of runner time over a passing test suite.
+            //
+            // 5 hours clears the observed worst case with headroom. It does not
+            // cover a fully serialized matrix (7 x 90m = 10.5h) — polling for
+            // that long would cost more than it saves. The real fix is to make
+            // the e2e jobs required checks directly instead of polling for them
+            // from a second workflow; this keeps that change out of scope.
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const sha = context.payload.pull_request.head.sha;
-            const maxWait = 100 * 60 * 1000;
+            const maxWait = 5 * 60 * 60 * 1000;
             const start = Date.now();
 
             while (Date.now() - start < maxWait) {
@@ -170,6 +185,15 @@ jobs:
               } else {
                 core.info('E2E workflow not found yet, waiting...');
               }
-              await new Promise(r => setTimeout(r, 30000));
+              // 60s, not 30s. Over a multi-hour wait the old interval issues
+              // hundreds of API calls per open PR; once the account is rate
+              // limited octokit's backoff stretches each iteration, so the
+              // budget above stops meaning what it says — which is how a
+              // 50-minute wait produced a 100-minute job.
+              await new Promise(r => setTimeout(r, 60000));
             }
-            core.setFailed('Timed out waiting for E2E workflow');
+            core.setFailed(
+              `Timed out waiting for E2E workflow after ${maxWait / 60000} minutes. ` +
+              'This is a gate timeout, not an E2E failure — check the E2E ' +
+              'Migration Tests run for this commit before treating it as one.'
+            );
