@@ -159,6 +159,14 @@ lint-shell:
     @echo "=== shellcheck ==="
     shellcheck --severity=warning tests/run-e2e.sh
 
+# Lint the Python E2E driver with ruff (config in ruff.toml). Not part of
+# `check`: ruff is not provisioned on the CI runner or assumed present on a
+# developer machine, so requiring it would break `just check` for everyone
+# who has not installed it. Run this when touching tests/tui-e2e-driver.py.
+lint-python:
+    @echo "=== ruff ==="
+    ruff check .
+
 # Lint Rust code (format + clippy)
 lint-rust: fmt-check clippy
 

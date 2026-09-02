@@ -1,0 +1,19 @@
+# Lint config for this repo's Python source. bootc-migrate is a Rust project,
+# but `tests/tui-e2e-driver.py` is real, gating Python — the pty driver that
+# the tui-migrate E2E cell uploads to the system under test and uses to drive
+# the interactive wizard and Config Drift Review (see docs/testing.md, where
+# that cell is listed as "active, gating"). It gets a real linter rather than
+# a placeholder file.
+#
+# Run it with `just lint-python`.
+
+line-length = 100
+
+# The driver runs on the *system under test*, not on the developer's machine
+# or the CI runner, so it is deliberately stdlib-only and must work against
+# whatever `python3` the oldest E2E base image ships. Pin the floor low so
+# ruff flags syntax that would only work on a newer interpreter.
+target-version = "py39"
+
+[lint]
+select = ["E", "F", "I", "W"]
