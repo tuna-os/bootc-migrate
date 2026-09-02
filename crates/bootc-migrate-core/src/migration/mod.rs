@@ -1,4 +1,5 @@
 pub mod boot;
+mod boot_deployments;
 pub mod bootloader;
 pub mod deploy;
 pub mod deploy_layout;
