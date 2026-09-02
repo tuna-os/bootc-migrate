@@ -197,13 +197,16 @@ $ just cleanup        # kill QEMU, prune podman, remove disk.raw and .log files
   and migration-path changes are exercised by at least the default E2E scenario.
 - If your change affects the kernel command line, boot artifacts, or any phase
   output, run the full E2E matrix locally or wait for CI to do it on your PR.
+- The change satisfies the **Definition of Done** ([REVIEW.md](REVIEW.md)):
+  every claim in the PR matches the diff, no undischarged validation caveats
+  remain, and all required checks have been observed passing on the head commit.
 
 ## Code review
 
-Please read [REVIEW.md](REVIEW.md) — it describes the testing, code-quality, and
-commit-message expectations applied here. AI-assisted contributions must follow
-[AGENTS.md](AGENTS.md) (no automatic `Signed-off-by`; add an `Assisted-by:`
-trailer).
+Please read [REVIEW.md](REVIEW.md) — it describes the Definition of Done (DoD),
+testing, code-quality, and commit-message expectations applied here. AI-assisted
+contributions must follow [AGENTS.md](AGENTS.md) (no automatic `Signed-off-by`;
+add an `Assisted-by:` trailer, and discharge all validation steps).
 
 ---
 

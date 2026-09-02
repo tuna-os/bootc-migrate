@@ -4,11 +4,55 @@ These guidelines mirror those used across the bootc-dev organization (bootc,
 composefs-rs). They capture the expectations that have emerged from real review
 feedback and apply to both authoring and reviewing changes here.
 
+## Definition of Done (DoD)
+
+A change or milestone is **done** only when both its implementation and its
+validation have shipped and are observed passing. Writing code without running
+tests or verifying behavior does not satisfy the Definition of Done.
+
+### Core DoD rules
+
+1. **Validation caveats in PR descriptions are blockers, not notes.**
+   If an author or tool notes that a test, build, lint, or check could not be run
+   (e.g. "could not run tests because the toolchain/linker is missing" or
+   "filesystem is full"), the PR is **not ready to merge**. A validation caveat
+   is a blocking checklist item that must be discharged by executing the
+   validation and recording the passing result before merge.
+
+2. **"Deferred to CI" requires CI to have run and reported green on the head commit.**
+   Deferring local validation to CI is only acceptable if CI actually triggers,
+   executes the required test suite, and passes on the PR head commit. Silence,
+   skipped runs, or missing workflow triggers are not passes. A PR cannot merge
+   on unverified deferrals.
+
+3. **Claims in the PR title, body, and comments are part of the change.**
+   Reviewers must verify that every assertion in the PR description and code
+   comments matches what the diff actually implements. A PR whose description
+   claims a security property, bug fix, or validation outcome that the code does
+   not implement (e.g. #207 claiming fail-closed HTTPS while leaving fallback
+   candidate lists untouched) must be rejected or corrected before merge.
+
+4. **Milestone and tracking issues require full validation to close.**
+   An issue is not completed merely because the pure or unit-testable "skeleton"
+   landed. If live/system validation (E2E cells, live NVRAM mutation, real firmware
+   testing) was part of the issue's scope and has not executed, the issue must
+   remain open, or the unvalidated scope must be explicitly transferred to a
+   linked validation tracking issue and recorded in [ROADMAP.md](ROADMAP.md)'s
+   "Unvalidated paths" table.
+
+5. **Strict, meaningful test assertions.**
+   Tests must strictly assert expected state transitions, output values, sidecar
+   creation, and error refusals. Tests that merely check that code "didn't crash"
+   or that pass vacuously due to early returns violate the DoD. Counter-example:
+   #218 shipped a unit test alongside a fix; the test failed immediately against
+   the fix (`EspEvidenceImplausible`), demonstrating the discipline working by
+   catching the regression before merge.
+
 ## Testing
 
 Tests are expected for all non-trivial changes — unit and, where it makes sense,
-end-to-end. If something is genuinely hard to test right now, at least state
-that it was tested manually and how.
+end-to-end. Never leave validation unexecuted or defer validation with an
+undischarged caveat in the PR description.
 
 ### Choosing the right test type
 
@@ -97,9 +141,13 @@ alone with its own rationale or it should be squashed.
 
 ### Before merge
 
-Self-review your diff first. Do not add `Signed-off-by` automatically — that
-requires explicit human action after review. If the change was AI-assisted,
-include an `Assisted-by:` trailer (see [AGENTS.md](AGENTS.md)).
+Self-review your diff first against the Definition of Done. Ensure that:
+- Every claim in the PR title and description accurately reflects the code diff.
+- All local tests or CI workflows have been observed passing on the head commit.
+- No undischarged validation caveats remain in the PR description.
+- Do not add `Signed-off-by` automatically — that requires explicit human action
+  after review. If the change was AI-assisted, include an `Assisted-by:` trailer
+  (see [AGENTS.md](AGENTS.md)).
 
 ## Architecture and design
 
