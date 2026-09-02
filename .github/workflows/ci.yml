@@ -72,7 +72,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run actionlint
-        uses: docker://rhysd/actionlint:latest
+        # Pinned to a digest, not :latest. This is a required check, so a
+        # mutable tag lets an upstream image replacement turn main red with
+        # no commit here to explain it, and makes an old run unreproducible
+        # from its own source tree. To upgrade: resolve the new tag with
+        #   docker buildx imagetools inspect rhysd/actionlint:<version>
+        # and update the digest and the version comment together.
+        #
+        # actionlint v1.7.12 (what :latest resolved to on 2026-09-02, so
+        # this pin does not change current lint behavior)
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: -color
 
