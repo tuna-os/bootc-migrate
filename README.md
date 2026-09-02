@@ -398,7 +398,9 @@ sudo efibootmgr --bootnext <Boot####-of-Fedora>
 sudo systemctl reboot
 ```
 
-Pre-migration diagnostic snapshots and logs are automatically recorded under `/var/log/bootc-migrate/` on every run (`preflight-*.json` and `migration.log`) so boot configuration can be manually reconstructed if NVRAM is ever wiped.
+Every run appends its full output to a log file on the machine — `/var/log/bootc-migrate.log` for `bootc-migrate`, and `/var/log/bootc-rebase.log` for `bootc-rebase` when run as root — so the run can still be read after the reboot it asks for. Each run is preceded by a header naming the binary, its build, the time, and the arguments it was given. Nothing leaves the machine.
+
+`bootc-rebase boot-entries --apply` additionally snapshots NVRAM to `/var/lib/bootc-rebase/boot-entry-backups/` before touching it, so boot entries can be restored (`--undo`) if the result is wrong.
 
 After running `bootc-migrate commit`, the OSTree fallback is removed
 from the ESP and rollback becomes a fresh install. The E2E test exercises the

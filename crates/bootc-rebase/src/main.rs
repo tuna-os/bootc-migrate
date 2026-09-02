@@ -12,6 +12,7 @@ use bootc_migrate_core::preflight;
 use bootc_migrate_core::rebase_controller::{
     CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig,
 };
+use bootc_migrate_core::runlog;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -378,9 +379,47 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    // Parsed before the tee is installed: clap exits the process from inside
+    // `parse()` for `--help`/`--version`/usage errors, which would strand
+    // that output in the pipe with no guard left to drain it.
     let cli = Cli::parse();
 
+    // Same rationale as `bootc-migrate`: every mutating subcommand here
+    // rewrites the boot path and then asks for a reboot, so the terminal that
+    // carried the output is usually gone before anyone reads it. Gated on
+    // root because that is exactly the set of runs that can mutate anything —
+    // an unprivileged `scan` would otherwise warn about /var/log on every
+    // invocation and has nothing worth recording.
+    let guard = if rustix::process::getuid().is_root() {
+        runlog::start(
+            "/var/log/bootc-rebase.log",
+            "bootc-rebase",
+            env!("CARGO_PKG_VERSION"),
+        )
+    } else {
+        None
+    };
+
+    let result = run(cli);
+
+    // Drain the tee thread before exiting: process::exit skips destructors,
+    // and a plain `return` from main races the thread, either of which drops
+    // the tail of the output — including the error we are reporting.
+    let code = match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            1
+        }
+    };
+    if let Some(g) = guard {
+        g.finish();
+    }
+    std::process::exit(code);
+}
+
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Commands::Scan(ref scan_args)) => scan_command::run(scan_args),
         Some(Commands::Rollback(ref rollback_args)) => {
