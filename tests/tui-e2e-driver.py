@@ -44,8 +44,8 @@ Exit status: 0 when the driven flow reached its expected end state,
 import argparse
 import codecs
 import errno
-import json
 import fcntl
+import json
 import os
 import re
 import select
