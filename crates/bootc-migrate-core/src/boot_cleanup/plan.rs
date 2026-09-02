@@ -365,7 +365,19 @@ pub fn plan_cleanup(
         .filter(|a| !a.flags.contains(&AuditFlag::FirmwareManaged))
         .filter(|a| a.entry.loader_path.is_some())
         .count();
-    if loader_entries > 0 && !audited.iter().any(is_bootable) {
+    // "At least the booted entry's loader must resolve" only holds when
+    // BootCurrent itself names an NVRAM entry with a loader path. On a
+    // removable-media fallback boot (BootCurrent points at something like
+    // `UEFI Misc Device`, which firmware ran directly with no loader path
+    // recorded at all) there was never a loader entry for this boot to
+    // resolve, so an audit with no bootable entry is expected, not
+    // evidence the ESP was mis-resolved.
+    let booted_entry_has_no_loader = facts.boot_current.as_deref().is_some_and(|id| {
+        audited
+            .iter()
+            .any(|a| a.entry.id.eq_ignore_ascii_case(id) && a.entry.loader_path.is_none())
+    });
+    if loader_entries > 0 && !booted_entry_has_no_loader && !audited.iter().any(is_bootable) {
         return Err(PlanError::EspEvidenceImplausible { loader_entries });
     }
 
@@ -1047,18 +1059,8 @@ mod tests {
         // and only dead OS installs remain to be cleaned up.
         // Firmware-managed entries must not count toward EspEvidenceImplausible.
         let entries = vec![
-            audited(
-                "0000",
-                "UiApp",
-                None,
-                &[AuditFlag::FirmwareManaged],
-            ),
-            audited(
-                "0001",
-                "UEFI Misc Device",
-                None,
-                &[],
-            ),
+            audited("0000", "UiApp", None, &[AuditFlag::FirmwareManaged]),
+            audited("0001", "UEFI Misc Device", None, &[]),
             audited(
                 "0006",
                 "EFI Internal Shell",
