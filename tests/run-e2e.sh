@@ -67,6 +67,17 @@ vm_tail() {
       | awk -v p="$prefix" '{ print "[" p "] " $0; fflush() }'
 }
 
+# The failed/dependency lines out of qemu.log, for the timeout paths that dump
+# them. systemd colours the status column INSIDE the brackets — the serial log
+# holds [<esc>[0;1;31mFAILED<esc>[0m], never a literal [FAILED] — so grepping
+# qemu.log directly matches nothing and the dump prints an empty block on
+# exactly the runs that needed it. vm_tail strips escapes before it filters for
+# this reason; these paths have to do the same. Reuses that sed verbatim.
+serial_failure_lines() {
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[()][0-9A-Za-z]//g' qemu.log \
+      | grep -E '\[FAILED\]|DEPEND\]'
+}
+
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
 # (Ns elapsed)" line every $2 seconds so CI doesn't think the job is hung.
 heartbeat() {
@@ -1373,7 +1384,7 @@ POSTMERGEFIX
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
         echo "ERROR: VM did not boot back after the ostree re-base."
-        grep -E '\[FAILED\]|DEPEND\]' qemu.log | tail -40 || true
+        serial_failure_lines | tail -40 || true
         exit 1
     fi
 
@@ -1757,7 +1768,7 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     echo "ERROR: VM did not boot back after migration."
     step "=== Post-reboot failure diagnostics ==="
     echo "--- All FAILED/DEPEND lines ---"
-    grep -E '\[FAILED\]|DEPEND\]' qemu.log | tail -80 || true
+    serial_failure_lines | tail -80 || true
     echo ""
     echo "--- dbus-related lines ---"
     grep -iE 'dbus|messagebus|polkit|logind|machine.id' qemu.log | tail -40 || true
