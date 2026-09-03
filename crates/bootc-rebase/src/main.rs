@@ -379,19 +379,47 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
+/// Whether this invocation can change the system, and so is worth a run log.
+///
+/// A preview (`scan`, a bare `boot-entries` audit, anything `--dry-run` or
+/// `--plan`) leaves nothing behind to reconstruct after a reboot, and several
+/// of them are machine-readable and get piped by scripts and the E2E suite —
+/// so they are left with untouched stdio and no header appended to
+/// `/var/log` on every run.
+fn mutates_the_system(cli: &Cli) -> bool {
+    match cli.command {
+        Some(Commands::Scan(_)) => false,
+        Some(Commands::BootEntries(ref args)) => args.apply || args.undo,
+        Some(Commands::Rollback(ref args)) => !args.dry_run,
+        Some(Commands::MigrateBootloader(ref args)) => !args.dry_run,
+        Some(Commands::DeMigrate(ref args)) => match args.action {
+            DeMigrateAction::Stash { dry_run, .. } | DeMigrateAction::Restore { dry_run, .. } => {
+                !dry_run
+            }
+        },
+        Some(Commands::Rebase(ref args)) => rebase_mutates(args),
+        None => rebase_mutates(&cli.rebase_args),
+    }
+}
+
+/// A bare re-base only previews when asked to: `--dry-run`, or either form of
+/// `--plan`, which print the route and exit without touching the system.
+fn rebase_mutates(args: &Args) -> bool {
+    !(args.dry_run || args.plan || args.plan_json)
+}
+
 fn main() {
     // Parsed before the tee is installed: clap exits the process from inside
     // `parse()` for `--help`/`--version`/usage errors, which would strand
     // that output in the pipe with no guard left to drain it.
     let cli = Cli::parse();
 
-    // Same rationale as `bootc-migrate`: every mutating subcommand here
-    // rewrites the boot path and then asks for a reboot, so the terminal that
-    // carried the output is usually gone before anyone reads it. Gated on
-    // root because that is exactly the set of runs that can mutate anything —
-    // an unprivileged `scan` would otherwise warn about /var/log on every
-    // invocation and has nothing worth recording.
-    let guard = if rustix::process::getuid().is_root() {
+    // Same rationale as `bootc-migrate`: a mutating subcommand here rewrites
+    // the boot path and then asks for a reboot, so the terminal that carried
+    // the output is usually gone before anyone reads it. Gated on root as
+    // well because nothing can mutate without it, and an unprivileged run
+    // would only warn about /var/log being unwritable.
+    let guard = if rustix::process::getuid().is_root() && mutates_the_system(&cli) {
         runlog::start(
             "/var/log/bootc-rebase.log",
             "bootc-rebase",
@@ -740,6 +768,76 @@ mod tests {
                 _ => panic!("expected DeMigrateAction::Restore"),
             },
             _ => panic!("expected Commands::DeMigrate"),
+        }
+    }
+
+    #[test]
+    fn read_only_invocations_get_no_run_log() {
+        // These are piped by scripts and the E2E suite; installing the tee
+        // would put a run header in /var/log for a command that changed
+        // nothing, and re-plumb the stdio of a stream someone is parsing.
+        let previews: [&[&str]; 11] = [
+            &[
+                "bootc-rebase",
+                "scan",
+                "ghcr.io/projectbluefin/dakota:stable",
+            ],
+            &["bootc-rebase", "boot-entries", "--json"],
+            &["bootc-rebase", "boot-entries", "--interactive"],
+            &["bootc-rebase", "boot-entries", "--rename-branding"],
+            &["bootc-rebase", "rollback", "--dry-run"],
+            &["bootc-rebase", "migrate-bootloader", "--dry-run"],
+            &["bootc-rebase", "-t", "ghcr.io/x/y:z", "--dry-run"],
+            &["bootc-rebase", "-t", "ghcr.io/x/y:z", "--plan"],
+            &["bootc-rebase", "-t", "ghcr.io/x/y:z", "--plan-json"],
+            &[
+                "bootc-rebase",
+                "rebase",
+                "-t",
+                "ghcr.io/x/y:z",
+                "--plan-json",
+            ],
+            &[
+                "bootc-rebase",
+                "de-migrate",
+                "stash",
+                "--from-de",
+                "gnome",
+                "--home",
+                "/home/user",
+                "--dry-run",
+            ],
+        ];
+        for argv in previews {
+            let cli = Cli::parse_from(argv.iter().copied());
+            assert!(
+                !mutates_the_system(&cli),
+                "expected no run log for {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_invocations_get_a_run_log() {
+        let mutations: [&[&str]; 6] = [
+            &["bootc-rebase", "-t", "ghcr.io/projectbluefin/dakota:stable"],
+            &["bootc-rebase", "rebase", "-t", "ghcr.io/x/y:z"],
+            &["bootc-rebase", "rollback"],
+            &["bootc-rebase", "boot-entries", "--apply", "--yes"],
+            &["bootc-rebase", "boot-entries", "--undo", "--yes"],
+            &[
+                "bootc-rebase",
+                "de-migrate",
+                "restore",
+                "--to-de",
+                "kde",
+                "--home",
+                "/home/user",
+            ],
+        ];
+        for argv in mutations {
+            let cli = Cli::parse_from(argv.iter().copied());
+            assert!(mutates_the_system(&cli), "expected a run log for {argv:?}");
         }
     }
 

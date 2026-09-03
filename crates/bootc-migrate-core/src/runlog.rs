@@ -13,25 +13,30 @@ use std::fs::File;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Holds the tee thread + a copy of the real stdout. Call [`TeeGuard::finish`]
-/// before the process exits so short-lived commands (`commit --dry-run`) don't
-/// lose their stdout: the thread only sees EOF once every writer of the pipe is
-/// closed, which on a fast exit races process teardown.
+/// Holds the tee threads + copies of the real stdout/stderr. Call
+/// [`TeeGuard::finish`] before the process exits so short-lived commands
+/// (`commit --dry-run`) don't lose their stdout: a thread only sees EOF once
+/// every writer of its pipe is closed, which on a fast exit races process
+/// teardown.
 #[derive(Debug)]
 pub struct TeeGuard {
-    handle: std::thread::JoinHandle<()>,
+    pumps: Vec<std::thread::JoinHandle<()>>,
     real_stdout: rustix::fd::OwnedFd,
+    real_stderr: rustix::fd::OwnedFd,
 }
 
 impl TeeGuard {
-    /// Flush, restore the real stdout/stderr (closing the pipe so the tee thread
-    /// sees EOF), and wait for the thread to drain everything to stdout + log.
+    /// Flush, restore the real stdout/stderr (closing the pipes so the tee
+    /// threads see EOF), and wait for them to drain everything to the terminal
+    /// and the log.
     pub fn finish(self) {
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
         let _ = rustix::stdio::dup2_stdout(&self.real_stdout);
-        let _ = rustix::stdio::dup2_stderr(&self.real_stdout);
-        let _ = self.handle.join();
+        let _ = rustix::stdio::dup2_stderr(&self.real_stderr);
+        for pump in self.pumps {
+            let _ = pump.join();
+        }
     }
 }
 
@@ -95,45 +100,72 @@ pub fn start(log_path: &str, program: &str, version: &str) -> Option<TeeGuard> {
     }
 }
 
-/// Redirect this process's stdout/stderr through a pipe to a background thread
-/// that fans every chunk out to both the real terminal and `log_file`.
-///
-/// Best-effort: returns an error if the pipe/dup setup fails, in which case the
-/// caller proceeds without persistent logging.
-fn tee_stdio_to_log(log_file: File) -> rustix::io::Result<TeeGuard> {
+/// Drain `pipe_read` to both `passthrough` (the real stdout or stderr) and a
+/// copy of the log, until the last writer of the pipe closes.
+fn spawn_pump(
+    pipe_read: rustix::fd::OwnedFd,
+    passthrough: rustix::fd::OwnedFd,
+    mut log: File,
+) -> std::thread::JoinHandle<()> {
     use std::io::Read;
 
-    let (pipe_read, pipe_write) = rustix::pipe::pipe()?;
-    // One dup for the tee thread to reach the terminal, one kept by the guard to
-    // restore fd 1/2 on shutdown (which closes the pipe and unblocks the thread).
-    let thread_stdout = rustix::io::dup(rustix::stdio::stdout())?;
-    let real_stdout = rustix::io::dup(rustix::stdio::stdout())?;
-
-    let handle = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut reader = File::from(pipe_read);
-        let mut stdout = File::from(thread_stdout);
-        let mut log = log_file;
+        let mut out = File::from(passthrough);
         let mut buf = [0u8; 8192];
         while let Ok(n) = reader.read(&mut buf) {
             if n == 0 {
                 break;
             }
             let _ = log.write_all(&buf[..n]);
-            let _ = stdout.write_all(&buf[..n]);
+            let _ = out.write_all(&buf[..n]);
         }
         let _ = log.flush();
-        let _ = stdout.flush();
-    });
+        let _ = out.flush();
+    })
+}
 
-    rustix::stdio::dup2_stdout(&pipe_write)?;
-    rustix::stdio::dup2_stderr(&pipe_write)?;
-    // Dropping our copy of the write end leaves only the redirected stdout/stderr
-    // referencing it, so the tee thread sees EOF once those close (process exit
-    // or TeeGuard::finish).
-    drop(pipe_write);
+/// Redirect this process's stdout and stderr through one pipe each to
+/// background threads that fan every chunk out to both the real terminal and
+/// `log_file`.
+///
+/// The two streams get separate pipes so each chunk goes back out on the fd it
+/// was written to. Folding stderr into stdout would corrupt every
+/// machine-readable command (`boot-entries --json`, `scan --json`), whose
+/// callers parse fd 1 while progress and warnings go to fd 2.
+///
+/// Best-effort: returns an error if the pipe/dup setup fails, in which case the
+/// caller proceeds without persistent logging.
+fn tee_stdio_to_log(log_file: File) -> std::io::Result<TeeGuard> {
+    let (out_read, out_write) = rustix::pipe::pipe()?;
+    let (err_read, err_write) = rustix::pipe::pipe()?;
+    // One dup per stream for the pump to reach the terminal, one per stream kept
+    // by the guard to restore fd 1/2 on shutdown (which closes the pipes and
+    // unblocks the pumps).
+    let pump_stdout = rustix::io::dup(rustix::stdio::stdout())?;
+    let pump_stderr = rustix::io::dup(rustix::stdio::stderr())?;
+    let real_stdout = rustix::io::dup(rustix::stdio::stdout())?;
+    let real_stderr = rustix::io::dup(rustix::stdio::stderr())?;
+
+    // A handle each: both are append-mode, so their writes interleave in the
+    // log in the order the pumps see them rather than overwriting one another.
+    let err_log = log_file.try_clone()?;
+    let pumps = vec![
+        spawn_pump(out_read, pump_stdout, log_file),
+        spawn_pump(err_read, pump_stderr, err_log),
+    ];
+
+    rustix::stdio::dup2_stdout(&out_write)?;
+    rustix::stdio::dup2_stderr(&err_write)?;
+    // Dropping our copies of the write ends leaves only the redirected
+    // stdout/stderr referencing them, so each pump sees EOF once those close
+    // (process exit or TeeGuard::finish).
+    drop(out_write);
+    drop(err_write);
     Ok(TeeGuard {
-        handle,
+        pumps,
         real_stdout,
+        real_stderr,
     })
 }
 

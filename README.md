@@ -398,7 +398,7 @@ sudo efibootmgr --bootnext <Boot####-of-Fedora>
 sudo systemctl reboot
 ```
 
-Every run appends its full output to a log file on the machine — `/var/log/bootc-migrate.log` for `bootc-migrate`, and `/var/log/bootc-rebase.log` for `bootc-rebase` when run as root — so the run can still be read after the reboot it asks for. Each run is preceded by a header naming the binary, its build, the time, and the arguments it was given. Nothing leaves the machine.
+Every run appends its full output to a log file on the machine — `/var/log/bootc-migrate.log` for `bootc-migrate`, and `/var/log/bootc-rebase.log` for `bootc-rebase` when a root invocation can change the system — so the run can still be read after the reboot it asks for. Each run is preceded by a header naming the binary, its build, the time, and the arguments it was given. Read-only `bootc-rebase` invocations (`scan`, a bare `boot-entries` audit, anything `--dry-run` or `--plan`) are not logged and leave their stdout and stderr untouched, so their JSON stays pipeable. Nothing leaves the machine.
 
 `bootc-rebase boot-entries --apply` additionally snapshots NVRAM to `/var/lib/bootc-rebase/boot-entry-backups/` before touching it, so boot entries can be restored (`--undo`) if the result is wrong.
 
