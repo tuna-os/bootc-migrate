@@ -277,3 +277,9 @@ clean-build:
 # Commit with conventional commit format
 commit msg:
     git add -A && git commit -m "{{msg}}" && git push
+
+# === Release ===
+
+# Verify a commit has a green CI + E2E run before tagging it (RELEASING.md step 2)
+verify-release-ready ref="HEAD":
+    ./scripts/verify-release-ready.sh {{ref}}

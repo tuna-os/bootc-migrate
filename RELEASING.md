@@ -42,7 +42,12 @@ Keep them in step from now on:
 1. `just check` — clippy, rustfmt, unit tests, shellcheck.
 2. The **full E2E matrix green on the commit being tagged.** Not a previous
    commit, and not "green last week": these binaries change boot state, and
-   the matrix is the only coverage the live paths have.
+   the matrix is the only coverage the live paths have. `release.yml` itself
+   does not check this — it builds and publishes on any `v*` tag push,
+   trusting this step. Verify it with a command instead of memory:
+   `./scripts/verify-release-ready.sh <sha-or-ref>` (defaults to `HEAD`)
+   checks the GitHub API for a green `CI` and `E2E Migration Tests` run on
+   the exact commit and fails if either is missing or red.
 3. `cargo deny check advisories bans sources licenses` clean. Run
    `cargo update` first — a stale registry index silently hides yanked
    crates, which is exactly how a yanked `chacha20` sat in the lockfile
