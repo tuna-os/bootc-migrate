@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "bootc-migrate"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bootc-migrate-core",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "bootc-migrate-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "composefs",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "bootc-rebase"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bootc-migrate-core",
