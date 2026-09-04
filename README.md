@@ -245,7 +245,10 @@ sudo bootc-migrate \
 
 Things to confirm in the report:
 
-- `Booted OSTree backend: Yes` — required; if `No` the tool refuses to run.
+- `Booted bootc backend: ostree` — the conversion runs from here. `composefs`
+  means the conversion is already done, and the tool swaps the deployment
+  image instead (`bootc switch`) rather than refusing. Only `none` — not a
+  bootc deployment at all — is a blocker.
 - `UEFI Boot Mode: Yes` + `NVRAM writable: Yes` — required for the
   systemd-boot path; on BIOS-only or locked NVRAM pass `--bootloader grub2`.
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
@@ -435,7 +438,7 @@ What's intentionally *not* carried forward:
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Phase 0 refuses with "System is not booted into an OSTree deployment" | You're already on composefs (or a non-bootc system) | Nothing to do |
+| Phase 0 refuses with "System is not booted into a bootc deployment" | Neither an ostree nor a composefs deployment is booted | Nothing to migrate from; check `bootc status` |
 | Phase 2 fails with ENOSPC mid-pull | `/sysroot/composefs` is tight on the 1.1× heuristic | Free space or grow the partition, then rerun |
 | Post-reboot `cat /proc/cmdline` shows `ostree=` not `composefs=` | Firmware ignored the new NVRAM entry, or OVMF loaded `Fedora\shim` instead | Use firmware boot menu to pick `Linux Boot Manager`; if that fails, fall back to OSTree and report the firmware quirk |
 | `bootc status` says "No manifest_digest in origin" | You're on an old build of this tool | Update to `main` — version info is on the first line of the migration log |
