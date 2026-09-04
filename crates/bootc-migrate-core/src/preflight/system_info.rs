@@ -5,6 +5,7 @@
 //! OSTree transactions). Direction-specific judgments live in
 //! [`super::validate`].
 
+use crate::rebase_plan::Backend;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
@@ -28,10 +29,27 @@ pub struct HostStatus {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct BootedStatus {
     pub ostree: Option<serde_json::Value>,
     pub composefs: Option<serde_json::Value>,
+}
+
+impl BootedStatus {
+    /// Which storage backend the running deployment uses.
+    ///
+    /// `None` means neither key was present: not a bootc deployment at all,
+    /// which is the only case that has ever been a genuine blocker. Reading
+    /// the `composefs` key is what distinguishes "already converted" from
+    /// "not bootc" — before this both looked the same and both were refused.
+    pub fn backend(&self) -> Option<Backend> {
+        if self.ostree.is_some() {
+            Some(Backend::Ostree)
+        } else if self.composefs.is_some() {
+            Some(Backend::Composefs)
+        } else {
+            None
+        }
+    }
 }
 
 /// Result of checking for a pending OSTree transaction.
@@ -239,7 +257,9 @@ fn get_ostree_repo_size() -> u64 {
 /// [`super::PreflightReport`] minus the per-direction verdicts.
 #[derive(Debug)]
 pub struct SystemInfo {
-    pub is_bootc_ostree: bool,
+    /// The backend the running deployment boots from, or `None` if this is not
+    /// a bootc deployment.
+    pub booted_backend: Option<Backend>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
     pub nvram_writable: bool,
@@ -281,12 +301,16 @@ impl SystemInfo {
             .args(["status", "--json"])
             .output()
             .context("failed to run bootc status")?;
-        let is_bootc_ostree = if output.status.success() {
+        let booted_backend = if output.status.success() {
             let status: BootcStatus = serde_json::from_slice(&output.stdout)
                 .context("failed to parse bootc status json")?;
-            status.status.booted.and_then(|b| b.ostree).is_some()
+            status
+                .status
+                .booted
+                .as_ref()
+                .and_then(BootedStatus::backend)
         } else {
-            false
+            None
         };
 
         // 2. Check UEFI mode
@@ -440,7 +464,7 @@ impl SystemInfo {
         let systemd_boot_binaries_present = Path::new("/usr/lib/systemd/boot/efi").exists();
 
         Ok(SystemInfo {
-            is_bootc_ostree,
+            booted_backend,
             pending_transaction,
             is_uefi,
             nvram_writable,
@@ -672,5 +696,75 @@ mod tests {
     #[test]
     fn reflink_probe_on_an_unwritable_location_is_false_not_a_panic() {
         assert!(!check_reflink_support(Path::new("/proc/nonexistent-dir")));
+    }
+
+    /// The detection this replaced inferred "composefs" from "not ostree",
+    /// which also matched a host with no bootc deployment at all. These parse
+    /// the shapes `bootc status --json` actually emits.
+    fn backend_of(json: &str) -> Option<Backend> {
+        let status: BootcStatus = serde_json::from_str(json).expect("parse");
+        status
+            .status
+            .booted
+            .as_ref()
+            .and_then(BootedStatus::backend)
+    }
+
+    #[test]
+    fn ostree_deployment_reports_ostree() {
+        assert_eq!(
+            backend_of(
+                r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+                    "status":{"booted":{"ostree":{"checksum":"abc"}}}}"#
+            ),
+            Some(Backend::Ostree)
+        );
+    }
+
+    #[test]
+    fn composefs_deployment_reports_composefs_not_none() {
+        assert_eq!(
+            backend_of(
+                r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+                    "status":{"booted":{"composefs":{"verity":"abc"}}}}"#
+            ),
+            Some(Backend::Composefs)
+        );
+    }
+
+    /// The case the old check could not distinguish from a composefs host.
+    #[test]
+    fn deployment_with_neither_key_is_not_a_bootc_host() {
+        assert_eq!(
+            backend_of(
+                r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+                    "status":{"booted":{}}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_booted_is_not_a_bootc_host() {
+        assert_eq!(
+            backend_of(
+                r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+                    "status":{"booted":null}}"#
+            ),
+            None
+        );
+    }
+
+    /// Both keys present: ostree wins, because a deployment that still has an
+    /// ostree checksum has an ostree repo to convert.
+    #[test]
+    fn ostree_wins_when_both_keys_are_present() {
+        assert_eq!(
+            backend_of(
+                r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+                    "status":{"booted":{"ostree":{"checksum":"a"},"composefs":{"verity":"b"}}}}"#
+            ),
+            Some(Backend::Ostree)
+        );
     }
 }

@@ -81,15 +81,18 @@ impl PreflightTuiState {
 
         let mut checks: Vec<(String, Readiness)> = Vec::new();
 
-        // OSTree backend
-        checks.push((
-            "Booted OSTree backend".to_string(),
-            if report.is_bootc_ostree {
-                Readiness::Pass
-            } else {
-                Readiness::Fail
-            },
-        ));
+        // Booted backend. A composefs host is not a failure — it is the
+        // finished state of this migration, and the image swap runs from it.
+        // Only "not a bootc deployment at all" blocks.
+        use bootc_migrate_core::rebase_plan::Backend;
+        checks.push(match report.booted_backend {
+            Some(Backend::Ostree) => ("Booted bootc backend: ostree".to_string(), Readiness::Pass),
+            Some(Backend::Composefs) => (
+                "Booted bootc backend: composefs — will swap image".to_string(),
+                Readiness::Pass,
+            ),
+            None => ("Booted bootc backend: none".to_string(), Readiness::Fail),
+        });
 
         // UEFI boot mode
         checks.push((

@@ -7,12 +7,17 @@
 //! rules (`--force` / `--skip-preflight` semantics included).
 
 use super::{PendingTransactionStatus, PreflightReport};
+use crate::rebase_plan::Backend;
 
 /// Print the detailed preflight report ("  - ..." lines).
 pub fn print_report(report: &PreflightReport) {
     println!(
-        "  - Booted OSTree backend: {}",
-        if report.is_bootc_ostree { "Yes" } else { "No" }
+        "  - Booted bootc backend:  {}",
+        match report.booted_backend {
+            Some(Backend::Ostree) => "ostree",
+            Some(Backend::Composefs) => "composefs (already converted)",
+            None => "none — not a bootc deployment",
+        }
     );
     match report.pending_transaction {
         PendingTransactionStatus::Clean => {}
@@ -123,10 +128,8 @@ pub fn container_storage_has_room(free_bytes: u64) -> bool {
 /// Compute the readiness warnings for this system. Empty means all clear.
 pub fn readiness_issues(report: &PreflightReport) -> Vec<String> {
     let mut issues: Vec<String> = Vec::new();
-    if !report.is_bootc_ostree {
-        issues.push(
-            "NOT booted in OSTree mode — migration requires an OSTree-booted system.".to_string(),
-        );
+    if report.booted_backend.is_none() {
+        issues.push("Not booted into a bootc deployment — nothing to migrate from.".to_string());
     }
     if !report.is_uefi {
         issues.push(
@@ -226,8 +229,18 @@ pub fn print_readiness(report: &PreflightReport) {
 /// Go/no-go decision for starting the migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationGate {
-    /// All gates passed — start the migration.
+    /// All gates passed — start the OSTree → ComposeFS migration.
     Proceed,
+    /// The host is already composefs-backed, so there is no backend to
+    /// convert: the caller must run the image swap
+    /// ([`crate::rebase_controller::ImageSwapConfig`]) instead of the
+    /// conversion pipeline.
+    ///
+    /// This is deliberately its own variant rather than `Proceed`. Running the
+    /// ostree→composefs phases against a composefs host would convert a repo
+    /// that is not there, and a caller that has not been made to think about
+    /// the difference should not compile.
+    ImageSwap,
     /// No reflink support: the driver should get explicit confirmation (an
     /// interactive prompt or `--force`) before a full-copy migration.
     ConfirmFullCopy,
@@ -238,10 +251,21 @@ pub enum MigrationGate {
 /// Evaluate the migration gates in order. `force` overrides everything except
 /// nothing; `skip_preflight` additionally waives the pending-transaction gate.
 pub fn gate(report: &PreflightReport, force: bool, skip_preflight: bool) -> MigrationGate {
-    if !report.is_bootc_ostree && !force {
-        return MigrationGate::Refuse(
-            "System is not booted into an OSTree deployment. Cannot perform migration.".to_string(),
-        );
+    match report.booted_backend {
+        // Nothing to migrate from. `force` still overrides, as it always has.
+        None if !force => {
+            return MigrationGate::Refuse(
+                "System is not booted into a bootc deployment (neither ostree nor composefs). \
+                 Cannot perform migration."
+                    .to_string(),
+            );
+        }
+        // Already converted — the useful operation is swapping the image, not
+        // converting the backend. Checked before the pending-transaction and
+        // reflink gates below because neither applies: there is no ostree repo
+        // to have a pending transaction on, and no object copies to reflink.
+        Some(Backend::Composefs) => return MigrationGate::ImageSwap,
+        _ => {}
     }
     // Block on pending transactions — they cause incomplete composefs images
     // and switch-root-os-release-errors on next boot.
@@ -272,7 +296,7 @@ mod tests {
     /// A report with every gate green — the baseline each test perturbs.
     fn healthy() -> PreflightReport {
         PreflightReport {
-            is_bootc_ostree: true,
+            booted_backend: Some(Backend::Ostree),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,
@@ -302,13 +326,45 @@ mod tests {
         assert_eq!(gate(&r, false, false), MigrationGate::Proceed);
     }
 
+    /// A system that is not a bootc deployment at all: nothing to migrate.
     #[test]
-    fn non_ostree_boot_is_refused_unless_forced() {
+    fn non_bootc_boot_is_refused_unless_forced() {
         let mut r = healthy();
-        r.is_bootc_ostree = false;
+        r.booted_backend = None;
         assert!(matches!(gate(&r, false, false), MigrationGate::Refuse(_)));
         // force overrides — the operator has taken responsibility.
         assert_eq!(gate(&r, true, false), MigrationGate::Proceed);
+    }
+
+    /// The behaviour this replaced: a composefs host was lumped in with a
+    /// non-bootc one and refused, which is what made "already migrated" look
+    /// like a hard blocker. It now routes to the image swap.
+    #[test]
+    fn composefs_host_routes_to_image_swap_instead_of_refusing() {
+        let mut r = healthy();
+        r.booted_backend = Some(Backend::Composefs);
+        assert_eq!(gate(&r, false, false), MigrationGate::ImageSwap);
+        // And it is not a readiness issue either — there is nothing wrong.
+        assert!(
+            !readiness_issues(&r)
+                .iter()
+                .any(|i| i.contains("bootc deployment")),
+            "a composefs host is the finished state, not a warning: {:?}",
+            readiness_issues(&r)
+        );
+    }
+
+    /// The image swap does not touch the ostree repo, so neither the
+    /// pending-transaction gate nor the reflink gate applies to it. Both would
+    /// otherwise fire on a composefs host and block a swap for reasons that
+    /// cannot affect it.
+    #[test]
+    fn image_swap_is_not_blocked_by_ostree_only_gates() {
+        let mut r = healthy();
+        r.booted_backend = Some(Backend::Composefs);
+        r.pending_transaction = PendingTransactionStatus::StagedDeployment;
+        r.supports_reflink = false;
+        assert_eq!(gate(&r, false, false), MigrationGate::ImageSwap);
     }
 
     #[test]
@@ -353,9 +409,9 @@ mod tests {
 
     #[test]
     fn gate_order_refusal_beats_full_copy_confirmation() {
-        // A non-ostree system without reflink must refuse, not ask about disk.
+        // A non-bootc system without reflink must refuse, not ask about disk.
         let mut r = healthy();
-        r.is_bootc_ostree = false;
+        r.booted_backend = None;
         r.supports_reflink = false;
         assert!(matches!(gate(&r, false, false), MigrationGate::Refuse(_)));
     }

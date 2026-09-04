@@ -1644,7 +1644,7 @@ mod tests {
         let mut app = app_on(Screen::Preflight);
         app.preflight_state = Some(preflight::PreflightTuiState::from_report(
             &bootc_migrate_core::preflight::PreflightReport {
-                is_bootc_ostree: true,
+                booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
                 pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
                 nvram_writable: true,
@@ -1706,7 +1706,9 @@ mod tests {
             // Give preflight real numbers so the gauges and checklist draw.
             app.preflight_state = Some(preflight::PreflightTuiState::from_report(
                 &bootc_migrate_core::preflight::PreflightReport {
-                    is_bootc_ostree: false, // exercise the red/BLOCKER path too
+                    // No bootc deployment at all — the one genuine blocker,
+                    // so the red checklist path renders too.
+                    booted_backend: None,
                     pending_transaction:
                         bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
                     is_uefi: true,

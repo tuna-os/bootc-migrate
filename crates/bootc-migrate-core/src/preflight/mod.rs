@@ -15,7 +15,12 @@ use anyhow::Result;
 
 #[derive(Debug)]
 pub struct PreflightReport {
-    pub is_bootc_ostree: bool,
+    /// The backend the running deployment boots from, or `None` if this is not
+    /// a bootc deployment at all — the only state that is a hard blocker.
+    ///
+    /// This replaced a bool `is_bootc_ostree`, which could not tell a composefs
+    /// host apart from a non-bootc one and so refused both.
+    pub booted_backend: Option<crate::rebase_plan::Backend>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
     pub nvram_writable: bool,
@@ -71,7 +76,7 @@ mod tests {
     #[test]
     fn preflight_report_has_all_fields() {
         let report = PreflightReport {
-            is_bootc_ostree: true,
+            booted_backend: Some(crate::rebase_plan::Backend::Ostree),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,

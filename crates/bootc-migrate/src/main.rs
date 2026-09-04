@@ -414,7 +414,7 @@ fn main() {
                 exit_flushed!(1);
             }
             preflight::PreflightReport {
-                is_bootc_ostree: true,
+                booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
                 pending_transaction: preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
                 nvram_writable: true,
@@ -446,6 +446,36 @@ fn main() {
 
     match preflight::readiness::gate(&report, args.force, args.skip_preflight) {
         preflight::readiness::MigrationGate::Proceed => {}
+        // Already on composefs: there is no ostree repo to convert, so run the
+        // image swap instead of refusing. This is the same `bootc switch`
+        // route bootc-rebase takes for composefs→composefs, which the
+        // capability table has carried as implemented since #66; before this
+        // the migrator dead-ended here with "not booted into an OSTree
+        // deployment", which read as a hard blocker when it actually meant
+        // "the conversion is already done".
+        preflight::readiness::MigrationGate::ImageSwap => {
+            println!(
+                "\nSystem is already composefs-backed — no backend conversion needed.\n\
+                 Swapping the deployment image instead."
+            );
+            let result = bootc_migrate_core::rebase_controller::ImageSwapConfig {
+                target_image: &target_image,
+                dry_run: args.dry_run,
+                force: args.force,
+                // The migrator has no --de-migrate flag; that is a
+                // bootc-rebase option. Keep the swap to what this binary
+                // already promises and leave the desktop alone.
+                de_migrate: false,
+            }
+            .run();
+            match result {
+                Ok(()) => exit_flushed!(0),
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    exit_flushed!(1);
+                }
+            }
+        }
         preflight::readiness::MigrationGate::Refuse(reason) => {
             eprintln!("Error: {}", reason);
             exit_flushed!(1);
