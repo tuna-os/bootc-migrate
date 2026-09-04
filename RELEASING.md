@@ -80,16 +80,45 @@ to clean up — re-running the job is the whole recovery.
 Pushing a `v*` tag by hand still works and is the escape hatch for releasing
 a commit that is not the head of `main`.
 
+### What gates a release
+
+Nothing in `release.yml`. The gate is `required-checks` in `ci.yml` — the
+single context branch protection watches — and every other gate feeds into
+it, `e2e-gate` included. No pull request reaches `main` without CI *and* the
+full E2E matrix green on its head commit, so by the time a version bump is on
+`main` it has already cleared the checklist below. `docs/testing.md` records
+the incident that established that rule.
+
+Two consequences worth knowing:
+
+- A **direct push to `main`** that bypasses a pull request bypasses the gate
+  entirely, and if it carries a version bump it releases. Don't do that.
+- The commit that gets released is the **squashed merge commit**, not the pull
+  request head that E2E actually ran on. Those are identical in content unless
+  `main` moved between the E2E run and the merge. Closing that window is what
+  the merge queue in `docs/testing.md`'s "Gaps / next automation" is for; it is
+  the one respect in which this is weaker than a human tagging a commit whose
+  own E2E run they had watched go green.
+
+`release.yml` deliberately does not re-check CI or E2E itself. A second gate
+would have to poll for the same multi-hour matrix `e2e-gate` already polls for
+(see #235), occupying a runner for hours per release and giving releases a new
+way to fail that has nothing to do with releasing.
+
 ## Before merging a version bump
 
-1. `just check` — clippy, rustfmt, unit tests, shellcheck.
+Items 1-3 are the ones `required-checks` already enforces, listed so you know
+what is standing between the bump and a publish. Items 4 and 5 are yours: no
+check can tell whether the changelog describes what is about to ship.
+
+1. `just check` — clippy, rustfmt, unit tests, shellcheck. *(CI: `validate`.)*
 2. The **full E2E matrix green on the commit being merged.** Not a previous
    commit, and not "green last week": these binaries change boot state, and
-   the matrix is the only coverage the live paths have.
+   the matrix is the only coverage the live paths have. *(CI: `e2e-gate`.)*
 3. `cargo deny check advisories bans sources licenses` clean. Run
    `cargo update` first — a stale registry index silently hides yanked
    crates, which is exactly how a yanked `chacha20` sat in the lockfile
-   undetected.
+   undetected. *(CI: `cargo-deny`.)*
 4. `Cargo.toml` and `CHANGELOG.md` agree: the version being merged has a
    `CHANGELOG.md` section, and `[Unreleased]` is empty of anything that
    section does not describe. Whatever is on `main` at merge time is what
