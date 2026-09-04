@@ -10,9 +10,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 > ever tagged; the `v0.1.0`, `v0.3.0` and `v0.4.0` sections describe work that
 > landed on `main` but was never released, and their links pointed at tags
 > that return 404. They are kept as the record of what changed and marked
-> accordingly. `v0.5.0` is numbered above both the highest tag (`v0.2.0`) and
-> the highest documented section (`v0.4.0`), so no reader of either sees a
-> version go backwards.
+> accordingly.
+>
+> `v0.5.0` was the next number chosen, above both the highest tag (`v0.2.0`)
+> and the highest documented section (`v0.4.0`) — but it was never cut either,
+> which is the bug #240 reported: documented, `curl`-able in the README, and
+> 404 in practice. Rather than leave a fifth phantom heading, its content is
+> folded into `v0.6.0` below, which is the release that actually ships it. One
+> section, one tag, and from now on the tag is created by the release run
+> itself so the two cannot drift again (see RELEASING.md).
 
 ---
 
@@ -23,12 +29,14 @@ merges to `main`, which is what cuts the release — see RELEASING.md.
 
 ---
 
-## [v0.5.0] — 2026-09-04
+## [v0.6.0] — 2026-09-04
 
 First release since the repository was renamed from `bootc-migrate-composefs`,
 and the first whose E2E matrix runs on every push (seven cells, hosted
-runners). Ships the `bootc-migrate` binary only; `bootc-rebase` remains
-**experimental and unreleased** — see "Scope" below.
+runners). Carries everything that was documented under the never-released
+`v0.5.0` heading, plus the boot-entry fixes that landed after it. Ships the
+`bootc-migrate` binary only; `bootc-rebase` remains **experimental and
+unreleased** — see "Scope" below.
 
 ### Scope
 
@@ -237,8 +245,8 @@ _(Section previously dated 2026-04; the tag was created 2026-07-04. #171.)_
 - E2E CI: btrfs scenario on every push to `main`.
 - `justfile` with build, test, E2E, lint, and cleanup recipes.
 
-[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/v0.5.0...main
-[v0.5.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.5.0
+[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/v0.6.0...main
+[v0.6.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.6.0
 [v0.2.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.2.0
 <!-- v0.1.0, v0.3.0 and v0.4.0 were never tagged; linking them to
      releases/tag/... returned 404. Left unlinked deliberately (#171). -->

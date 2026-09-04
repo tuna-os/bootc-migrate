@@ -29,7 +29,9 @@ independent, contradicting histories: three documented versions were never
 tagged, their changelog links 404'd, and the one version in both disagreed on
 its date by three months. `v0.5.0` was chosen to sit above the highest tag
 *and* the highest documented section, so no reader of either sees a
-regression.
+regression — but it was never cut either, which is what #240 reported. The
+release that actually shipped that work is `v0.6.0`, the first one this
+automation produced.
 
 Keep them in step from now on:
 
@@ -50,8 +52,8 @@ merging it to `main` is what cuts the release:
 
 ```diff
  [workspace.package]
--version = "0.5.0"
-+version = "0.6.0"
+-version = "0.6.0"
++version = "0.7.0"
 ```
 
 On every push to `main`, `release.yml`'s `resolve` job reads that version and

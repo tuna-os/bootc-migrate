@@ -23,7 +23,7 @@ swap in `aarch64-unknown-linux-gnu`):
 
 > **Release-naming note.** This repo was renamed from `bootc-migrate-composefs`
 > to `bootc-migrate` after v0.2.0. `release.yml` already publishes under the
-> new name, so from **v0.5.0** the tarball, the binary inside it, and the
+> new name, so from **v0.6.0** the tarball, the binary inside it, and the
 > container image are all `bootc-migrate`. The commands below reflect that.
 > To install the older v0.2.0 artifacts, substitute `bootc-migrate-composefs`
 > in the paths.
