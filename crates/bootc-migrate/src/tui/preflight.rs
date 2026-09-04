@@ -261,7 +261,7 @@ pub(crate) fn render_preflight(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Line::raw(""),
                 Line::from(Span::styled(
                     "  Press [Enter] to continue anyway, or [r] to retry.",
-                    Style::default().fg(SUBTLE),
+                    Style::default().fg(MUTED),
                 )),
             ]))
             .wrap(Wrap { trim: false });
@@ -371,7 +371,7 @@ fn render_preflight_content(f: &mut ratatui::Frame, state: &PreflightTuiState, a
     // ── Separator ──
     let sep1 = Paragraph::new(Line::from(Span::styled(
         "  ─────────────────────────────────────────────────────────────",
-        Style::default().fg(SUBTLE),
+        Style::default().fg(MUTED),
     )));
     f.render_widget(sep1, chunks[4]);
 
@@ -381,12 +381,65 @@ fn render_preflight_content(f: &mut ratatui::Frame, state: &PreflightTuiState, a
     // ── Separator ──
     let sep2 = Paragraph::new(Line::from(Span::styled(
         "  ─────────────────────────────────────────────────────────────",
-        Style::default().fg(SUBTLE),
+        Style::default().fg(MUTED),
     )));
     f.render_widget(sep2, chunks[6]);
 
     // ── Readiness checklist ──
     render_readiness_checklist(f, state, chunks[7]);
+}
+
+/// Draw a gauge whose readout sits *beside* the bar rather than inside it.
+///
+/// `Gauge` centres its label and writes it with one style, but it only paints
+/// cells left of the fill boundary — the unfilled remainder keeps the panel
+/// background. A label styled for the bright fill (`fg(DARK_BG)`, as all three
+/// gauges here were) is therefore drawn dark-on-dark the moment it extends past
+/// the fill, which for a centred label is any ratio under ~50%: at 0% the
+/// readout was DARK_BG on DARK_BG, a contrast ratio of 1.0. Straddling the
+/// boundary has no good colour either, since one style has to cover both sides.
+///
+/// So the readout gets its own columns, always over the panel background, and
+/// the bar is left to be a bar. `TRACK` paints the remainder so an empty gauge
+/// still reads as one.
+fn render_gauge_with_readout(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    ratio: f64,
+    color: Color,
+    readout: &str,
+) {
+    let readout_width = (readout.chars().count() as u16) + 2;
+    let bar_width = area.width.saturating_sub(readout_width);
+
+    let bar_area = Rect {
+        width: bar_width,
+        height: 1,
+        ..area
+    };
+    // Paint the track first: Gauge only styles the filled cells.
+    f.render_widget(Block::default().style(Style::default().bg(TRACK)), bar_area);
+    f.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(color).bg(TRACK))
+            .ratio(ratio)
+            .label(Span::raw("")),
+        bar_area,
+    );
+
+    let readout_area = Rect {
+        x: area.x + bar_width,
+        y: area.y,
+        width: readout_width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {readout}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+        readout_area,
+    );
 }
 
 fn render_disk_gauge(
@@ -435,14 +488,13 @@ fn render_disk_gauge(
         width: area.width.saturating_sub(4),
         height: 1,
     };
-    let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(color).bg(SURFACE))
-        .ratio(ratio)
-        .label(Span::styled(
-            format!("{:>3}%", (ratio * 100.0) as u32),
-            Style::default().fg(DARK_BG).add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(gauge, gauge_area);
+    render_gauge_with_readout(
+        f,
+        gauge_area,
+        ratio,
+        color,
+        &format!("{:>3}%", (ratio * 100.0) as u32),
+    );
 }
 
 fn render_disk_gauge_with_threshold(
@@ -489,14 +541,13 @@ fn render_disk_gauge_with_threshold(
         width: area.width.saturating_sub(6),
         height: 1,
     };
-    let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(color).bg(SURFACE))
-        .ratio(ratio)
-        .label(Span::styled(
-            format!("{:>3}%", (ratio * 100.0) as u32),
-            Style::default().fg(DARK_BG).add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(gauge, gauge_area);
+    render_gauge_with_readout(
+        f,
+        gauge_area,
+        ratio,
+        color,
+        &format!("{:>3}%", (ratio * 100.0) as u32),
+    );
 }
 
 fn render_projected_usage(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {
@@ -539,19 +590,14 @@ fn render_projected_usage(f: &mut ratatui::Frame, state: &PreflightTuiState, are
         width: area.width.saturating_sub(6),
         height: 1,
     };
-    let label_text = format!(
-        "/composefs  {:.1} GB used → {:.1} GB free",
+    // The used/free figures appear nowhere else on this screen, so they are the
+    // readout rather than a percentage.
+    let readout = format!(
+        "{:.1} GB used → {:.1} GB free",
         state.projected_composefs_used as f64 / 1_073_741_824.0,
         state.projected_composefs_free as f64 / 1_073_741_824.0,
     );
-    let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(proj_color).bg(SURFACE))
-        .ratio(ratio)
-        .label(Span::styled(
-            label_text,
-            Style::default().fg(DARK_BG).add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(gauge, gauge_area);
+    render_gauge_with_readout(f, gauge_area, ratio, proj_color, &readout);
 }
 
 fn render_readiness_checklist(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {

@@ -52,14 +52,36 @@ mod review;
 mod running;
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
-const TEAL: Color = Color::Rgb(0, 180, 180);
-const AMBER: Color = Color::Rgb(220, 160, 0);
+//
+// Every foreground here clears WCAG AA (4.5:1) against BOTH backgrounds, and
+// `contrast_tests` below asserts it so a future tweak cannot quietly undo it.
+// The exception is `BORDER`, which only ever draws chrome and is held to the
+// 3:1 non-text minimum instead.
+//
+// The distinction that was missing before is `MUTED` vs `BORDER`. A single
+// "subtle" colour was doing both jobs, and because a border may be dim while
+// text may not, it ended up set for the border and dragged the text down with
+// it: 2.7:1 for the values, unselected rows and hints — below even the
+// large-text floor, which is what made the panels unreadable on a dark
+// terminal.
+const TEAL: Color = Color::Rgb(0, 190, 190);
+const AMBER: Color = Color::Rgb(230, 170, 20);
 const DARK_BG: Color = Color::Rgb(18, 20, 24);
 const SURFACE: Color = Color::Rgb(30, 34, 42);
-const SUBTLE: Color = Color::Rgb(90, 100, 115);
-const SUCCESS: Color = Color::Rgb(80, 200, 100);
-const DANGER: Color = Color::Rgb(220, 60, 60);
-const TEXT: Color = Color::Rgb(210, 215, 225);
+/// De-emphasised **text**: values, unselected rows, hints. Readable (>=4.5:1).
+const MUTED: Color = Color::Rgb(140, 149, 162);
+/// **Chrome only** — inactive borders and separators. Never put text in this.
+const BORDER: Color = Color::Rgb(100, 110, 124);
+/// The unfilled portion of a gauge, so a bar reads as a bar at 0%.
+const TRACK: Color = Color::Rgb(58, 64, 78);
+const SUCCESS: Color = Color::Rgb(90, 210, 110);
+/// Red **text** on a dark panel.
+const DANGER: Color = Color::Rgb(235, 105, 105);
+/// Red **fill** behind light text (the error banner). Separate from `DANGER`
+/// for the same reason `BORDER` is separate from `MUTED`: a red bright enough
+/// to read as text on a dark panel is too bright to sit behind white.
+const DANGER_BG: Color = Color::Rgb(160, 32, 32);
+const TEXT: Color = Color::Rgb(222, 226, 234);
 
 // ─── Spinner ──────────────────────────────────────────────────────────────────
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -920,7 +942,7 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
             " 🚀 bootc-migrate",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(step_str, Style::default().fg(SUBTLE)),
+        Span::styled(step_str, Style::default().fg(MUTED)),
         Span::raw("  "),
         mode_tag,
     ]);
@@ -985,7 +1007,7 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(SUBTLE))
+                .border_style(Style::default().fg(BORDER))
                 .style(Style::default().bg(SURFACE)),
         )
         .alignment(Alignment::Left);
@@ -1082,7 +1104,7 @@ fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
         "    Quit    ",
         Style::default()
             .fg(Color::Rgb(255, 240, 240))
-            .bg(DANGER)
+            .bg(DANGER_BG)
             .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center);
@@ -1100,7 +1122,7 @@ fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
 
     let hint = Paragraph::new(Line::from(Span::styled(
         "  ← / → to select, Enter to confirm, Esc to cancel",
-        Style::default().fg(SUBTLE),
+        Style::default().fg(MUTED),
     )));
     f.render_widget(hint, chunks[4]);
 }
@@ -1510,5 +1532,244 @@ mod tests {
         app.preflight_state = None;
         let text = draw_to_text(&mut app);
         assert!(text.contains("Step 2 of 5"), "missing step:\n{text}");
+    }
+
+    // ── Palette contrast ──────────────────────────────────────────────────
+    //
+    // These lock in the fix for the unreadable dark theme. Every rule below
+    // corresponds to something that was actually wrong on screen, so a future
+    // palette tweak that reintroduces it fails here rather than shipping.
+
+    /// sRGB relative luminance (WCAG 2.1 §Relative luminance).
+    fn luminance(c: Color) -> f64 {
+        let Color::Rgb(r, g, b) = c else {
+            panic!("palette must be explicit Rgb, got {c:?}");
+        };
+        let ch = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    }
+
+    /// WCAG 2.1 contrast ratio, 1.0 (identical) to 21.0 (black on white).
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Text must clear AA (4.5:1) on both panel backgrounds.
+    #[test]
+    fn every_text_colour_is_readable_on_both_backgrounds() {
+        for (name, fg) in [
+            ("TEAL", TEAL),
+            ("AMBER", AMBER),
+            ("MUTED", MUTED),
+            ("SUCCESS", SUCCESS),
+            ("DANGER", DANGER),
+            ("TEXT", TEXT),
+        ] {
+            for (bg_name, bg) in [("DARK_BG", DARK_BG), ("SURFACE", SURFACE)] {
+                let ratio = contrast(fg, bg);
+                assert!(
+                    ratio >= 4.5,
+                    "{name} on {bg_name} is {ratio:.2}:1, below the 4.5:1 floor \
+                     for text. Pick a lighter {name} or stop using it for text."
+                );
+            }
+        }
+    }
+
+    /// `BORDER` is exempt from the text floor precisely because it must never
+    /// carry text — but it still has to be visible as chrome (3:1).
+    #[test]
+    fn border_is_visible_chrome_but_not_text_grade() {
+        for (bg_name, bg) in [("DARK_BG", DARK_BG), ("SURFACE", SURFACE)] {
+            let ratio = contrast(BORDER, bg);
+            assert!(
+                ratio >= 3.0,
+                "BORDER on {bg_name} is {ratio:.2}:1, below the 3:1 non-text floor"
+            );
+        }
+    }
+
+    /// Light-on-colour pairs: buttons and the error banner set their own
+    /// background, so they are checked against that, not against the panel.
+    #[test]
+    fn on_colour_pairs_are_readable() {
+        let button_green = Color::Rgb(40, 180, 70);
+        let banner_text = Color::Rgb(255, 240, 240);
+        for (name, fg, bg) in [
+            ("welcome/dry-run button", DARK_BG, TEAL),
+            ("run-migration button", DARK_BG, button_green),
+            ("quit button", banner_text, DANGER_BG),
+        ] {
+            let ratio = contrast(fg, bg);
+            assert!(ratio >= 4.5, "{name} is {ratio:.2}:1, below 4.5:1");
+        }
+    }
+
+    /// The gauge readout is drawn over the panel, never over the bar, so it is
+    /// held to the same floor as any other text. This is the regression that
+    /// made `0%` invisible: it used to be drawn `fg(DARK_BG)` on top of the
+    /// unfilled remainder, which `Gauge` leaves at the panel background.
+    #[test]
+    fn gauge_readout_never_lands_dark_on_dark() {
+        for (name, fill) in [("SUCCESS", SUCCESS), ("AMBER", AMBER), ("DANGER", DANGER)] {
+            for (bg_name, bg) in [("DARK_BG", DARK_BG), ("SURFACE", SURFACE)] {
+                let ratio = contrast(fill, bg);
+                assert!(
+                    ratio >= 4.5,
+                    "gauge readout {name} on {bg_name} is {ratio:.2}:1"
+                );
+            }
+            // And the bar itself has to be distinguishable from its track.
+            let ratio = contrast(fill, TRACK);
+            assert!(
+                ratio >= 3.0,
+                "{name} fill against TRACK is {ratio:.2}:1 — the bar would not read as full"
+            );
+        }
+    }
+
+    /// The readouts must actually be on screen — an audit that only checks
+    /// contrast would also pass if the text vanished entirely.
+    #[test]
+    fn preflight_gauges_show_their_readouts() {
+        let mut app = app_on(Screen::Preflight);
+        app.preflight_state = Some(preflight::PreflightTuiState::from_report(
+            &bootc_migrate_core::preflight::PreflightReport {
+                is_bootc_ostree: true,
+                pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
+                is_uefi: true,
+                nvram_writable: true,
+                esp_path: Some("/boot/efi".into()),
+                esp_free_space_bytes: 386 * 1024 * 1024,
+                esp_fs_type: Some("vfat".into()),
+                esp_detected: true,
+                supports_reflink: true,
+                is_btrfs: true,
+                fs_type: Some("btrfs".into()),
+                ostree_repo_size_bytes: 0,
+                composefs_free_bytes: 40_600_000_000,
+                container_storage_free_bytes: 50 * 1024 * 1024 * 1024,
+                container_storage_path: "/var/lib/containers/storage".into(),
+                var_is_separate_mount: false,
+                esp_ready_for_systemd_boot: true,
+                systemd_boot_binaries_present: true,
+                grub_tools_available: true,
+                sysroot_was_ro: false,
+            },
+        ));
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("0%"), "gauge percentage missing:\n{text}");
+        assert!(
+            text.contains("GB used"),
+            "projected-usage readout missing:\n{text}"
+        );
+    }
+
+    /// Whether a glyph is chrome (borders, bars, block fills) rather than text.
+    /// Chrome is held to the 3:1 non-text floor, everything else to 4.5:1.
+    fn is_chrome(sym: &str) -> bool {
+        sym.chars()
+            .all(|c| matches!(c, '\u{2500}'..='\u{259f}' | '\u{2800}'..='\u{28ff}'))
+    }
+
+    /// Audit what is actually on screen, cell by cell, on every screen.
+    ///
+    /// The palette tests above check the colours we *intend* to pair. This
+    /// checks the ones that end up paired, which is a different thing and is
+    /// how the gauge bug survived: `DANGER`, `SURFACE` and `DARK_BG` were each
+    /// fine, and the defect was a readout drawn `fg(DARK_BG)` over a cell whose
+    /// background the gauge had left at the panel colour. No palette-level
+    /// assertion can see that; this one reads the rendered buffer.
+    #[test]
+    fn no_screen_renders_unreadable_cells() {
+        for screen in [
+            Screen::Welcome,
+            Screen::Preflight,
+            Screen::SelectImage,
+            Screen::ConfigureOptions,
+            Screen::Review,
+            Screen::Running,
+            Screen::Complete,
+            Screen::Failed,
+        ] {
+            let label = format!("{screen:?}");
+            let mut app = app_on(screen);
+            // Give preflight real numbers so the gauges and checklist draw.
+            app.preflight_state = Some(preflight::PreflightTuiState::from_report(
+                &bootc_migrate_core::preflight::PreflightReport {
+                    is_bootc_ostree: false, // exercise the red/BLOCKER path too
+                    pending_transaction:
+                        bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
+                    is_uefi: true,
+                    nvram_writable: true,
+                    esp_path: Some("/boot/efi".into()),
+                    esp_free_space_bytes: 386 * 1024 * 1024,
+                    esp_fs_type: Some("vfat".into()),
+                    esp_detected: true,
+                    supports_reflink: true,
+                    is_btrfs: true,
+                    fs_type: Some("btrfs".into()),
+                    // Zero repo size is the case from the bug report: it makes
+                    // every gauge 0%, which is exactly where the readout used
+                    // to disappear.
+                    ostree_repo_size_bytes: 0,
+                    composefs_free_bytes: 40_600_000_000,
+                    container_storage_free_bytes: 50 * 1024 * 1024 * 1024,
+                    container_storage_path: "/var/lib/containers/storage".into(),
+                    var_is_separate_mount: false,
+                    esp_ready_for_systemd_boot: true,
+                    systemd_boot_binaries_present: true,
+                    grub_tools_available: true,
+                    sysroot_was_ro: false,
+                },
+            ));
+            let backend = TestBackend::new(100, 40);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal.draw(|f| render(f, &mut app)).expect("draw");
+            let buf = terminal.backend().buffer();
+
+            let mut worst: Option<(f64, u16, u16, String)> = None;
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let cell = &buf[(x, y)];
+                    let sym = cell.symbol();
+                    if sym.trim().is_empty() {
+                        continue;
+                    }
+                    // The app paints a DARK_BG block over the whole frame, so
+                    // an unset background is that, not the terminal default.
+                    let bg = match cell.bg {
+                        Color::Reset => DARK_BG,
+                        other => other,
+                    };
+                    let fg = match cell.fg {
+                        Color::Reset => TEXT,
+                        other => other,
+                    };
+                    let floor = if is_chrome(sym) { 3.0 } else { 4.5 };
+                    let ratio = contrast(fg, bg);
+                    if ratio < floor && worst.as_ref().is_none_or(|(w, _, _, _)| ratio < *w) {
+                        worst = Some((ratio, x, y, sym.to_string()));
+                    }
+                }
+            }
+            assert!(
+                worst.is_none(),
+                "{label}: cell {:?} at ({}, {}) renders at {:.2}:1 — unreadable",
+                worst.as_ref().map(|w| w.3.clone()),
+                worst.as_ref().map(|w| w.1).unwrap_or(0),
+                worst.as_ref().map(|w| w.2).unwrap_or(0),
+                worst.as_ref().map(|w| w.0).unwrap_or(0.0),
+            );
+        }
     }
 }

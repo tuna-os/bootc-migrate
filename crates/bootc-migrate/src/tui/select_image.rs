@@ -22,17 +22,17 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     // Source OS context header
     let os_hint_block = Block::default()
         .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(SUBTLE))
+        .border_style(Style::default().fg(BORDER))
         .style(Style::default().bg(DARK_BG));
     let os_line = Paragraph::new(Line::from(vec![
-        Span::styled("  Detected source: ", Style::default().fg(SUBTLE)),
+        Span::styled("  Detected source: ", Style::default().fg(MUTED)),
         Span::styled(
             app.detected_os.as_str(),
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "  — all presets migrate to Dakota (composefs-backed)",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         ),
     ]))
     .block(os_hint_block);
@@ -79,12 +79,12 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(
                     prefix,
-                    Style::default().fg(if selected { TEAL } else { SUBTLE }),
+                    Style::default().fg(if selected { TEAL } else { MUTED }),
                 ),
                 Span::styled(
                     format!("{:<28}", label),
                     Style::default()
-                        .fg(if selected { TEXT } else { SUBTLE })
+                        .fg(if selected { TEXT } else { MUTED })
                         .add_modifier(if selected {
                             Modifier::BOLD
                         } else {
@@ -95,10 +95,10 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     rec_tag,
                     Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("  →  ", Style::default().fg(SUBTLE)),
+                Span::styled("  →  ", Style::default().fg(MUTED)),
                 Span::styled(
                     target_display,
-                    Style::default().fg(if selected { TEAL } else { SUBTLE }),
+                    Style::default().fg(if selected { TEAL } else { MUTED }),
                 ),
             ]);
             ListItem::new(line)
@@ -120,7 +120,7 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     .fg(if app.custom_image_editing {
                         TEAL
                     } else {
-                        SUBTLE
+                        MUTED
                     })
                     .add_modifier(Modifier::BOLD),
             ))
@@ -128,7 +128,7 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             .border_style(Style::default().fg(if app.custom_image_editing {
                 TEAL
             } else {
-                SUBTLE
+                BORDER
             }))
             .style(Style::default().bg(SURFACE));
 
@@ -140,12 +140,12 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     } else {
         let hint = Paragraph::new(Span::styled(
             "  Select an image with ↑↓ then press Enter.  ★ = recommended for your system",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         ))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(SUBTLE))
+                .border_style(Style::default().fg(BORDER))
                 .style(Style::default().bg(SURFACE)),
         );
         f.render_widget(hint, chunks[2]);
