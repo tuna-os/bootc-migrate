@@ -415,6 +415,7 @@ fn main() {
             }
             preflight::PreflightReport {
                 booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
+                booted_image: None,
                 pending_transaction: preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
                 nvram_writable: true,

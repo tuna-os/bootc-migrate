@@ -1,9 +1,8 @@
-//! Select Image screen — the preset image list with custom-image text entry,
-//! source-OS hint highlighting, and inline help.
+//! Select Image screen — the target list, custom-image entry and inline help.
 //!
-//! Extracted from `tui.rs` (bootc-migrate#133): a pure renderer over `App`
-//! state; `PRESET_IMAGES` and `detect_source_os` stay in `super` and are
-//! pulled in via `use super::*`.
+//! The rows come from `super::image_choices`, built from what preflight
+//! detected, so this file only renders; it makes no decision about which
+//! targets exist or which one is right.
 
 use super::*;
 
@@ -19,23 +18,30 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    // Source OS context header
+    // What we detected, and therefore why the first row is what it is.
     let os_hint_block = Block::default()
         .borders(Borders::BOTTOM)
         .border_style(Style::default().fg(BORDER))
         .style(Style::default().bg(DARK_BG));
-    let os_line = Paragraph::new(Line::from(vec![
-        Span::styled("  Detected source: ", Style::default().fg(MUTED)),
+    let mut header = vec![
+        Span::styled("  Detected: ", Style::default().fg(MUTED)),
         Span::styled(
             app.detected_os.as_str(),
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "  — all presets migrate to Dakota (composefs-backed)",
+    ];
+    if let Some(backend) = app.booted_backend {
+        header.push(Span::styled(
+            format!(" · {backend}"),
             Style::default().fg(MUTED),
-        ),
-    ]))
-    .block(os_hint_block);
+        ));
+    }
+    if let Some(image) = app.booted_image.as_deref() {
+        header.push(Span::styled(" · ", Style::default().fg(MUTED)));
+        header.push(Span::styled(image, Style::default().fg(MUTED)));
+    }
+
+    let os_line = Paragraph::new(Line::from(header)).block(os_hint_block);
     f.render_widget(os_line, chunks[0]);
 
     let block = Block::default()
@@ -47,42 +53,36 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(TEAL))
         .style(Style::default().bg(DARK_BG));
 
-    // Determine which preset matches the detected OS
-    let detected_lower = app.detected_os.to_lowercase();
-    let recommended_idx = PRESET_IMAGES
+    let label_width = app
+        .image_choices
         .iter()
-        .position(|(_, _, hint)| !hint.is_empty() && detected_lower.contains(hint))
-        .unwrap_or(0);
+        .map(|c| c.label.chars().count())
+        .max()
+        .unwrap_or(20)
+        .max(20);
 
-    let items: Vec<ListItem> = PRESET_IMAGES
+    let items: Vec<ListItem> = app
+        .image_choices
         .iter()
         .enumerate()
-        .map(|(i, (label, image, _hint))| {
+        .map(|(i, choice)| {
             let selected = app.image_list_state.selected() == Some(i);
-            let is_custom = i == PRESET_IMAGES.len() - 1;
-            let is_recommended = i == recommended_idx;
-            let prefix = if selected { "▶ " } else { "  " };
-            let target_display = if is_custom {
+            let target_display = if choice.custom {
                 if app.custom_image.is_empty() {
                     "<type your image reference>".to_owned()
                 } else {
                     app.custom_image.clone()
                 }
             } else {
-                image.to_string()
-            };
-            let rec_tag = if is_recommended && !is_custom {
-                " ★"
-            } else {
-                ""
+                choice.image.clone()
             };
             let line = Line::from(vec![
                 Span::styled(
-                    prefix,
+                    if selected { "▶ " } else { "  " },
                     Style::default().fg(if selected { TEAL } else { MUTED }),
                 ),
                 Span::styled(
-                    format!("{:<28}", label),
+                    format!("{:<width$}", choice.label, width = label_width),
                     Style::default()
                         .fg(if selected { TEXT } else { MUTED })
                         .add_modifier(if selected {
@@ -91,15 +91,12 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                             Modifier::empty()
                         }),
                 ),
-                Span::styled(
-                    rec_tag,
-                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-                ),
                 Span::styled("  →  ", Style::default().fg(MUTED)),
                 Span::styled(
                     target_display,
                     Style::default().fg(if selected { TEAL } else { MUTED }),
                 ),
+                Span::styled(format!("   ({})", choice.note), Style::default().fg(MUTED)),
             ]);
             ListItem::new(line)
         })
@@ -139,7 +136,7 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         f.render_widget(input_para, chunks[2]);
     } else {
         let hint = Paragraph::new(Span::styled(
-            "  Select an image with ↑↓ then press Enter.  ★ = recommended for your system",
+            "  Press Enter to accept the selected target, or ↑↓ to choose another.",
             Style::default().fg(MUTED),
         ))
         .block(

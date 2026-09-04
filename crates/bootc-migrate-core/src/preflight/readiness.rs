@@ -297,6 +297,7 @@ mod tests {
     fn healthy() -> PreflightReport {
         PreflightReport {
             booted_backend: Some(Backend::Ostree),
+            booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,

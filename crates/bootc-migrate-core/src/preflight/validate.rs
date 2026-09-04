@@ -82,6 +82,7 @@ pub fn ostree_to_composefs(sys: SystemInfo) -> PreflightReport {
         sys.esp_detected && sys.esp_free_space_bytes >= 150 * 1024 * 1024;
     PreflightReport {
         booted_backend: sys.booted_backend,
+        booted_image: sys.booted_image,
         pending_transaction: sys.pending_transaction,
         is_uefi: sys.is_uefi,
         nvram_writable: sys.nvram_writable,
@@ -112,6 +113,7 @@ mod tests {
     fn sys_with_esp(detected: bool, free: u64) -> SystemInfo {
         SystemInfo {
             booted_backend: Some(crate::rebase_plan::Backend::Ostree),
+            booted_image: None,
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,

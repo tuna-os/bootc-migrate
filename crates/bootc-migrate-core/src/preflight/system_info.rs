@@ -32,6 +32,23 @@ pub struct HostStatus {
 pub struct BootedStatus {
     pub ostree: Option<serde_json::Value>,
     pub composefs: Option<serde_json::Value>,
+    pub image: Option<ImageStatus>,
+}
+
+/// `.status.booted.image` — ImageStatus wrapping an ImageReference.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageStatus {
+    pub image: Option<ImageReference>,
+}
+
+/// `.status.booted.image.image` — the reference itself. The nesting is bootc's,
+/// not ours; `staged_image_from_status` walks the same shape for the staged
+/// deployment.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageReference {
+    pub image: Option<String>,
 }
 
 impl BootedStatus {
@@ -41,6 +58,17 @@ impl BootedStatus {
     /// which is the only case that has ever been a genuine blocker. Reading
     /// the `composefs` key is what distinguishes "already converted" from
     /// "not bootc" — before this both looked the same and both were refused.
+    /// The image reference the running deployment was booted from.
+    pub fn image_ref(&self) -> Option<&str> {
+        self.image
+            .as_ref()?
+            .image
+            .as_ref()?
+            .image
+            .as_deref()
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn backend(&self) -> Option<Backend> {
         if self.ostree.is_some() {
             Some(Backend::Ostree)
@@ -260,6 +288,10 @@ pub struct SystemInfo {
     /// The backend the running deployment boots from, or `None` if this is not
     /// a bootc deployment.
     pub booted_backend: Option<Backend>,
+    /// The image reference the running deployment was booted from, so callers
+    /// can offer a target derived from it instead of asking the user to
+    /// recognise their own system.
+    pub booted_image: Option<String>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
     pub nvram_writable: bool,
@@ -301,16 +333,16 @@ impl SystemInfo {
             .args(["status", "--json"])
             .output()
             .context("failed to run bootc status")?;
-        let booted_backend = if output.status.success() {
+        let (booted_backend, booted_image) = if output.status.success() {
             let status: BootcStatus = serde_json::from_slice(&output.stdout)
                 .context("failed to parse bootc status json")?;
-            status
-                .status
-                .booted
-                .as_ref()
-                .and_then(BootedStatus::backend)
+            let booted = status.status.booted.as_ref();
+            (
+                booted.and_then(BootedStatus::backend),
+                booted.and_then(BootedStatus::image_ref).map(str::to_owned),
+            )
         } else {
-            None
+            (None, None)
         };
 
         // 2. Check UEFI mode
@@ -465,6 +497,7 @@ impl SystemInfo {
 
         Ok(SystemInfo {
             booted_backend,
+            booted_image,
             pending_transaction,
             is_uefi,
             nvram_writable,

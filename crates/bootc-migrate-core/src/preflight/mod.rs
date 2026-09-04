@@ -21,6 +21,8 @@ pub struct PreflightReport {
     /// This replaced a bool `is_bootc_ostree`, which could not tell a composefs
     /// host apart from a non-bootc one and so refused both.
     pub booted_backend: Option<crate::rebase_plan::Backend>,
+    /// The image reference the running deployment was booted from, if any.
+    pub booted_image: Option<String>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
     pub nvram_writable: bool,
@@ -77,6 +79,7 @@ mod tests {
     fn preflight_report_has_all_fields() {
         let report = PreflightReport {
             booted_backend: Some(crate::rebase_plan::Backend::Ostree),
+            booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,
