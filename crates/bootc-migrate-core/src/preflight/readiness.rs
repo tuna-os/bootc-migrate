@@ -9,6 +9,21 @@
 use super::{PendingTransactionStatus, PreflightReport};
 use crate::rebase_plan::Backend;
 
+/// How to describe the ESP location in the report.
+///
+/// `esp_path` is where the ESP is *mounted*; preflight can also find one by
+/// partition GUID and mount it temporarily, which leaves `esp_detected` true
+/// and `esp_path` empty. Printing the no-ESP text in that case made the report
+/// contradict itself — "None — GRUB2-only migration" eight lines above
+/// "Bootloader: Will migrate to systemd-boot".
+fn esp_path_display(report: &PreflightReport) -> String {
+    match report.esp_path.as_deref() {
+        Some(path) => path.to_string(),
+        None if report.esp_detected => "detected, not currently mounted".to_string(),
+        None => "None — GRUB2-only migration".to_string(),
+    }
+}
+
 /// Print the detailed preflight report ("  - ..." lines).
 pub fn print_report(report: &PreflightReport) {
     println!(
@@ -38,13 +53,7 @@ pub fn print_report(report: &PreflightReport) {
         "  - NVRAM writable:        {}",
         if report.nvram_writable { "Yes" } else { "No" }
     );
-    println!(
-        "  - ESP Mounted Path:      {}",
-        report
-            .esp_path
-            .as_deref()
-            .unwrap_or("None — GRUB2-only migration")
-    );
+    println!("  - ESP Mounted Path:      {}", esp_path_display(report));
     if let Some(ref fs) = report.esp_fs_type {
         println!("  - ESP Filesystem:        {}", fs);
     }
@@ -255,8 +264,10 @@ pub fn gate(report: &PreflightReport, force: bool, skip_preflight: bool) -> Migr
         // Nothing to migrate from. `force` still overrides, as it always has.
         None if !force => {
             return MigrationGate::Refuse(
-                "System is not booted into a bootc deployment (neither ostree nor composefs). \
-                 Cannot perform migration."
+                "System is not booted into a bootc deployment: `bootc status` reports \
+                 neither an ostree nor a composefs deployment, and the kernel command \
+                 line names neither. Check `bootc status` and /proc/cmdline; pass \
+                 --force to migrate anyway."
                     .to_string(),
             );
         }
@@ -506,5 +517,53 @@ mod tests {
             .find(|i| i.contains("Low free space"))
             .unwrap();
         assert!(!hit.contains("separate volume"), "{hit}");
+    }
+
+    /// The report must not contradict itself: an ESP found by partition GUID
+    /// and mounted only for the probe is still an ESP, and the bootloader plan
+    /// printed below already says so.
+    #[test]
+    fn esp_line_does_not_claim_grub_only_when_an_esp_was_detected() {
+        let mut r = healthy();
+        r.esp_path = None;
+        r.esp_detected = true;
+        let line = esp_path_display(&r);
+        assert!(!line.contains("GRUB2-only"), "{line}");
+        assert!(line.contains("detected"), "{line}");
+
+        // Genuinely no ESP: the original text is right.
+        r.esp_detected = false;
+        assert!(esp_path_display(&r).contains("GRUB2-only"));
+
+        // Mounted: just the path.
+        r.esp_path = Some("/boot/efi".into());
+        r.esp_detected = true;
+        assert_eq!(esp_path_display(&r), "/boot/efi");
+    }
+
+    /// End-to-end for the reported host: `bootc status` names no backend, the
+    /// kernel command line says composefs. Detection resolves it, and the gate
+    /// routes to the swap instead of the refusal in the bug report.
+    #[test]
+    fn cmdline_detected_composefs_host_reaches_the_swap_not_the_refusal() {
+        use crate::preflight::system_info::backend_from_cmdline;
+
+        let detected = backend_from_cmdline(
+            "BOOT_IMAGE=/boot/vmlinuz root=UUID=1234 rw composefs=6f8e2a1b quiet",
+        );
+        assert_eq!(detected, Some(Backend::Composefs), "detection");
+
+        let mut r = healthy();
+        r.booted_backend = detected;
+        assert_eq!(gate(&r, false, false), MigrationGate::ImageSwap);
+
+        // And the old message is gone from the readiness output entirely.
+        assert!(
+            !readiness_issues(&r)
+                .iter()
+                .any(|i| i.contains("OSTree mode")),
+            "{:?}",
+            readiness_issues(&r)
+        );
     }
 }
