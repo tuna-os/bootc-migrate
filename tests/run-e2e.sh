@@ -2028,6 +2028,58 @@ if [ "$FLAT_SYS" != "flatpak-system-stub-com.example.SystemApp" ]; then
 fi
 echo "OK: Flatpak user + system installations preserved."
 
+# --- composefs as a migration SOURCE ---
+# Runs in every composefs cell, because every one of them ends here: booted
+# into composefs, which is precisely the state the tool used to refuse. It
+# reported "Booted OSTree backend: No" and exited with "System is not booted
+# into an OSTree deployment. Cannot perform migration" — so it dead-ended on
+# exactly the systems it had just produced, and nothing in CI noticed, because
+# no cell ever re-ran the binary after the reboot.
+#
+# Free to run: no extra VM, no extra boot, and --dry-run stages nothing. It
+# must come before the undo test below, which takes the composefs state away.
+step "=== Verifying composefs is accepted as a migration source ==="
+
+CFS_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+echo "  cmdline: $CFS_CMDLINE"
+# Both halves matter to the detection: `composefs=` is the fallback signal when
+# `bootc status` names no backend, and the absence of `ostree=` is what makes
+# it unambiguous (kernel_options.rs filters ostree= out when it builds this
+# entry). If that ever changes, this assertion should fail loudly rather than
+# let the detection quietly resolve the wrong way.
+# Anchored to a token boundary, matching backend_from_cmdline's whole-token
+# rule exactly: `-w` would also match `rd.composefs=`, which the parser rejects,
+# and a check looser than the code it guards is not a guard.
+echo "$CFS_CMDLINE" | grep -qE '(^| )composefs=' || {
+    echo "FAIL: booted cmdline has no composefs= parameter: $CFS_CMDLINE"; exit 1; }
+if echo "$CFS_CMDLINE" | grep -qE '(^| )ostree=' ; then
+    echo "FAIL: composefs entry carries ostree= — backend detection is ambiguous"; exit 1
+fi
+
+CFS_SRC=$(ssh $SSH_OPTS root@localhost \
+    "/var/tmp/bootc-migrate --dry-run --target-image $TARGET_IMAGE 2>&1" || {
+    echo "FAIL: bootc-migrate exited non-zero on a composefs host"; exit 1; })
+echo "$CFS_SRC" | sed 's/^/  /'
+
+# The exact refusal from the bug report must be gone.
+if echo "$CFS_SRC" | grep -qi "not booted into an OSTree deployment"; then
+    echo "FAIL: still refuses a composefs host with the old OSTree-only message"; exit 1
+fi
+if echo "$CFS_SRC" | grep -qi "Cannot perform migration"; then
+    echo "FAIL: still refuses to migrate from composefs"; exit 1
+fi
+# And it must have taken the swap route, not silently run the conversion.
+# "already composefs-backed" is pinned on the Rust side as IMAGE_SWAP_NOTICE,
+# with a unit test tying it to this grep so a reworded message fails in
+# seconds rather than three hours into the matrix.
+if ! echo "$CFS_SRC" | grep -qi "already composefs-backed"; then
+    echo "FAIL: did not recognise the host as composefs-backed"; exit 1
+fi
+if ! echo "$CFS_SRC" | grep -qi "bootc switch"; then
+    echo "FAIL: composefs source did not route to the image swap"; exit 1
+fi
+echo "OK: composefs host is accepted as a migration source and routes to the image swap."
+
 # --- undo (migration rollback cleanup) test ---
 # Selected with E2E_TEST_MODE=undo. We are booted into composefs after the
 # migration; verify `undo` removes the composefs boot path + staged deployment,

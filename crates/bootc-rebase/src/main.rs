@@ -277,13 +277,16 @@ fn parse_backend(s: &str) -> Result<Backend> {
 
 fn detect_source_backend() -> Result<Backend> {
     let sys = preflight::SystemInfo::gather()?;
-    if sys.is_bootc_ostree {
-        Ok(Backend::Ostree)
-    } else {
-        // Not OSTree-booted; assume composefs (a later capability scan will
-        // verify this properly — see issue #24).
-        Ok(Backend::Composefs)
-    }
+    // Read from `bootc status`'s own `booted.composefs` key rather than
+    // inferring composefs from "not ostree", which also matched a system that
+    // is not a bootc deployment at all and re-based it as though it were.
+    sys.booted_backend.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Not booted into a bootc deployment (`bootc status` reports neither an \
+             ostree nor a composefs deployment). Pass --source-backend explicitly \
+             if you know better."
+        )
+    })
 }
 
 fn check_root_privilege() -> Result<()> {

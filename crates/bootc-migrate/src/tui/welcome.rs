@@ -46,7 +46,7 @@ pub(crate) fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
         ),
         Span::styled(
             "  — OSTree → ComposeFS in-place migration",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         ),
     ]))
     .alignment(Alignment::Center);
@@ -61,7 +61,7 @@ pub(crate) fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
         )),
         Line::from(Span::styled(
             "  ─────────────────────────────────────────────────────",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
             "  • Root privileges (sudo)",
@@ -86,7 +86,7 @@ pub(crate) fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
         )),
         Line::from(Span::styled(
             "  Default mode is --dry-run (no changes made).",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         )),
     ]);
     let para = Paragraph::new(text).wrap(Wrap { trim: false });

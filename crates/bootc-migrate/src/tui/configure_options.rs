@@ -72,15 +72,15 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
     for (i, (label, value, _active)) in options.iter().enumerate() {
         let selected = i == app.options_cursor;
         let prefix = if selected { "▶ " } else { "  " };
-        let fg = if selected { TEXT } else { SUBTLE };
-        let value_fg = if selected { TEAL } else { SUBTLE };
+        let fg = if selected { TEXT } else { MUTED };
+        let value_fg = if selected { TEAL } else { MUTED };
         let is_warning = label.contains('⚠');
         let label_fg = if is_warning { AMBER } else { fg };
 
         let line = Line::from(vec![
             Span::styled(
                 prefix,
-                Style::default().fg(if selected { TEAL } else { SUBTLE }),
+                Style::default().fg(if selected { TEAL } else { MUTED }),
             ),
             Span::styled(
                 format!("{:<48}", label),
