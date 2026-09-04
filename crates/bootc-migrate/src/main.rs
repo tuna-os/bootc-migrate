@@ -157,6 +157,16 @@ enum Command {
     },
 }
 
+/// What the migrator says when it finds a composefs host and takes the swap.
+///
+/// A constant because `tests/run-e2e.sh` greps for "already composefs-backed"
+/// on the live guest to prove the composefs source path was taken, and a
+/// reworded `println!` would turn that into a three-hour E2E failure with no
+/// clue attached. `image_swap_notice_matches_the_e2e_assertion` below fails in
+/// seconds instead.
+const IMAGE_SWAP_NOTICE: &str = "System is already composefs-backed — no backend conversion \
+                                 needed.\nSwapping the deployment image instead.";
+
 fn check_root_privilege() -> Result<()> {
     if !rustix::process::getuid().is_root() {
         return Err(anyhow!(
@@ -455,10 +465,7 @@ fn main() {
         // deployment", which read as a hard blocker when it actually meant
         // "the conversion is already done".
         preflight::readiness::MigrationGate::ImageSwap => {
-            println!(
-                "\nSystem is already composefs-backed — no backend conversion needed.\n\
-                 Swapping the deployment image instead."
-            );
+            println!("\n{IMAGE_SWAP_NOTICE}");
             let result = bootc_migrate_core::rebase_controller::ImageSwapConfig {
                 target_image: &target_image,
                 dry_run: args.dry_run,
@@ -702,4 +709,22 @@ fn run_system_to_flatpak_steam(dry_run: bool) -> Result<()> {
         println!("No changes made.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod image_swap_contract {
+    use super::IMAGE_SWAP_NOTICE;
+
+    /// `tests/run-e2e.sh` greps the live guest's output for these phrases to
+    /// prove a composefs host took the swap route. Rewording the notice
+    /// without updating the script would fail the E2E matrix hours later with
+    /// nothing pointing at the cause; this fails in seconds and says where.
+    #[test]
+    fn image_swap_notice_matches_the_e2e_assertion() {
+        assert!(
+            IMAGE_SWAP_NOTICE.contains("already composefs-backed"),
+            "tests/run-e2e.sh greps for \"already composefs-backed\"; update both \
+             together. Notice is: {IMAGE_SWAP_NOTICE}"
+        );
+    }
 }
