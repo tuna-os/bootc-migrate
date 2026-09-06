@@ -16,6 +16,8 @@
 //! - [`rebase_plan`] — the backend-pair routing table: which re-bases are
 //!   supported, by what strategy, and in what phase order
 //! - [`reflink`] — CoW-aware file copy (FICLONE with fallback)
+//! - [`runlog`] — per-run persistent log: stdout/stderr tee'd to a file so a
+//!   run survives the terminal session (and the reboot) that produced it
 //! - [`xattr`] — xattr-preserving copy helpers
 //! - [`ostree`] — OSTree object scanning and hashing
 //! - [`composefs`] — composefs image operations (via `bootc internals cfs`)
@@ -46,6 +48,7 @@ pub mod rebase_plan;
 pub mod reflink;
 pub mod registry;
 pub mod remap;
+pub mod runlog;
 pub mod scan;
 pub mod selinux;
 pub mod steam_flatpak;
