@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-08-27. Living document; the issue tracker is authoritative
+Status date: 2026-09-03. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 Caveat on that split, recorded because it has already misled readers: five
@@ -8,6 +8,13 @@ milestone issues are closed as completed while their exit criteria here are
 not met, because the implementation landed and the validation named in the
 issue's own scope did not. Where the two disagree, this file is currently the
 more accurate. See "Unvalidated paths" below and #186.
+
+The same caveat applies to the GitHub milestone view, more sharply. All six
+milestones are open with zero open issues and no due date, and none of the
+repository's open issues is attached to a milestone — including #187, which
+is M3's own missing exit criterion. Read on its own, that view says the
+project is finished; M2, M3, M4 and M5 below say otherwise, and they are
+right. Reconciling the two is tracked as #237.
 
 ## Vision
 
@@ -72,6 +79,21 @@ It allows the proven, renamed migrator to ship while making the newer engine's
 evidence level visible to adopters. After this release, cadence and the
 `bootc-rebase` graduation gate should be tracked separately.
 
+**Status of that gate, 2026-09-03: not started, and the cost is now
+user-visible.** The contract exists (RELEASING.md, #171) and no clause of it
+has been executed. `Cargo.toml`'s workspace version is `0.5.0`; the newest
+GitHub Release is `v0.2.0` from 2026-07-04, carrying only pre-rename
+`bootc-migrate-composefs-*` archives. So the README quick start's
+`releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz`
+returns 404, the same URL under the old asset name returns 200, and
+`ghcr.io/tuna-os/bootc-migrate:latest` refuses anonymous pulls while
+`ghcr.io/tuna-os/bootc-migrate-composefs` still serves them. Both documented
+install paths therefore fail for a new adopter, and the only artifact that
+does resolve is the pre-rename binary the README steers people away from.
+
+No release owner and no target date are recorded anywhere, which is the one
+gate clause that blocks all the others. Tracked as #236.
+
 ## Unvalidated paths (single list for release notes)
 
 Consumed by [RELEASING.md](RELEASING.md), which records the release contract
@@ -87,9 +109,9 @@ validation named in that issue's own scope never shipped.
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
-| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | never executes; currently un-coverable in CI — the guest cannot scan the target, so the gate no-ops (#191) | #67, #187, #191 |
+| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
-| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory also silently no-ops in CI for the same scan failure (#191) | #80, #191 |
+| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -187,17 +209,29 @@ alone:
   wrong.)
 - Separately, the three `bluefin:lts` cells run
   `E2E_MODE=composefs-migrate` — the MVP binary, which merges via `mergetc`
-  and has no `is_cross_base` gate at all — and no cell passes
-  `--accept-cross-base`.
+  and has no `is_cross_base` gate at all.
 - And when a cell was actually built to exercise this (#187), it uncovered a
-  third blocker that outranks both: inside the E2E guest the target-image
-  scan cannot reach ghcr.io, so `gate_cross_base` degrades to a no-op with
-  only a warning and `is_cross_base` is never evaluated at all (#191).
+  third blocker that outranked both: inside the E2E guest the target-image
+  scan could not reach ghcr.io, so `gate_cross_base` degraded to a no-op with
+  only a warning and `is_cross_base` was never evaluated at all (#191).
 
-So the honest status is that the cross-base path is not merely uncovered but
-currently **un-coverable in CI**, and the first question is #191, not the
-cell. Whether any available image pair even qualifies as cross-base under the
-`ID_LIKE` rule is still open. Tracked as #187.
+That third blocker is now fixed, which moves the honest status but does not
+change the conclusion. #191 shipped on 2026-08-28: `build_cross_base_plan`
+returns a tri-state `CrossBaseVerdict`, and `Unknown` — the unreachable-scan
+case — is refused on the same terms as a known cross-base pair rather than
+waved through. The `ostree-rebase` cell asserts that refusal (either
+"Cross-base re-base detected" or "Cannot determine whether …" is accepted;
+proceeding unguarded fails the cell), and it then opts in with
+`--accept-cross-base` to continue, so the gate's wiring now has live
+coverage in CI.
+
+What still has none is the thing the gate protects: the remap walk and the
+`/etc` reconciliation pass. Every pair in the matrix is same-lineage Fedora,
+so `is_cross_base` returns false whenever the scan succeeds, and the opt-in
+is the operator's rather than a real cross-base crossing. So the path is
+**coverable now but still uncovered**, and the open question is the one #187
+was always about: which available image pair actually qualifies as cross-base
+under the `ID_LIKE` rule. Tracked as #187.
 
 Related: [#80](https://github.com/tuna-os/bootc-migrate/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)
