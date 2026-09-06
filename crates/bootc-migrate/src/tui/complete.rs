@@ -67,7 +67,7 @@ pub fn render_complete(f: &mut ratatui::Frame, area: Rect) {
         Line::raw(""),
         Line::from(Span::styled(
             "  ─────────────────────────────────────────────────────────",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
             "  If the dry-run completed: re-run without --dry-run",
@@ -80,7 +80,7 @@ pub fn render_complete(f: &mut ratatui::Frame, area: Rect) {
         Line::raw(""),
         Line::from(Span::styled(
             "  Press [q] or [Enter] to exit.",
-            Style::default().fg(SUBTLE),
+            Style::default().fg(MUTED),
         )),
     ]);
 

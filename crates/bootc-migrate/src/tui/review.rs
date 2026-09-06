@@ -36,7 +36,7 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 "  — no changes will actually be made",
-                Style::default().fg(SUBTLE),
+                Style::default().fg(MUTED),
             ),
         ])
     } else {

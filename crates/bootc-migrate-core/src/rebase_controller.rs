@@ -49,6 +49,15 @@ fn gate_decision(gate: readiness::MigrationGate) -> Result<()> {
     match gate {
         readiness::MigrationGate::Proceed => Ok(()),
         readiness::MigrationGate::Refuse(reason) => bail!("{reason}"),
+        // This entry point is the ostree→composefs conversion specifically.
+        // A composefs host reaching it means the router picked the wrong
+        // strategy, so say which one it should have picked rather than
+        // converting a repo that is not there.
+        readiness::MigrationGate::ImageSwap => bail!(
+            "System is already composefs-backed, so there is no backend to convert. \
+             Use the image swap instead: `bootc-rebase --source-backend composefs \
+             --target-backend composefs --target-image <image>`."
+        ),
         readiness::MigrationGate::ConfirmFullCopy => {
             // bootc-rebase is non-interactive by design: no prompt, just a
             // clear instruction (the migrator binary offers the y/N prompt).
@@ -299,7 +308,7 @@ impl OstreeDeployConfig<'_> {
         println!("Checking system state...");
         let report = preflight::run_preflight_checks()?;
 
-        if !report.is_bootc_ostree && !self.force {
+        if report.booted_backend != Some(crate::rebase_plan::Backend::Ostree) && !self.force {
             bail!(
                 "System is not booted into an OSTree deployment. Cannot perform an ostree re-base."
             );
