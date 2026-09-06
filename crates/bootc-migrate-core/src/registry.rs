@@ -454,8 +454,11 @@ impl RegistryEndpoint {
     fn resolve(image_ref: &str) -> Result<Self> {
         let (host, repo, reference) = parse_image_ref(image_ref)?;
 
-        // Pick http for plain non-standard ports (local dev registries), https otherwise.
-        // We probe /v2/ to confirm and to discover any bearer challenge.
+        // Local development registries are allowed to use plain HTTP. Every other
+        // registry must use HTTPS: falling back after a TLS failure would let a
+        // network attacker turn an image pull into an unsigned plaintext fetch.
+        // We probe /v2/ to confirm reachability and to discover any bearer
+        // challenge.
         let candidates: &[&str] = if host_is_plain_http(&host) {
             &["http"]
         } else {
@@ -575,17 +578,21 @@ impl RegistryEndpoint {
     }
 }
 
-/// Hosts that should always use plain HTTP: bare IPv4 with a port, or `localhost`.
+/// Local-development hosts that are allowed to use plain HTTP.
+///
+/// Public numeric addresses must not be treated as local just because they have a
+/// port: that would allow a TLS failure to downgrade an image pull to HTTP.
 fn host_is_plain_http(host: &str) -> bool {
-    if host.starts_with("localhost") {
+    let host_only = host.rsplit_once(':').map_or(host, |(name, _)| name);
+    if host_only == "localhost" {
         return true;
     }
-    // IPv4-with-port like 10.0.2.2:5000
-    let host_only = host.split(':').next().unwrap_or(host);
-    host_only
-        .split('.')
-        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        && host_only.split('.').count() == 4
+    // IPv4-with-port like 10.0.2.2:5000. The E2E VM uses this QEMU host
+    // address; loopback and RFC1918 ranges are intentional local exceptions.
+    let Ok(ip) = host_only.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    ip.is_loopback() || ip.is_private()
 }
 
 /// Build the failure message for a registry we could not reach, naming what
@@ -1002,8 +1009,13 @@ mod tests {
         assert!(host_is_plain_http("localhost:5000"));
         assert!(host_is_plain_http("10.0.2.2:5000"));
         assert!(host_is_plain_http("127.0.0.1"));
+        assert!(host_is_plain_http("192.168.1.10:5000"));
+        assert!(host_is_plain_http("172.16.0.1:5000"));
         assert!(!host_is_plain_http("ghcr.io"));
         assert!(!host_is_plain_http("quay.io:443"));
+        assert!(!host_is_plain_http("localhost.attacker.example"));
+        assert!(!host_is_plain_http("8.8.8.8:5000"));
+        assert!(!host_is_plain_http("172.32.0.1:5000"));
         // Not a full dotted quad — must stay HTTPS.
         assert!(!host_is_plain_http("10.0.2"));
     }
