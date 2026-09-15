@@ -29,6 +29,7 @@ use std::{
 };
 use tui_big_text::{BigText, PixelSize};
 
+mod catalog;
 mod preflight;
 mod welcome;
 
@@ -90,7 +91,8 @@ const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧
 
 // ─── Target image choices ─────────────────────────────────────────────────────
 
-/// The composefs-backed image this tool migrates to.
+/// The first bundled catalog target, for assertions only.
+#[cfg(test)]
 const DAKOTA_STABLE: &str = "ghcr.io/projectbluefin/dakota:stable";
 
 /// One row on the target-image screen.
@@ -100,79 +102,56 @@ pub(crate) struct ImageChoice {
     pub label: String,
     /// The image reference, or empty for the custom row.
     pub image: String,
-    /// Why it is being offered — the detected fact that produced it.
+    /// Short backend or availability hint.
     pub note: String,
     /// Whether this row takes a typed reference.
     pub custom: bool,
+    pub backend: String,
+    pub published: bool,
 }
 
-/// Build the target list from what preflight actually found.
-///
-/// This replaced three hard-coded rows — "Dakota stable (default)", "(from
-/// LTS/XFS)" and "(from Aurora)" — which all pointed at the *same* image and
-/// differed only in a hint matched against the detected OS. The source was
-/// already detected, so the choice was asking the user to identify a system
-/// the tool had identified, and every answer led to the same place.
-///
-/// Now the detected facts produce the list, and the first row is the answer:
-/// on ostree there is one target, and on composefs the useful default is the
-/// image already booted, so a swap starts from the user's own reference
-/// instead of a blank field.
+/// Build the picker from the current JSON catalog and detected booted image.
+/// Dakota remains first on OSTree systems; a ComposeFS host leads with its
+/// current image so an image swap starts from a useful reference.
 pub(crate) fn image_choices(
     backend: Option<Backend>,
     booted_image: Option<&str>,
     detected_os: &str,
 ) -> Vec<ImageChoice> {
-    let mut choices = Vec::new();
+    image_choices_from_catalog(backend, booted_image, detected_os, catalog::load().0)
+}
 
-    match backend {
-        // Already composefs: this is an image swap, so the image in hand is
-        // the most useful starting point — usually the user wants a different
-        // tag of what they are running, which is one edit away rather than a
-        // reference typed from memory.
-        Some(Backend::Composefs) => {
-            if let Some(current) = booted_image {
-                choices.push(ImageChoice {
-                    label: "Current image (edit the tag to swap)".to_owned(),
-                    image: current.to_owned(),
-                    note: "currently booted".to_owned(),
-                    custom: false,
-                });
-            }
-            if booted_image != Some(DAKOTA_STABLE) {
-                choices.push(ImageChoice {
-                    label: "Dakota stable".to_owned(),
-                    image: DAKOTA_STABLE.to_owned(),
-                    note: "the default".to_owned(),
-                    custom: false,
-                });
-            }
-        }
-        // ostree, or preflight could not tell: the conversion has exactly one
-        // target today, so say so and name what it was matched against rather
-        // than offering the same image three times.
-        _ => {
-            // The detected source is named in the header, so this only has to
-            // say why the row is here.
-            let note = if booted_image.is_some() || detected_os != "Unknown OS" {
-                "recommended for this system".to_owned()
-            } else {
-                "the composefs-backed default".to_owned()
-            };
-            choices.push(ImageChoice {
-                label: "Dakota stable".to_owned(),
-                image: DAKOTA_STABLE.to_owned(),
-                note,
+fn image_choices_from_catalog(
+    backend: Option<Backend>,
+    booted_image: Option<&str>,
+    _detected_os: &str,
+    mut choices: Vec<ImageChoice>,
+) -> Vec<ImageChoice> {
+    // On an existing composefs system, keep the current image as the first
+    // one-click choice. Otherwise Dakota remains the known conversion path.
+    if backend == Some(Backend::Composefs)
+        && let Some(current) = booted_image
+    {
+        choices.retain(|c| c.image != current);
+        choices.insert(
+            0,
+            ImageChoice {
+                label: "Current image".into(),
+                image: current.into(),
+                note: "currently booted".into(),
                 custom: false,
-            });
-        }
+                backend: "composefs".into(),
+                published: true,
+            },
+        );
     }
-
     choices.push(ImageChoice {
-        label: "Custom…".to_owned(),
+        label: "Custom…".into(),
         image: String::new(),
-        note: "any bootc image".to_owned(),
+        note: "enter a ComposeFS-capable image".into(),
         custom: true,
+        backend: "composefs".into(),
+        published: true,
     });
     choices
 }
@@ -333,6 +312,7 @@ pub struct App {
     /// Target rows, rebuilt from the preflight report so the list reflects
     /// this system rather than a fixed menu.
     image_choices: Vec<ImageChoice>,
+    catalog_source: &'static str,
     /// What preflight found booted, shown in the header so each row's note can
     /// stay short enough not to be truncated.
     booted_backend: Option<Backend>,
@@ -342,6 +322,7 @@ pub struct App {
     image_list_state: ListState,
     custom_image: String,
     custom_image_editing: bool,
+    confirmation: String,
 
     // ConfigureOptions
     opt_dry_run: bool,
@@ -384,17 +365,20 @@ impl App {
         image_list_state.select(Some(0));
         let detected_os = detect_source_os();
         // Preflight has not run yet; this is replaced the moment it does.
-        let image_choices = image_choices(None, None, &detected_os);
+        let (rows, catalog_source) = catalog::load();
+        let image_choices = image_choices_from_catalog(None, None, &detected_os, rows);
         Self {
             screen: Screen::Welcome,
             preflight_state: None,
             detected_os,
             image_choices,
+            catalog_source,
             booted_backend: None,
             booted_image: None,
             image_list_state,
             custom_image: String::new(),
             custom_image_editing: false,
+            confirmation: String::new(),
             opt_dry_run: true,
             opt_skip_import: false,
             opt_bootloader: Bootloader::SystemdBoot,
@@ -424,6 +408,11 @@ impl App {
         }
     }
 
+    fn selected_choice(&self) -> Option<&ImageChoice> {
+        self.image_choices
+            .get(self.image_list_state.selected().unwrap_or(0))
+    }
+
     fn is_custom_selected(&self) -> bool {
         let idx = self.image_list_state.selected().unwrap_or(0);
         self.image_choices.get(idx).is_some_and(|c| c.custom)
@@ -444,9 +433,23 @@ impl App {
 
     fn build_command_args(&self) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
-        let exe =
+        let mut exe =
             std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("bootc-migrate"));
+        let ostree_target = self
+            .selected_choice()
+            .is_some_and(|c| c.backend == "ostree");
+        if ostree_target {
+            exe.set_file_name("bootc-rebase");
+            if !exe.exists() {
+                exe = std::path::PathBuf::from("bootc-rebase");
+            }
+        }
         args.push(exe.display().to_string());
+        if ostree_target {
+            args.push("rebase".to_owned());
+            args.push("--target-backend".to_owned());
+            args.push("ostree".to_owned());
+        }
         args.push("--target-image".to_owned());
         args.push(self.selected_image());
         if self.opt_dry_run {
@@ -488,7 +491,17 @@ impl App {
 
         let (tx, rx) = mpsc::channel::<MigMsg>();
         self.rx = Some(rx);
-        self.phases = default_phases();
+        self.phases = if self
+            .selected_choice()
+            .is_some_and(|c| c.backend == "ostree")
+        {
+            vec![PhaseInfo {
+                label: "OSTree image rebase",
+                status: PhaseStatus::Running,
+            }]
+        } else {
+            default_phases()
+        };
         self.log_lines.clear();
         self.log_scroll = 0;
         self.migration_done = false;
@@ -545,6 +558,12 @@ impl App {
 
     /// Parse a log line to update phase statuses.
     fn update_phases_from_line(&mut self, line: &str) {
+        if self
+            .selected_choice()
+            .is_some_and(|c| c.backend == "ostree")
+        {
+            return;
+        }
         if line.contains("Phase 0") || line.contains("=== Phase 0") {
             self.set_phase_running(0);
         } else if line.contains("=== Phase 1: Skipped") {
@@ -827,6 +846,20 @@ impl App {
         }
 
         match key {
+            KeyCode::Home => self.image_list_state.select(Some(0)),
+            KeyCode::End => self
+                .image_list_state
+                .select(Some(self.image_choices.len().saturating_sub(1))),
+            KeyCode::PageUp => {
+                let cur = self.image_list_state.selected().unwrap_or(0);
+                self.image_list_state.select(Some(cur.saturating_sub(10)));
+            }
+            KeyCode::PageDown => {
+                let cur = self.image_list_state.selected().unwrap_or(0);
+                self.image_list_state.select(Some(
+                    (cur + 10).min(self.image_choices.len().saturating_sub(1)),
+                ));
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 let cur = self.image_list_state.selected().unwrap_or(0);
                 if cur > 0 {
@@ -840,7 +873,13 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if self.is_custom_selected() && self.custom_image.is_empty() {
+                if self.selected_choice().is_some_and(|c| {
+                    !c.published
+                        || (c.backend == "ostree"
+                            && self.booted_backend == Some(Backend::Composefs))
+                }) {
+                    // Listed for discovery, but no image has been released.
+                } else if self.is_custom_selected() && self.custom_image.is_empty() {
                     self.custom_image_editing = true;
                 } else {
                     self.next_screen();
@@ -858,6 +897,26 @@ impl App {
             }
             KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
             KeyCode::Char('q') => self.show_quit_dialog = true,
+            KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                let start = self.image_list_state.selected().unwrap_or(0);
+                let target = self
+                    .image_choices
+                    .iter()
+                    .enumerate()
+                    .cycle()
+                    .skip(start + 1)
+                    .take(self.image_choices.len())
+                    .find(|(_, choice)| {
+                        choice
+                            .label
+                            .to_ascii_lowercase()
+                            .starts_with(c.to_ascii_lowercase())
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = target {
+                    self.image_list_state.select(Some(index));
+                }
+            }
             _ => {}
         }
         false
@@ -877,12 +936,8 @@ impl App {
                     self.options_cursor += 1;
                 }
             }
-            KeyCode::Char(' ') | KeyCode::Enter => {
-                self.toggle_option(self.options_cursor);
-                if key == KeyCode::Enter && self.options_cursor == NUM_OPTIONS - 1 {
-                    self.next_screen();
-                }
-            }
+            KeyCode::Char(' ') => self.toggle_option(self.options_cursor),
+            KeyCode::Enter => self.next_screen(),
             KeyCode::Right | KeyCode::Char('l') => {
                 if self.options_cursor == 2 {
                     self.opt_bootloader = Bootloader::Grub2;
@@ -918,6 +973,35 @@ impl App {
     }
 
     fn handle_review_key(&mut self, key: KeyCode) -> bool {
+        if matches!(key, KeyCode::Esc | KeyCode::Char('b')) {
+            self.confirmation.clear();
+            self.prev_screen();
+            return false;
+        }
+        if key == KeyCode::Char('q') {
+            self.show_quit_dialog = true;
+            return false;
+        }
+        if !self.opt_dry_run {
+            match key {
+                KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                    if self.confirmation.len() < 7 {
+                        self.confirmation.push(c);
+                    }
+                    return false;
+                }
+                KeyCode::Backspace if !self.confirmation.is_empty() => {
+                    self.confirmation.pop();
+                    return false;
+                }
+                KeyCode::Enter if self.confirmation == "CONFIRM" => {
+                    self.next_screen();
+                    return false;
+                }
+                KeyCode::Enter => return false,
+                _ => {}
+            }
+        }
         match key {
             KeyCode::Enter | KeyCode::Char('r') => self.next_screen(),
             KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
@@ -1066,8 +1150,9 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ],
         Screen::SelectImage => &[
             ("↑↓", "Move"),
-            ("Enter", "Select / Next"),
-            ("e / Tab", "Edit custom"),
+            ("A-Z", "Jump"),
+            ("End", "Custom"),
+            ("Enter", "Select"),
             ("b", "Back"),
             ("q", "Quit"),
         ],
@@ -1075,11 +1160,18 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("↑↓", "Move"),
             ("Space", "Toggle"),
             ("←→", "Bootloader"),
-            ("n", "Next"),
+            ("Enter", "Next"),
             ("b", "Back"),
             ("q", "Quit"),
         ],
-        Screen::Review => &[("Enter / r", "RUN"), ("b", "Back"), ("q", "Quit")],
+        Screen::Review if app.opt_dry_run => {
+            &[("Enter", "Run dry-run"), ("b", "Back"), ("q", "Quit")]
+        }
+        Screen::Review => &[
+            ("CONFIRM + Enter", "Run live"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
         Screen::Running => &[
             ("↑↓ / PgUp/Dn", "Scroll log"),
             ("Enter", "Continue (when done)"),
@@ -1119,7 +1211,7 @@ fn render_screen(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Screen::ConfigureOptions => render_configure_options(f, app, area),
         Screen::Review => render_review(f, app, area),
         Screen::Running => render_running(f, app, area),
-        Screen::Complete => render_complete(f, area),
+        Screen::Complete => render_complete(f, app, area),
         Screen::Failed => render_failed(f, app, area),
     }
 }
@@ -1380,6 +1472,21 @@ mod tests {
     }
 
     #[test]
+    fn ostree_catalog_choice_uses_rebase_route() {
+        let mut app = app_on(Screen::SelectImage);
+        let index = app
+            .image_choices
+            .iter()
+            .position(|c| c.label == "Bluefin")
+            .unwrap();
+        app.image_list_state.select(Some(index));
+        let args = app.build_command_args();
+        assert!(args[0].ends_with("bootc-rebase"));
+        assert_eq!(args[1..4], ["rebase", "--target-backend", "ostree"]);
+        assert!(args.contains(&"ghcr.io/projectbluefin/bluefin:stable".to_owned()));
+    }
+
+    #[test]
     fn custom_image_entry_via_keys() {
         let mut app = app_on(Screen::SelectImage);
         // Move to the last row ("Custom…").
@@ -1419,6 +1526,13 @@ mod tests {
     }
 
     #[test]
+    fn picker_letter_jumps_to_matching_family() {
+        let mut app = app_on(Screen::SelectImage);
+        app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(app.selected_choice().unwrap().label.starts_with("Marlin"));
+    }
+
+    #[test]
     fn option_toggles_and_bootloader_arrows() {
         let mut app = app_on(Screen::ConfigureOptions);
         assert!(app.opt_dry_run);
@@ -1437,6 +1551,40 @@ mod tests {
         // 'b' goes back.
         app.handle_key(KeyCode::Char('b'), KeyModifiers::NONE);
         assert_eq!(app.screen, Screen::ConfigureOptions);
+    }
+
+    #[test]
+    fn live_review_blocks_enter_until_exact_confirmation() {
+        let mut app = app_on(Screen::Review);
+        app.opt_dry_run = false;
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        for c in "confirm".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        assert_eq!(app.confirmation, "confirm");
+        for _ in 0..7 {
+            app.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        for c in "CONFIRM".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.confirmation, "CONFIRM");
+    }
+
+    #[test]
+    fn unpublished_catalog_entry_cannot_advance() {
+        let mut app = app_on(Screen::SelectImage);
+        let index = app
+            .image_choices
+            .iter()
+            .position(|c| c.label == "Utah")
+            .unwrap();
+        app.image_list_state.select(Some(index));
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::SelectImage);
     }
 
     #[test]
@@ -1556,7 +1704,10 @@ mod tests {
         let text = draw_to_text(&mut app);
         assert!(text.contains("Step 3 of 5"), "missing step:\n{text}");
         assert!(text.contains("Dakota stable"), "missing target:\n{text}");
-        assert!(text.contains("Custom"), "missing custom row:\n{text}");
+        assert!(
+            app.image_choices.last().is_some_and(|c| c.custom),
+            "missing custom row"
+        );
     }
 
     // ── Target-image detection ────────────────────────────────────────────
@@ -1567,7 +1718,7 @@ mod tests {
     // a question the tool could already answer, and every answer was the same.
 
     #[test]
-    fn ostree_host_is_offered_one_target_not_three_of_the_same() {
+    fn ostree_host_sees_multiple_distinct_targets() {
         let choices = image_choices(
             Some(Backend::Ostree),
             Some("ghcr.io/ublue-os/bluefin:gts"),
@@ -1578,11 +1729,9 @@ mod tests {
             .filter(|c| !c.custom)
             .map(|c| c.image.as_str())
             .collect();
-        assert_eq!(
-            targets,
-            vec![DAKOTA_STABLE],
-            "one conversion target, offered once"
-        );
+        assert!(targets.len() > 10);
+        assert!(targets.contains(&DAKOTA_STABLE));
+        assert!(targets.contains(&"ghcr.io/ublue-os/aurora:stable"));
         assert!(choices.last().is_some_and(|c| c.custom), "custom stays");
     }
 
@@ -1610,11 +1759,11 @@ mod tests {
     /// Aurora and LTS had their own rows purely to be recognised. They resolve
     /// to the same single target as any other ostree host now.
     #[test]
-    fn every_ostree_source_resolves_to_the_same_single_target() {
+    fn every_ostree_source_gets_a_catalog_with_dakota_first() {
         for os in ["Bluefin (gts)", "Aurora", "Bluefin LTS", "Unknown OS"] {
             let choices = image_choices(Some(Backend::Ostree), None, os);
             assert_eq!(choices[0].image, DAKOTA_STABLE, "for {os}");
-            assert_eq!(choices.len(), 2, "target + custom, for {os}");
+            assert!(choices.len() > 10, "catalog + custom, for {os}");
         }
     }
 

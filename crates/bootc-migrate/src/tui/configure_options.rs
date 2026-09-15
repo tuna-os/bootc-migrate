@@ -98,6 +98,10 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
         lines.push(line);
         lines.push(Line::raw(""));
     }
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ choose · Space change · Enter continue",
+        Style::default().fg(MUTED),
+    )));
 
     let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     f.render_widget(para, inner);

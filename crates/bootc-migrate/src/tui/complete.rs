@@ -7,7 +7,7 @@ use super::*;
 
 // ── Complete ──────────────────────────────────────────────────────────────────
 
-pub fn render_complete(f: &mut ratatui::Frame, area: Rect) {
+pub fn render_complete(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " ✓ Migration Complete! ",
@@ -17,10 +17,30 @@ pub fn render_complete(f: &mut ratatui::Frame, area: Rect) {
         .border_style(Style::default().fg(SUCCESS))
         .style(Style::default().bg(DARK_BG));
 
+    if app.selected_choice().is_some_and(|c| c.backend == "ostree") {
+        let message = if app.opt_dry_run {
+            "OSTree rebase dry-run completed."
+        } else {
+            "OSTree deployment staged. Reboot, then check bootc status."
+        };
+        let text = Paragraph::new(format!(
+            "\n  {message}\n\n  Target: {}\n\n  Press [q] or [Enter] to exit.",
+            app.selected_image()
+        ))
+        .style(Style::default().fg(TEXT))
+        .block(block)
+        .wrap(Wrap { trim: false });
+        f.render_widget(text, area);
+        return;
+    }
     let text = Text::from(vec![
         Line::raw(""),
         Line::from(Span::styled(
-            "  ✓  Migration completed successfully!",
+            if app.opt_dry_run {
+                "  ✓  Dry-run completed successfully!"
+            } else {
+                "  ✓  Migration completed successfully!"
+            },
             Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),

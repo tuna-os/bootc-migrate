@@ -53,36 +53,19 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(TEAL))
         .style(Style::default().bg(DARK_BG));
 
-    let label_width = app
-        .image_choices
-        .iter()
-        .map(|c| c.label.chars().count())
-        .max()
-        .unwrap_or(20)
-        .max(20);
-
     let items: Vec<ListItem> = app
         .image_choices
         .iter()
         .enumerate()
         .map(|(i, choice)| {
             let selected = app.image_list_state.selected() == Some(i);
-            let target_display = if choice.custom {
-                if app.custom_image.is_empty() {
-                    "<type your image reference>".to_owned()
-                } else {
-                    app.custom_image.clone()
-                }
-            } else {
-                choice.image.clone()
-            };
             let line = Line::from(vec![
                 Span::styled(
                     if selected { "▶ " } else { "  " },
                     Style::default().fg(if selected { TEAL } else { MUTED }),
                 ),
                 Span::styled(
-                    format!("{:<width$}", choice.label, width = label_width),
+                    format!("{:<24}", choice.label),
                     Style::default()
                         .fg(if selected { TEXT } else { MUTED })
                         .add_modifier(if selected {
@@ -91,12 +74,10 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                             Modifier::empty()
                         }),
                 ),
-                Span::styled("  →  ", Style::default().fg(MUTED)),
                 Span::styled(
-                    target_display,
-                    Style::default().fg(if selected { TEAL } else { MUTED }),
+                    format!("  {}", choice.note),
+                    Style::default().fg(if choice.published { MUTED } else { AMBER }),
                 ),
-                Span::styled(format!("   ({})", choice.note), Style::default().fg(MUTED)),
             ]);
             ListItem::new(line)
         })
@@ -135,16 +116,38 @@ pub fn render_select_image(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             Paragraph::new(Span::styled(input_text, Style::default().fg(TEXT))).block(input_block);
         f.render_widget(input_para, chunks[2]);
     } else {
-        let hint = Paragraph::new(Span::styled(
-            "  Press Enter to accept the selected target, or ↑↓ to choose another.",
-            Style::default().fg(MUTED),
-        ))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER))
-                .style(Style::default().bg(SURFACE)),
-        );
+        let choice = app.selected_choice();
+        let detail = choice
+            .map(|c| {
+                if c.backend == "ostree" && app.booted_backend == Some(Backend::Composefs) {
+                    format!(
+                        "  {}\n  OSTree return from ComposeFS is not supported. Choose another.",
+                        c.image
+                    )
+                } else if c.published {
+                    let position = app.image_list_state.selected().unwrap_or(0) + 1;
+                    format!(
+                        "  {}\n  {position}/{} · {} · ↑↓ or letter choose · Enter continue",
+                        c.image,
+                        app.image_choices.len(),
+                        app.catalog_source
+                    )
+                } else {
+                    format!(
+                        "  {} is not currently available. Choose another.\n  {}",
+                        c.label, app.catalog_source
+                    )
+                }
+            })
+            .unwrap_or_default();
+        let hint = Paragraph::new(detail)
+            .style(Style::default().fg(MUTED))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(BORDER))
+                    .style(Style::default().bg(SURFACE)),
+            );
         f.render_widget(hint, chunks[2]);
     }
 }
