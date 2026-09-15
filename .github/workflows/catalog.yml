@@ -1,0 +1,71 @@
+name: Image catalog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - catalog/**
+      - .github/workflows/catalog.yml
+  pull_request:
+    paths:
+      - catalog/**
+      - .github/workflows/catalog.yml
+  workflow_dispatch: {}
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-catalog-feed
+  cancel-in-progress: false
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install registry inspector
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Compose and validate catalog
+        run: |
+          python3 catalog/generate.py --probe --output public/images.json
+          python3 -m json.tool public/images.json >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-catalog
+          path: public/images.json
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: compose
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-catalog
+          path: catalog-output
+      - name: Publish stable raw JSON feed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin catalog-feed >/dev/null; then
+            git fetch origin catalog-feed
+            git checkout -B catalog-feed origin/catalog-feed
+          else
+            git checkout --orphan catalog-feed
+            git rm -rf .
+          fi
+          cp catalog-output/images.json images.json
+          git add images.json
+          if ! git diff --cached --quiet; then
+            git commit -m "catalog: Refresh published image feed"
+            git push origin catalog-feed
+          fi

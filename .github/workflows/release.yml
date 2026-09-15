@@ -134,7 +134,7 @@ jobs:
           name="bootc-migrate-${{ matrix.target }}"
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/bootc-migrate" "$name-bin"
-          tar -C target/${{ matrix.target }}/release -czf "dist/$name.tar.gz" bootc-migrate
+          tar -C target/${{ matrix.target }}/release -czf "dist/$name.tar.gz" bootc-migrate bootc-rebase
           sha256sum "dist/$name.tar.gz" | awk '{print $1}' > "dist/$name.sha256"
       - uses: actions/upload-artifact@v4
         with:
