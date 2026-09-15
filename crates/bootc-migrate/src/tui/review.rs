@@ -121,6 +121,21 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
         format!("  • Target image: {img}"),
         Style::default().fg(TEXT),
     )));
+    if app.is_image_swap() {
+        lines.push(Line::from(Span::styled(
+            if app.opt_dry_run {
+                "  • Preview the bootc switch to the new ComposeFS image"
+            } else {
+                "  • bootc switch will stage the new ComposeFS deployment"
+            },
+            Style::default().fg(TEXT),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  • Reboot after a live run; the previous deployment remains available",
+            Style::default().fg(TEXT),
+        )));
+        return lines;
+    }
     if app.selected_choice().is_some_and(|c| c.backend == "ostree") {
         lines.push(Line::from(Span::styled(
             "  • Stage an OSTree deployment with bootc-rebase",

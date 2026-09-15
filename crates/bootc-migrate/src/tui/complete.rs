@@ -10,21 +10,44 @@ use super::*;
 pub fn render_complete(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            " ✓ Migration Complete! ",
+            if app.opt_dry_run {
+                " ✓ Dry-run Complete! "
+            } else {
+                " ✓ Migration Complete! "
+            },
             Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(SUCCESS))
         .style(Style::default().bg(DARK_BG));
 
+    if app.opt_dry_run {
+        let text = Paragraph::new(format!(
+            "\n  ✓ Dry-run completed. No deployment was staged.\n\n  Target: {}\n\n  To stage it, restart the wizard, turn off Dry-run\n  in Options, review the command, then type CONFIRM.\n\n  Press [q] or [Enter] to exit.",
+            app.selected_image()
+        ))
+        .style(Style::default().fg(TEXT))
+        .block(block)
+        .wrap(Wrap { trim: false });
+        f.render_widget(text, area);
+        return;
+    }
+
     if app.selected_choice().is_some_and(|c| c.backend == "ostree") {
-        let message = if app.opt_dry_run {
-            "OSTree rebase dry-run completed."
-        } else {
-            "OSTree deployment staged. Reboot, then check bootc status."
-        };
+        let message = "OSTree deployment staged. Reboot, then check bootc status.";
         let text = Paragraph::new(format!(
             "\n  {message}\n\n  Target: {}\n\n  Press [q] or [Enter] to exit.",
+            app.selected_image()
+        ))
+        .style(Style::default().fg(TEXT))
+        .block(block)
+        .wrap(Wrap { trim: false });
+        f.render_widget(text, area);
+        return;
+    }
+    if app.is_image_swap() {
+        let text = Paragraph::new(format!(
+            "\n  ✓ Image swap staged.\n\n  Target: {}\n\n  Reboot to enter the new deployment. The previous\n  deployment remains available as a fallback.\n\n  Press [q] or [Enter] to exit.",
             app.selected_image()
         ))
         .style(Style::default().fg(TEXT))
@@ -36,11 +59,7 @@ pub fn render_complete(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let text = Text::from(vec![
         Line::raw(""),
         Line::from(Span::styled(
-            if app.opt_dry_run {
-                "  ✓  Dry-run completed successfully!"
-            } else {
-                "  ✓  Migration completed successfully!"
-            },
+            "  ✓  Migration completed successfully!",
             Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
@@ -88,14 +107,6 @@ pub fn render_complete(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Line::from(Span::styled(
             "  ─────────────────────────────────────────────────────────",
             Style::default().fg(MUTED),
-        )),
-        Line::from(Span::styled(
-            "  If the dry-run completed: re-run without --dry-run",
-            Style::default().fg(AMBER),
-        )),
-        Line::from(Span::styled(
-            "  to perform the actual migration.",
-            Style::default().fg(AMBER),
         )),
         Line::raw(""),
         Line::from(Span::styled(

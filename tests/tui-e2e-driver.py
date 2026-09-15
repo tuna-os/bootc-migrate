@@ -637,7 +637,8 @@ def run_wizard(args) -> None:
     # timed out watching for it).
     driver.expect(["Complete — press Enter", "MIGRATION COMPLETED"],
                   args.migration_timeout, "completion signal")
-    driver.press_until(ENTER, "Migration Complete!", 20, "running -> complete")
+    completed_title = "Dry-run Complete!" if args.dry_run else "Migration Complete!"
+    driver.press_until(ENTER, completed_title, 20, "running -> complete")
     driver.send("q", "exit TUI")
     rc = driver.wait_exit(30)
     driver.save_transcript()

@@ -413,6 +413,13 @@ impl App {
             .get(self.image_list_state.selected().unwrap_or(0))
     }
 
+    fn is_image_swap(&self) -> bool {
+        self.booted_backend == Some(Backend::Composefs)
+            && self
+                .selected_choice()
+                .is_some_and(|c| c.backend == "composefs")
+    }
+
     fn is_custom_selected(&self) -> bool {
         let idx = self.image_list_state.selected().unwrap_or(0);
         self.image_choices.get(idx).is_some_and(|c| c.custom)
@@ -491,7 +498,12 @@ impl App {
 
         let (tx, rx) = mpsc::channel::<MigMsg>();
         self.rx = Some(rx);
-        self.phases = if self
+        self.phases = if self.is_image_swap() {
+            vec![PhaseInfo {
+                label: "ComposeFS image swap",
+                status: PhaseStatus::Running,
+            }]
+        } else if self
             .selected_choice()
             .is_some_and(|c| c.backend == "ostree")
         {
@@ -558,9 +570,10 @@ impl App {
 
     /// Parse a log line to update phase statuses.
     fn update_phases_from_line(&mut self, line: &str) {
-        if self
-            .selected_choice()
-            .is_some_and(|c| c.backend == "ostree")
+        if self.is_image_swap()
+            || self
+                .selected_choice()
+                .is_some_and(|c| c.backend == "ostree")
         {
             return;
         }
@@ -1113,8 +1126,11 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 App::total_wizard_steps()
             )
         }
+        Screen::Running if app.opt_dry_run => "  Dry-run running…".to_owned(),
         Screen::Running => "  Migration running…".to_owned(),
+        Screen::Complete if app.opt_dry_run => "  Dry-run complete".to_owned(),
         Screen::Complete => "  Migration complete".to_owned(),
+        Screen::Failed if app.opt_dry_run => "  Dry-run failed".to_owned(),
         Screen::Failed => "  Migration failed".to_owned(),
     };
 
@@ -1361,9 +1377,18 @@ fn event_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            let old_screen = app.screen.clone();
             let should_quit = app.handle_key(key.code, key.modifiers);
             if should_quit {
                 break;
+            }
+            // Preflight may invoke host tools that write to the terminal
+            // while ratatui owns the alternate screen. Force a full redraw
+            // after a screen change or a manual re-check.
+            if app.screen != old_screen
+                || (old_screen == Screen::Preflight && key.code == KeyCode::Char('r'))
+            {
+                terminal.clear()?;
             }
         }
     }
@@ -1572,6 +1597,20 @@ mod tests {
             app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
         }
         assert_eq!(app.confirmation, "CONFIRM");
+    }
+
+    #[test]
+    fn composefs_swap_review_and_dry_run_result_describe_the_actual_route() {
+        let mut app = app_on(Screen::Review);
+        app.booted_backend = Some(Backend::Composefs);
+        let review = draw_to_text(&mut app);
+        assert!(review.contains("bootc switch"));
+        assert!(!review.contains("OSTree import"));
+        app.screen = Screen::Complete;
+        let result = draw_to_text(&mut app);
+        assert!(result.contains("No deployment was staged"));
+        assert!(!result.contains("sudo systemctl reboot"));
+        assert!(!result.contains("bootc-migrate commit"));
     }
 
     #[test]
@@ -1894,7 +1933,7 @@ mod tests {
         let text = draw_to_text(&mut app);
         assert!(text.contains("Preflight"), "missing phase:\n{text}");
         assert!(
-            text.contains("Migration running"),
+            text.contains("Dry-run running"),
             "missing running title:\n{text}"
         );
     }
@@ -1904,13 +1943,13 @@ mod tests {
         let mut app = app_on(Screen::Complete);
         let text = draw_to_text(&mut app);
         assert!(
-            text.contains("Migration complete"),
+            text.contains("Dry-run complete"),
             "missing complete title:\n{text}"
         );
         let mut app = app_on(Screen::Failed);
         let text = draw_to_text(&mut app);
         assert!(
-            text.contains("Migration failed"),
+            text.contains("Dry-run failed"),
             "missing failed title:\n{text}"
         );
     }
