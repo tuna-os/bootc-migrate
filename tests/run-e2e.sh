@@ -1376,6 +1376,27 @@ ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-s
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 POSTMERGEFIX
 
+    # #262: on the Fedora 44 bluefin:stable the reboot after `bootc switch`
+    # lands in the old deployment. Record what the staged deployment and the
+    # finalize units look like before the reboot, so a failure names its
+    # cause rather than its symptom.
+    step "=== ostree-rebase: staged-deployment diagnostics before the reboot (#262) ==="
+    ssh $SSH_OPTS root@localhost bash <<'PREDIAG'
+set +e
+echo '--- versions ---'
+bootc --version 2>&1; ostree --version 2>&1 | head -2
+echo '--- ostree admin status ---'
+ostree admin status 2>&1
+echo '--- /run/ostree ---'
+ls -la /run/ostree 2>&1
+head -c 1500 /run/ostree/staged-deployment 2>/dev/null; echo
+echo '--- finalize units ---'
+systemctl status --no-pager ostree-finalize-staged.service ostree-finalize-staged-hold.service 2>&1 | head -40
+echo '--- /boot/loader ---'
+ls -la /boot/loader /boot/loader/entries /boot/loader.0/entries /boot/loader.1/entries 2>&1
+findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /boot /boot/efi 2>&1
+PREDIAG
+
     step "=== ostree-rebase: rebooting into the new deployment ==="
     ssh $SSH_OPTS root@localhost "reboot" || true
     sleep 5
@@ -1397,6 +1418,25 @@ POSTMERGEFIX
         serial_failure_lines | tail -40 || true
         exit 1
     fi
+
+    # #262: what the previous boot's finalization did, read from its journal,
+    # before the assertion below turns a wrong deployment into an exit.
+    step "=== ostree-rebase: post-reboot boot diagnostics (#262) ==="
+    ssh $SSH_OPTS root@localhost bash <<'POSTDIAG'
+set +e
+echo '--- cmdline ---'
+cat /proc/cmdline
+echo '--- ostree admin status ---'
+ostree admin status 2>&1
+echo '--- /boot/loader ---'
+ls -la /boot/loader/ /boot/loader/entries/ 2>&1
+echo '--- previous boot: ostree-finalize-staged ---'
+journalctl -b -1 --no-pager -o short-monotonic \
+    -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service 2>&1 | tail -60
+echo '--- previous boot: finalize vs boot mounts at shutdown ---'
+journalctl -b -1 --no-pager -o short-monotonic 2>&1 \
+    | grep -E 'finalize|boot\.mount|boot-efi|sysroot\.mount|Unmount' | tail -40
+POSTDIAG
 
     step "=== ostree-rebase: post-reboot assertions ==="
     # Deliberately unquoted heredoc: $VM_TARGET_IMAGE must expand client-side
