@@ -265,6 +265,19 @@ const PROBE_PATHS: &[&str] = &[
     "usr/lib/bootc",
     "usr/lib/dracut/modules.d",
     "usr/lib/bootc/install",
+    // Package-manager frontends, the second lineage signal (#256).
+    "usr/bin/dnf",
+    "usr/bin/dnf5",
+    "usr/bin/dnf-3",
+    "usr/bin/microdnf",
+    "usr/bin/yum",
+    "usr/bin/rpm-ostree",
+    "usr/bin/zypper",
+    "usr/bin/apt",
+    "usr/bin/apt-get",
+    "usr/bin/dpkg",
+    "usr/bin/pacman",
+    "usr/bin/apk",
 ];
 
 /// Stream probe files for the target image from the registry without pulling full layers.
@@ -325,6 +338,7 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .exists();
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
+    probe.pkg_family = crate::scan::pkg_family_from_root(scratch.path());
 
     let dracut_modules_dir = scratch.path().join("usr/lib/dracut/modules.d");
     if dracut_modules_dir.is_dir()

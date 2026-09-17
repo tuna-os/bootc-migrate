@@ -355,7 +355,9 @@ either is imminent:
   ImageSwap) refuse a cross-family target on the same gate but apply no
   policy: their `/etc` is the native merge's, which is the same-lineage
   rule. A cross-family policy over a `bootc switch`-staged deployment would
-  reuse `etc_conflict`'s post-merge seam; not planned.
+  reuse `etc_conflict`'s post-merge seam; that is #259, one of the
+  any-base-to-any-base steps tracked in #258 (with #260 for
+  composefs → ostree and #261 for an E2E base-pair matrix).
 
 ### 1.0 — Universal migrator
 

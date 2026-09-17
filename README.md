@@ -236,12 +236,12 @@ If you're migrating a different OSTree-backed system (Aurora, Silverblue),
 point `--target-image` at the composefs-flavored equivalent.
 
 The target must share a base lineage with the source: its `ID_LIKE` must
-overlap yours. Bluefin, Dakota, Silverblue and CentOS-based images are all
-one family. The tool refuses a target from another family, for example
-Fedora → openSUSE, because the standard `/etc` merge would carry your
-Fedora configuration onto openSUSE. Pass `--accept-cross-base` to migrate
-with the cross-family `/etc` policy instead. See "Cross-family targets"
-below.
+overlap yours, or both images must ship the same package manager. Bluefin,
+Silverblue and CentOS-based images are all one dnf family. The tool
+refuses a target from another family, for example Fedora → openSUSE,
+because the standard `/etc` merge would carry your Fedora configuration
+onto openSUSE. Pass `--accept-cross-base` to migrate with the cross-family
+`/etc` policy instead. See "Cross-family targets" below.
 
 ### 2. Check readiness with a dry-run
 
@@ -348,12 +348,15 @@ the sole default with timeout 0.
 
 ### Cross-family targets
 
-`bootc-migrate` reads the target image's `os-release` before it stages
-anything. When the two `ID`/`ID_LIKE` sets share nothing (Fedora →
-openSUSE, Fedora → Debian), it refuses. The standard 3-way `/etc` merge
-keeps every file you changed on the source. Across families, that carries
-one family's package-manager, PAM, service and policy defaults onto the
-other.
+`bootc-migrate` reads the target image's `os-release` and looks for its
+package manager before it stages anything. Two images are one family when
+their `ID`/`ID_LIKE` sets overlap or when both ship the same package
+manager (dnf, zypper, apt, pacman or apk). When the sets share nothing and
+the package managers differ (Fedora → openSUSE, Fedora → Debian), it
+refuses. When one image ships no known package manager (Dakota is GNOME
+OS-based), it warns and keeps the standard merge. The standard 3-way `/etc` merge keeps every file you
+changed on the source. Across families, that carries one family's
+package-manager, PAM, service and policy defaults onto the other.
 
 With `--accept-cross-base`, Phase 4 applies the cross-family policy
 instead:
@@ -487,7 +490,7 @@ What's intentionally *not* carried forward:
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
 | Phase 5 refuses because the target kernel has no module alias for a wireless device | The image omits the driver for Wi-Fi hardware present on the source system | Fix or update the target image. Use `--force` only when alternate networking is available and losing Wi-Fi is acceptable |
-| Refused with "Cross-family re-base detected" | The target's `ID_LIKE` shares nothing with the host's | Re-run with `--accept-cross-base` to use the cross-family `/etc` policy, or pick a target from the same family |
+| Refused with "Cross-family re-base detected" | The target's `ID_LIKE` shares nothing with the host's and its package manager differs | Re-run with `--accept-cross-base` to use the cross-family `/etc` policy, or pick a target from the same family |
 | The new image boots, but `/etc` still looks like the old distribution | A cross-family migration ran with a build that predates #256 | Update the tool, boot the OSTree entry, and migrate again with `--accept-cross-base` |
 | Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate undo --full` (full cleanup including object store); then reboot into OSTree |
 

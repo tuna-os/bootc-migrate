@@ -115,10 +115,15 @@ impl CrossFamilyVerdict {
 }
 
 fn describe(base: &BaseInfo) -> String {
-    match &base.id_like {
-        Some(like) if !like.trim().is_empty() => format!("{} (ID_LIKE=\"{}\")", base.id, like),
-        _ => format!("{} (no ID_LIKE)", base.id),
-    }
+    let like = match &base.id_like {
+        Some(like) if !like.trim().is_empty() => format!("ID_LIKE=\"{like}\""),
+        _ => "no ID_LIKE".to_string(),
+    };
+    let pkg = match base.pkg_family {
+        Some(family) => format!("{}-managed", family.label()),
+        None => "no known package manager".to_string(),
+    };
+    format!("{} ({like}, {pkg})", base.id)
 }
 
 fn cross_family_refusal(plan: &CrossFamilyPlan) -> String {
@@ -166,9 +171,16 @@ pub fn build_verdict(target_image: &str) -> Result<CrossFamilyVerdict> {
         Lineage::CrossFamily => {
             CrossFamilyVerdict::CrossFamily(Box::new(CrossFamilyPlan { host, target }))
         }
+        Lineage::Unknown => CrossFamilyVerdict::Unknown(UNKNOWN_LINEAGE_REASON),
         same => CrossFamilyVerdict::SameFamily(same),
     })
 }
+
+/// The [`CrossFamilyVerdict::Unknown`] reason for [`Lineage::Unknown`]:
+/// both identities were read, and they neither overlap nor contradict.
+const UNKNOWN_LINEAGE_REASON: &str = "the two os-release identities share no ID_LIKE lineage \
+     and at least one image ships no known package manager, so the pair can be neither \
+     confirmed nor ruled out as same-family";
 
 /// The early gate the composefs routes run before anything is pulled or
 /// staged: scan the target's identity over the registry, print the
@@ -244,6 +256,15 @@ pub fn decide(
                 );
             }
             Ok(Some(plan))
+        }
+        Lineage::Unknown => {
+            eprintln!(
+                "Warning: base lineage unknown: this host is {} and the target image is {}; \
+                 {UNKNOWN_LINEAGE_REASON}. The standard /etc merge applies.",
+                describe(&host),
+                describe(&target)
+            );
+            Ok(None)
         }
         _ => Ok(None),
     }
@@ -683,12 +704,14 @@ pub fn apply_post_merge(inputs: &PostMergeInputs<'_>) -> Result<CrossFamilyRepor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::PkgFamily;
 
     fn base(id: &str, like: Option<&str>) -> BaseInfo {
         BaseInfo {
             id: id.into(),
             id_like: like.map(Into::into),
             version_id: None,
+            pkg_family: None,
         }
     }
 
@@ -930,9 +953,51 @@ mod tests {
     /// same-family and for anything it cannot compare.
     #[test]
     fn decide_table() {
-        let fedora = || Some(base("bluefin", Some("fedora")));
+        let with_pkg = |mut b: BaseInfo, pkg: PkgFamily| {
+            b.pkg_family = Some(pkg);
+            b
+        };
+        let fedora = || Some(with_pkg(base("bluefin", Some("fedora")), PkgFamily::Dnf));
         let dakota = || Some(base("dakota", Some("fedora")));
-        let suse = || Some(base("opensuse-tumbleweed", Some("opensuse suse")));
+        let suse = || {
+            Some(with_pkg(
+                base("opensuse-tumbleweed", Some("opensuse suse")),
+                PkgFamily::Zypp,
+            ))
+        };
+        // The real Bluefin LTS -> Dakota pair: no ID_LIKE overlap, both dnf.
+        let lts = || {
+            Some(with_pkg(
+                base("centos", Some("rhel fedora")),
+                PkgFamily::Dnf,
+            ))
+        };
+        let gnome_dakota = || {
+            Some(with_pkg(
+                base("bluefin-dakota", Some("org.gnome.os")),
+                PkgFamily::Dnf,
+            ))
+        };
+        assert!(decide(lts(), gnome_dakota(), false).unwrap().is_none());
+        // Unknown lineage (no evidence either way): the standard merge, never a refusal.
+        assert!(
+            decide(
+                lts(),
+                Some(base("bluefin-dakota", Some("org.gnome.os"))),
+                false
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            decide(
+                lts(),
+                Some(base("bluefin-dakota", Some("org.gnome.os"))),
+                true
+            )
+            .unwrap()
+            .is_none()
+        );
 
         // Same family: no plan, accepted or not.
         assert!(decide(fedora(), dakota(), false).unwrap().is_none());

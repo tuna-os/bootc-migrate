@@ -28,8 +28,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 - Cross-family migration on the composefs route (#256). `bootc-migrate`
   and `bootc-rebase`'s `CoreMigration`/`ImageSwap` routes now read the
-  target's `os-release` and refuse a target whose `ID`/`ID_LIKE` share
-  nothing with the host's (Fedora → openSUSE). `--accept-cross-base` (new
+  target's `os-release` and package manager and refuse a target whose
+  `ID`/`ID_LIKE` share nothing with the host's and whose package manager
+  differs (Fedora → openSUSE). Two images with the same package manager
+  are one family whatever their `ID_LIKE` says (Bluefin LTS is `centos`);
+  a pair with no evidence either way (Dakota ships no package manager)
+  warns and keeps the standard merge. `--accept-cross-base` (new
   on `bootc-migrate` and in the TUI's options) proceeds with a
   cross-family `/etc` policy in Phase 4: the target's defaults win,
   source-vendor-only files are dropped, machine state and user-added paths
