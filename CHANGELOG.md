@@ -49,6 +49,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 - `mergetc` grew a merge policy (identity-DB precedence and per-path
   states); the default behaviour is unchanged.
 
+### Fixed
+
+- Phase 4's dangling-symlink prune resolved a relative target such as
+  `/etc/os-release -> ../usr/lib/os-release` against the staged
+  deployment directory, which holds `etc` alone, and removed the link.
+  It now resolves the path the link names on the booted system against
+  the target image. openSUSE lost `os-release`, `localtime` and `termcap`
+  that way.
+
 ---
 
 ## [v0.6.0] — 2026-09-04

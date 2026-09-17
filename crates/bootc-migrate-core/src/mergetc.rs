@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs as unix_fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Suffix appended to a path whose user-modified value is being displaced by
 /// the target image's default, so the displaced value is preserved beside it
@@ -599,17 +599,26 @@ pub fn is_identity_db(rel_path: &str) -> bool {
     )
 }
 
-/// Walk `etc_dir` and remove any symlink whose target doesn't exist. The
-/// target is resolved against:
-///   - `target_root` for absolute targets pointing under `/usr/*` (the new
-///     image's read-only root)
-///   - the symlink's own parent directory for relative targets
-///   - the merged `etc_dir` itself for absolute targets pointing under
-///     `/etc/*` (the symlink references something within /etc that another
-///     merge step may or may not have produced)
+/// Walk `etc_dir` and remove any symlink whose target doesn't exist in the
+/// system the deployment will boot. A symlink is read as the *logical* path
+/// it names on the booted system (`/etc/<dir>/<target>` for a relative
+/// target, the target itself when absolute), and that path is looked up:
+///   - under `target_root` when it points under `/usr/*` (the new image's
+///     read-only root)
+///   - under the merged `etc_dir` itself when it points under `/etc/*`
+///     (something another merge step may or may not have produced)
+///   - nowhere, when it points anywhere else (`/var`, `/run`): those are
+///     populated at boot, so the link is kept
 ///
-/// Why: the 3-way merge brings forward enablement symlinks from the source
-/// OS's /etc — `/etc/systemd/system/dbus.service → /usr/lib/systemd/system/dbus-broker.service`
+/// A relative target is never resolved against the staged deployment
+/// directory on disk: that directory holds `etc` alone, so
+/// `/etc/os-release -> ../usr/lib/os-release` would look dangling there
+/// while being the most ordinary symlink an image ships (bootc-migrate#257
+/// pruned openSUSE's `os-release`, `localtime` and `termcap` that way).
+///
+/// Why prune at all: the 3-way merge brings forward enablement symlinks
+/// from the source OS's /etc —
+/// `/etc/systemd/system/dbus.service → /usr/lib/systemd/system/dbus-broker.service`
 /// (target lacks dbus-broker) or `/etc/pam.d/password-auth → /etc/authselect/password-auth`
 /// (target doesn't use authselect). Either kind leaves systemd or PAM
 /// reporting "No such file or directory" after pivot.
@@ -627,6 +636,46 @@ pub fn prune_dangling_usr_symlinks(etc_dir: &Path, target_root: &Path) -> Result
     prune_dangling_symlinks(etc_dir, target_root)
 }
 
+/// The absolute path a symlink at `/etc/<link_rel>` names on the booted
+/// system: `target` itself when absolute, else `target` applied to the
+/// link's directory with `.` and `..` folded. Pure so it is table-tested.
+pub fn logical_symlink_target(link_rel: &Path, target: &Path) -> PathBuf {
+    let base = if target.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        Path::new("/etc").join(link_rel.parent().unwrap_or(Path::new("")))
+    };
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    for comp in base.components().chain(target.components()) {
+        match comp {
+            std::path::Component::RootDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(n) => out.push(n.to_os_string()),
+        }
+    }
+    let mut p = PathBuf::from("/");
+    for n in out {
+        p.push(n);
+    }
+    p
+}
+
+/// Where a logical absolute path is looked up on disk before the boot, or
+/// `None` when it cannot be checked (populated at runtime).
+fn on_disk_location(logical: &Path, etc_root: &Path, target_root: &Path) -> Option<PathBuf> {
+    if let Ok(usr_rel) = logical.strip_prefix("/usr") {
+        Some(target_root.join("usr").join(usr_rel))
+    } else if let Ok(etc_rel) = logical.strip_prefix("/etc") {
+        Some(etc_root.join(etc_rel))
+    } else {
+        None
+    }
+}
+
 fn prune_recursive(
     dir: &Path,
     etc_root: &Path,
@@ -642,27 +691,17 @@ fn prune_recursive(
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let target_str = target.to_string_lossy().to_string();
-            let resolved = if target_str.starts_with('/') {
-                if let Some(usr_rel) = target_str.strip_prefix("/usr/") {
-                    target_root.join("usr").join(usr_rel)
-                } else if let Some(etc_rel) = target_str.strip_prefix("/etc/") {
-                    etc_root.join(etc_rel)
-                } else {
-                    // Other absolute target (e.g. /run, /var) — resolve against
-                    // target_root; if it doesn't exist there it's still likely
-                    // fine at runtime (e.g. /run/...), so skip the check.
-                    continue;
-                }
-            } else {
-                // Relative target — resolve against the symlink's parent.
-                path.parent().unwrap_or(Path::new("/")).join(&target_str)
+            let link_rel = path.strip_prefix(etc_root).unwrap_or(&path);
+            let logical = logical_symlink_target(link_rel, &target);
+            let Some(resolved) = on_disk_location(&logical, etc_root, target_root) else {
+                continue;
             };
             if fs::metadata(&resolved).is_err() {
                 eprintln!(
-                    "[phase4] pruning dangling /etc symlink: {} -> {}",
+                    "[phase4] pruning dangling /etc symlink: {} -> {} ({} is absent)",
                     path.display(),
-                    target_str
+                    target.display(),
+                    logical.display()
                 );
                 fs::remove_file(&path).with_context(|| {
                     format!("failed to remove dangling symlink {}", path.display())
@@ -1001,6 +1040,95 @@ mod tests {
         let removed = prune_dangling_symlinks(etc.path(), target.path()).unwrap();
         assert_eq!(removed, 0);
         assert!(fs::symlink_metadata(etc.path().join("foo")).is_ok());
+    }
+
+    /// Regression (bootc-migrate#257): a relative target is the path it
+    /// names on the booted system, not a path inside the staged deployment
+    /// directory (which holds `etc` alone). openSUSE's
+    /// `/etc/os-release -> ../usr/lib/os-release` was pruned that way.
+    #[test]
+    fn prune_resolves_relative_targets_against_the_target_root() {
+        let etc = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        fs::create_dir_all(target.path().join("usr/lib")).unwrap();
+        fs::write(target.path().join("usr/lib/os-release"), "ID=x\n").unwrap();
+        fs::create_dir_all(target.path().join("usr/share/zoneinfo/Etc")).unwrap();
+        fs::write(target.path().join("usr/share/zoneinfo/Etc/UTC"), "").unwrap();
+
+        unix_fs::symlink("../usr/lib/os-release", etc.path().join("os-release")).unwrap();
+        unix_fs::symlink(
+            "../usr/share/zoneinfo/Etc/UTC",
+            etc.path().join("localtime"),
+        )
+        .unwrap();
+        // Nested link, two levels up, into /usr: kept when present.
+        fs::create_dir_all(etc.path().join("ssl")).unwrap();
+        unix_fs::symlink("../../usr/lib/os-release", etc.path().join("ssl/present")).unwrap();
+        // Relative into /var: populated at boot, never pruned.
+        unix_fs::symlink(
+            "../../var/lib/ca-certificates/pem",
+            etc.path().join("ssl/certs"),
+        )
+        .unwrap();
+        // Relative into /usr that the target lacks: pruned.
+        unix_fs::symlink("../usr/share/misc/termcap", etc.path().join("termcap")).unwrap();
+        // Relative within /etc, present and absent.
+        fs::write(etc.path().join("real.conf"), "").unwrap();
+        unix_fs::symlink("real.conf", etc.path().join("alias.conf")).unwrap();
+        unix_fs::symlink("./missing.conf", etc.path().join("broken.conf")).unwrap();
+
+        let removed = prune_dangling_symlinks(etc.path(), target.path()).unwrap();
+        assert_eq!(removed, 2, "termcap and broken.conf");
+        for kept in [
+            "os-release",
+            "localtime",
+            "ssl/present",
+            "ssl/certs",
+            "alias.conf",
+        ] {
+            assert!(
+                fs::symlink_metadata(etc.path().join(kept)).is_ok(),
+                "{kept} must survive"
+            );
+        }
+        for gone in ["termcap", "broken.conf"] {
+            assert!(
+                fs::symlink_metadata(etc.path().join(gone)).is_err(),
+                "{gone}"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_symlink_target_table() {
+        let cases = [
+            ("os-release", "../usr/lib/os-release", "/usr/lib/os-release"),
+            (
+                "ssl/certs",
+                "../../var/lib/ca-certificates/pem",
+                "/var/lib/ca-certificates/pem",
+            ),
+            (
+                "pam.d/login",
+                "/etc/authselect/login",
+                "/etc/authselect/login",
+            ),
+            ("alias.conf", "real.conf", "/etc/real.conf"),
+            (
+                "systemd/system/x.service",
+                "./y.service",
+                "/etc/systemd/system/y.service",
+            ),
+            // Escaping above the root clamps at the root.
+            ("a", "../../../../usr/bin/sh", "/usr/bin/sh"),
+        ];
+        for (link, target, want) in cases {
+            assert_eq!(
+                logical_symlink_target(Path::new(link), Path::new(target)),
+                PathBuf::from(want),
+                "{link} -> {target}"
+            );
+        }
     }
 
     #[test]
