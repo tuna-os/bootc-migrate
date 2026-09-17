@@ -243,6 +243,12 @@ because the standard `/etc` merge would carry your Fedora configuration
 onto openSUSE. Pass `--accept-cross-base` to migrate with the cross-family
 `/etc` policy instead. See "Cross-family targets" below.
 
+To migrate to an image you built yourself instead of a published one, see
+[docs/local-images.md](docs/local-images.md). Serve it from a registry the
+machine can reach. An image that exists only in podman storage is not
+enough. The capability scan and the Phase 4/5 fallbacks read the target
+over the registry API.
+
 ### 2. Check readiness with a dry-run
 
 ```bash
@@ -492,6 +498,7 @@ What's intentionally *not* carried forward:
 | Phase 5 refuses because the target kernel has no module alias for a wireless device | The image omits the driver for Wi-Fi hardware present on the source system | Fix or update the target image. Use `--force` only when alternate networking is available and losing Wi-Fi is acceptable |
 | Refused with "Cross-family re-base detected" | The target's `ID_LIKE` shares nothing with the host's and its package manager differs | Re-run with `--accept-cross-base` to use the cross-family `/etc` policy, or pick a target from the same family |
 | The new image boots, but `/etc` still looks like the old distribution | A cross-family migration ran with a build that predates #256 | Update the tool, boot the OSTree entry, and migrate again with `--accept-cross-base` |
+| Phase 2 fails with "podman could not refresh" on your own image | The machine cannot pull the image, or podman rejects a plain-HTTP registry | Mark the registry insecure and confirm with a manual `podman pull` — see [docs/local-images.md](docs/local-images.md) |
 | Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate undo --full` (full cleanup including object store); then reboot into OSTree |
 
 ## Requirements
@@ -504,7 +511,9 @@ What's intentionally *not* carried forward:
 - ≥ `1.1 × ostree_repo_size` free on `/sysroot/composefs` (no reflink: 1.5×)
 - Outbound registry access for `bootc internals cfs oci pull`
   (Phase 2 fetches the target image; Phases 4–5 read artifacts from the sealed
-  mount, so no runtime registry access is needed after Phase 2)
+  mount, so no runtime registry access is needed after Phase 2). A registry on
+  your own network works too — see
+  [docs/local-images.md](docs/local-images.md)
 
 ## Building
 
