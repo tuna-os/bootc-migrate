@@ -1678,7 +1678,22 @@ REVSSH
     echo "$NVRAM" | sed 's/^/  /'
     echo "$NVRAM" | grep -qi "Linux Boot Manager" || {
         echo "FAIL: the composefs deployment's 'Linux Boot Manager' firmware entry is gone"; exit 1; }
-    CFS_KERNELS=$(ssh $SSH_OPTS root@localhost "ls -d /boot/efi/EFI/Linux/bootc_composefs-* /boot/EFI/Linux/bootc_composefs-* 2>/dev/null | wc -l")
+    # The OSTree deployment mounts nothing at /boot/efi by itself (Bluefin's
+    # own installs leave the ESP unmounted; gpt-auto may put it at /efi), so
+    # look at every usual place and fall back to mounting the ESP partition
+    # read-only by its type GUID.
+    CFS_KERNELS=$(ssh $SSH_OPTS root@localhost bash <<'ESPCHECK'
+for esp in /boot/efi /boot /efi; do
+    n=$(ls -d "$esp"/EFI/Linux/bootc_composefs-* 2>/dev/null | wc -l)
+    [ "$n" -ge 1 ] && { echo "$n"; exit 0; }
+done
+dev=$(lsblk -o PATH,PARTTYPE -l -n | awk '$2 == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+[ -n "$dev" ] || { echo 0; exit 0; }
+mkdir -p /run/e2e-esp && mount -o ro "$dev" /run/e2e-esp || { echo 0; exit 0; }
+ls -d /run/e2e-esp/EFI/Linux/bootc_composefs-* 2>/dev/null | wc -l
+umount /run/e2e-esp
+ESPCHECK
+)
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 

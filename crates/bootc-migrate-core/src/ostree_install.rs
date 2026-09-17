@@ -338,10 +338,10 @@ impl OstreeInstallConfig<'_> {
             "=== Deploy: bootc install to-existing-root ({}) ===",
             self.target_image
         );
-        let _boot_binds = bind_boot_into_physical_root()?;
         let _ = Command::new("mount")
             .args(["-o", "remount,rw", PHYSICAL_ROOT])
             .status();
+        let _boot_binds = bind_boot_into_physical_root(&esp)?;
         let argv = install_command(self.target_image, &carry_over_kargs(&cmdline));
         println!("[deploy] {}", argv.join(" "));
         let status = Command::new(&argv[0])
@@ -531,9 +531,20 @@ fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Bind the host's live `/boot` (and `/boot/efi`) into the physical root
-/// so the container, which sees `/sysroot` as `/target`, finds the boot
-/// partition and ESP where bootc expects them. Unbound on drop.
+/// Bind the host's live boot mounts into the physical root so the
+/// container, which sees `/sysroot` as `/target`, finds them where
+/// alongside mode expects them: a boot directory (or partition) at
+/// `/target/boot` and the ESP at `/target/boot/efi`. Unbound on drop.
+///
+/// A composefs host installed by `bootc install to-disk
+/// --composefs-backend` has no boot partition and mounts the ESP at
+/// `/boot` itself. Binding that `/boot` to `/target/boot` made bootc mount
+/// the same ESP a second time at `/target/boot/efi` (vfat resolves `efi`
+/// to the existing `EFI` directory) and fail with EBUSY while emptying
+/// it, because the nested `EFI` entry was the mountpoint (#263's first
+/// E2E run). For that layout the ESP is bound at `/target/boot/efi` and
+/// `/target/boot` stays the root filesystem's own directory, where bootc
+/// then puts the OSTree kernels and BLS entries.
 struct BootBinds(Vec<PathBuf>);
 
 impl Drop for BootBinds {
@@ -544,26 +555,45 @@ impl Drop for BootBinds {
     }
 }
 
-fn bind_boot_into_physical_root() -> Result<BootBinds> {
-    let mut bound = Vec::new();
+/// The bind mounts alongside mode needs, as `(live source, path under
+/// the physical root)`, for a host whose ESP is mounted at `esp`. Pure so
+/// the layouts are table-tested.
+pub fn boot_bind_plan(esp: &str, live_mounts: &[&str]) -> Vec<(String, String)> {
+    let is_mount = |p: &str| live_mounts.contains(&p);
+    if esp == "/boot" {
+        // ESP-at-/boot, no boot partition: the ESP belongs at boot/efi.
+        return vec![("/boot".to_string(), "boot/efi".to_string())];
+    }
+    let mut plan = Vec::new();
     for (live, rel) in [("/boot", "boot"), ("/boot/efi", "boot/efi")] {
-        let live = Path::new(live);
-        if !is_mountpoint(live) {
-            continue;
+        if is_mount(live) {
+            plan.push((live.to_string(), rel.to_string()));
         }
-        let target = Path::new(PHYSICAL_ROOT).join(rel);
+    }
+    if esp != "/boot/efi" && is_mount(esp) {
+        // ESP mounted somewhere unusual (/efi): still needs to be boot/efi.
+        plan.push((esp.to_string(), "boot/efi".to_string()));
+    }
+    plan
+}
+
+fn bind_boot_into_physical_root(esp: &str) -> Result<BootBinds> {
+    let live_mounts: Vec<&str> = ["/boot", "/boot/efi", "/efi", esp]
+        .into_iter()
+        .filter(|p| is_mountpoint(Path::new(p)))
+        .collect();
+    let mut bound = Vec::new();
+    for (live, rel) in boot_bind_plan(esp, &live_mounts) {
+        let target = Path::new(PHYSICAL_ROOT).join(&rel);
         if is_mountpoint(&target) {
             continue;
         }
-        fs::create_dir_all(&target)?;
+        fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
         run_checked(
-            Command::new("mount").args([
-                "--bind",
-                &live.display().to_string(),
-                &target.display().to_string(),
-            ]),
+            Command::new("mount").args(["--bind", &live, &target.display().to_string()]),
             "bind-mounting the boot partition into the physical root",
         )?;
+        println!("[deploy] bound {live} at {}", target.display());
         bound.push(target);
     }
     Ok(BootBinds(bound))
@@ -820,6 +850,39 @@ mod tests {
 
     /// The snapshot is exactly what alongside mode's ESP wipe would take
     /// from the composefs deployment, and never what bootupd writes.
+    /// The bind layout alongside mode needs, per host boot layout.
+    #[test]
+    fn boot_bind_plan_table() {
+        let pairs = |v: Vec<(String, String)>| -> Vec<(String, String)> { v };
+        // composefs-native host: ESP at /boot, no boot partition. The ESP
+        // goes to boot/efi and /target/boot stays the root fs's directory.
+        assert_eq!(
+            pairs(boot_bind_plan("/boot", &["/boot"])),
+            vec![("/boot".to_string(), "boot/efi".to_string())]
+        );
+        // Classic layout: boot partition at /boot, ESP at /boot/efi.
+        assert_eq!(
+            pairs(boot_bind_plan("/boot/efi", &["/boot", "/boot/efi"])),
+            vec![
+                ("/boot".to_string(), "boot".to_string()),
+                ("/boot/efi".to_string(), "boot/efi".to_string())
+            ]
+        );
+        // Boot partition, ESP mounted at /efi.
+        assert_eq!(
+            pairs(boot_bind_plan("/efi", &["/boot", "/efi"])),
+            vec![
+                ("/boot".to_string(), "boot".to_string()),
+                ("/efi".to_string(), "boot/efi".to_string())
+            ]
+        );
+        // /boot on the root fs, ESP mounted by bootc-migrate at /boot/efi.
+        assert_eq!(
+            pairs(boot_bind_plan("/boot/efi", &["/boot/efi"])),
+            vec![("/boot/efi".to_string(), "boot/efi".to_string())]
+        );
+    }
+
     #[test]
     fn esp_path_classification_table() {
         let cases = [
