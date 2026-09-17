@@ -1395,6 +1395,8 @@ systemctl status --no-pager ostree-finalize-staged.service ostree-finalize-stage
 echo '--- /boot/loader ---'
 ls -la /boot/loader /boot/loader/entries /boot/loader.0/entries /boot/loader.1/entries 2>&1
 findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /boot /boot/efi 2>&1
+# Diagnostics only: never let a missing path here fail the cell.
+exit 0
 PREDIAG
 
     step "=== ostree-rebase: rebooting into the new deployment ==="
@@ -1436,6 +1438,7 @@ journalctl -b -1 --no-pager -o short-monotonic \
 echo '--- previous boot: finalize vs boot mounts at shutdown ---'
 journalctl -b -1 --no-pager -o short-monotonic 2>&1 \
     | grep -E 'finalize|boot\.mount|boot-efi|sysroot\.mount|Unmount' | tail -40
+exit 0
 POSTDIAG
 
     step "=== ostree-rebase: post-reboot assertions ==="
