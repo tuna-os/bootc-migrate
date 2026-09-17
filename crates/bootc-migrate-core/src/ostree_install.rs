@@ -410,6 +410,25 @@ impl OstreeInstallConfig<'_> {
             })?;
         }
 
+        // ---- SELinux labels ----
+        // The merge and the /var copy wrote files with the labels the host
+        // had, and a composefs host may run without an SELinux policy at
+        // all (Dakota does): the fifth E2E run booted the deployment with
+        // /etc labelled default_t, and journald, resolved and every user
+        // lookup were denied. bootc labelled what it wrote with the
+        // target's policy; the same policy, run from the target image,
+        // labels what we wrote.
+        println!("=== SELinux: labelling the merged /etc and the carried /var ===");
+        match relabel_with_target_policy(self.target_image, &deploy_root, var_copied) {
+            Ok(Some(n)) => println!("[selinux] labelled {n} tree(s) with the target's policy"),
+            Ok(None) => println!("[selinux] target does not enable SELinux; nothing to label"),
+            Err(e) if self.force => eprintln!(
+                "Warning: labelling failed ({e:#}); --force given, the deployment may not boot \
+                 enforcing."
+            ),
+            Err(e) => return Err(e),
+        }
+
         // ---- ESP restore + NVRAM ----
         println!("=== Bootloader: restoring the composefs rollback entry ===");
         let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
@@ -440,6 +459,103 @@ impl OstreeInstallConfig<'_> {
         );
         Ok(())
     }
+}
+
+/// Whether the deployment boots with SELinux enabled, from its own
+/// `usr/etc/selinux/config` (the vendor copy; `etc` is the merge's).
+fn deployment_enables_selinux(deploy_root: &Path) -> bool {
+    let config = fs::read_to_string(deploy_root.join("usr/etc/selinux/config"))
+        .or_else(|_| fs::read_to_string(deploy_root.join("etc/selinux/config")));
+    match config {
+        Ok(c) => {
+            let parsed = crate::selinux::parse_selinux_config(&c);
+            matches!(
+                parsed
+                    .selinux
+                    .as_deref()
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("enforcing") | Some("permissive")
+            )
+        }
+        Err(_) => false,
+    }
+}
+
+/// The `podman run` argv that labels `paths` (host paths under
+/// [`PHYSICAL_ROOT`]) with the target image's own `setfiles` and policy,
+/// each matched against the file contexts relative to its `alt_root`, so
+/// `<deployment>/etc/passwd` is labelled as `/etc/passwd` and
+/// `<stateroot>/var/log` as `/var/log`. Pure so it is table-tested.
+pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<String>> {
+    let to_container = |p: &Path| -> String {
+        let rel = p.strip_prefix(PHYSICAL_ROOT).unwrap_or(p);
+        Path::new(CONTAINER_TARGET).join(rel).display().to_string()
+    };
+    jobs.iter()
+        .map(|(alt_root, path)| {
+            vec![
+                "podman".to_string(),
+                "run".into(),
+                "--rm".into(),
+                "--privileged".into(),
+                "--security-opt".into(),
+                "label=disable".into(),
+                "--mount".into(),
+                format!("type=bind,src={PHYSICAL_ROOT},dst={CONTAINER_TARGET}"),
+                target_image.to_string(),
+                "setfiles".into(),
+                "-F".into(),
+                "-r".into(),
+                to_container(alt_root),
+                "/etc/selinux/targeted/contexts/files/file_contexts".into(),
+                to_container(path),
+            ]
+        })
+        .collect()
+}
+
+/// Label the merged `/etc` and, when it was copied, the stateroot `/var`
+/// with the target's policy. `Ok(None)` when the target does not enable
+/// SELinux.
+fn relabel_with_target_policy(
+    target_image: &str,
+    deploy_root: &Path,
+    var_copied: bool,
+) -> Result<Option<usize>> {
+    if !deployment_enables_selinux(deploy_root) {
+        return Ok(None);
+    }
+    let policy_type = fs::read_to_string(deploy_root.join("usr/etc/selinux/config"))
+        .ok()
+        .and_then(|c| crate::selinux::parse_selinux_config(&c).selinux_type)
+        .unwrap_or_else(|| "targeted".to_string());
+    let stateroot = Path::new(OSTREE_STATEROOT_VAR)
+        .parent()
+        .unwrap_or(Path::new(PHYSICAL_ROOT))
+        .to_path_buf();
+    let etc = deploy_root.join("etc");
+    let var = Path::new(OSTREE_STATEROOT_VAR);
+    let mut jobs: Vec<(&Path, &Path)> = vec![(deploy_root, etc.as_path())];
+    if var_copied {
+        jobs.push((stateroot.as_path(), var));
+    }
+    let mut done = 0;
+    for mut argv in relabel_command(target_image, &jobs) {
+        if let Some(fc) = argv
+            .iter_mut()
+            .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
+        {
+            *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
+        }
+        println!("[selinux] {}", argv.join(" "));
+        run_checked(
+            Command::new(&argv[0]).args(&argv[1..]),
+            "setfiles in the target image",
+        )?;
+        done += 1;
+    }
+    Ok(Some(done))
 }
 
 fn which(tool: &str) -> Option<PathBuf> {
@@ -982,6 +1098,26 @@ mod tests {
             pairs(boot_bind_plan("/boot/efi", &["/boot/efi"])),
             vec![("/boot/efi".to_string(), "boot/efi".to_string())]
         );
+    }
+
+    #[test]
+    fn relabel_command_shape() {
+        let deploy = Path::new("/sysroot/ostree/deploy/default/deploy/abc.0");
+        let etc = deploy.join("etc");
+        let stateroot = Path::new("/sysroot/ostree/deploy/default");
+        let var = Path::new(OSTREE_STATEROOT_VAR);
+        let cmds = relabel_command(
+            "quay.io/fedora/fedora-bootc:44",
+            &[(deploy, etc.as_path()), (stateroot, var)],
+        );
+        assert_eq!(cmds.len(), 2);
+        let etc_cmd = cmds[0].join(" ");
+        assert!(etc_cmd.contains("setfiles -F -r /target/ostree/deploy/default/deploy/abc.0 "));
+        assert!(etc_cmd.ends_with("/target/ostree/deploy/default/deploy/abc.0/etc"));
+        assert!(etc_cmd.contains("--privileged"));
+        let var_cmd = cmds[1].join(" ");
+        assert!(var_cmd.contains("-r /target/ostree/deploy/default "));
+        assert!(var_cmd.ends_with("/target/ostree/deploy/default/var"));
     }
 
     #[test]
