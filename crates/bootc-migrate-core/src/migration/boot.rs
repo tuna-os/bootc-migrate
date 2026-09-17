@@ -1023,6 +1023,21 @@ pub fn find_esp_or_mount() -> Result<String> {
 
 /// Parse the ESP device and partition from findmnt output.
 /// Returns (disk, partition_number). Returns None if parsing fails.
+/// The block device behind an ESP mountpoint from `findmnt -n -o SOURCE
+/// -T <path>` output. The command prints one line per filesystem at the
+/// path, and a composefs host mounts its ESP on top of an autofs trigger
+/// (`systemd-1`), so the answer is the last `/dev/` line, never the whole
+/// output (the ninth E2E run of #263 handed efibootmgr the disk
+/// `systemd-1\n/dev/vda` and it exited 5).
+pub(crate) fn esp_source_device(findmnt_stdout: &str) -> Option<String> {
+    findmnt_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("/dev/"))
+        .next_back()
+        .map(str::to_string)
+}
+
 pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> {
     let output = Command::new("/usr/bin/findmnt")
         .args(["-n", "-o", "SOURCE", "-T", esp_path])
@@ -1031,10 +1046,7 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
     if !output.status.success() {
         return None;
     }
-    let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if source.is_empty() {
-        return None;
-    }
+    let source = esp_source_device(&String::from_utf8_lossy(&output.stdout))?;
 
     // Handle /dev/nvme0n1p1, /dev/loop0p1 patterns
     if source.contains("nvme") || source.contains("loop") {
@@ -1464,6 +1476,20 @@ fn migrate_to_grub2(_sys: &SystemInfo, deps: &[BootDeployment], dry_run: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn esp_source_device_skips_autofs_triggers() {
+        assert_eq!(
+            esp_source_device("systemd-1\n/dev/vda2\n"),
+            Some("/dev/vda2".to_string())
+        );
+        assert_eq!(
+            esp_source_device("/dev/nvme0n1p1\n"),
+            Some("/dev/nvme0n1p1".to_string())
+        );
+        assert_eq!(esp_source_device("systemd-1\n"), None);
+        assert_eq!(esp_source_device(""), None);
+    }
     use tempfile::tempdir;
 
     #[test]
