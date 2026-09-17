@@ -439,12 +439,14 @@ impl OstreeInstallConfig<'_> {
         // loader needs an entry to be reachable at all, so register one
         // when it is missing (idempotent, best-effort), then put GRUB
         // ahead of it.
-        if Path::new(&esp)
+        let rollback_entry = if Path::new(&esp)
             .join("EFI/systemd/systemd-bootx64.efi")
             .is_file()
         {
-            crate::migration::boot::register_systemd_boot_nvram(&esp);
-        }
+            ensure_systemd_boot_entry(self.target_image, &esp)
+        } else {
+            false
+        };
         let grub_entry = put_grub_first()?;
 
         let report = OstreeInstallReport {
@@ -465,12 +467,92 @@ impl OstreeInstallConfig<'_> {
         )
         .with_context(|| format!("writing {}", report_path.display()))?;
         println!("Report written to {}", report_path.display());
-        println!(
-            "OSTree deployment staged. Reboot to enter it; the composefs deployment stays \
-             selectable through the \"Linux Boot Manager\" firmware entry as rollback."
-        );
+        if rollback_entry {
+            println!(
+                "OSTree deployment staged. Reboot to enter it; the composefs deployment stays \
+                 selectable through the \"Linux Boot Manager\" firmware entry as rollback."
+            );
+        } else {
+            println!(
+                "OSTree deployment staged. Reboot to enter it. No firmware entry reaches the \
+                 restored composefs loader; its ESP artifacts are in place, so an entry for \
+                 \\EFI\\systemd\\systemd-bootx64.efi can be added later with efibootmgr."
+            );
+        }
         Ok(())
     }
+}
+
+/// Whether `efibootmgr -v` lists a "Linux Boot Manager" entry.
+fn systemd_boot_entry_present() -> bool {
+    Command::new("efibootmgr")
+        .arg("-v")
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.contains("Linux Boot Manager"))
+        })
+        .unwrap_or(false)
+}
+
+/// The `podman run` argv that registers "Linux Boot Manager" with the
+/// target image's efibootmgr, the way bootupd registered its own entry
+/// moments earlier from the same container. Pure so it is table-tested.
+pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec<String> {
+    vec![
+        "podman".into(),
+        "run".into(),
+        "--rm".into(),
+        "--privileged".into(),
+        "--security-opt".into(),
+        "label=disable".into(),
+        "-v".into(),
+        "/dev:/dev".into(),
+        "-v".into(),
+        "/sys:/sys".into(),
+        target_image.into(),
+        "efibootmgr".into(),
+        "--create".into(),
+        "--disk".into(),
+        disk.into(),
+        "--part".into(),
+        part.into(),
+        "--loader".into(),
+        "\\EFI\\systemd\\systemd-bootx64.efi".into(),
+        "--label".into(),
+        "Linux Boot Manager".into(),
+    ]
+}
+
+/// Make sure a firmware entry reaches the restored systemd-boot loader.
+/// The host's own efibootmgr is tried first (Phase 5's helper); on the
+/// eighth E2E run Dakota's failed with exit 5 while bootupd's, run from
+/// the target container with /dev and /sys, had just succeeded, so that
+/// is the fallback. Returns whether the entry exists afterwards.
+fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
+    crate::migration::boot::register_systemd_boot_nvram(esp);
+    if systemd_boot_entry_present() {
+        return true;
+    }
+    let Some((disk, part)) = crate::migration::boot::get_esp_disk_and_part(esp) else {
+        return false;
+    };
+    let argv = register_entry_command(target_image, &disk, &part);
+    println!("[nvram] {}", argv.join(" "));
+    match Command::new(&argv[0]).args(&argv[1..]).status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => eprintln!(
+            "Warning: efibootmgr --create in the target image failed (exit {:?}).",
+            s.code()
+        ),
+        Err(e) => eprintln!("Warning: could not run efibootmgr in the target image: {e}"),
+    }
+    let present = systemd_boot_entry_present();
+    if present {
+        println!("[nvram] registered \"Linux Boot Manager\" through the target image's efibootmgr");
+    }
+    present
 }
 
 /// Whether the deployment boots with SELinux enabled, from its own
@@ -1110,6 +1192,16 @@ mod tests {
             pairs(boot_bind_plan("/boot/efi", &["/boot/efi"])),
             vec![("/boot/efi".to_string(), "boot/efi".to_string())]
         );
+    }
+
+    #[test]
+    fn register_entry_command_shape() {
+        let argv = register_entry_command("quay.io/fedora/fedora-bootc:44", "/dev/vda", "2");
+        let joined = argv.join(" ");
+        assert!(joined.starts_with("podman run --rm --privileged"));
+        assert!(joined.contains("-v /dev:/dev -v /sys:/sys quay.io/fedora/fedora-bootc:44 efibootmgr --create --disk /dev/vda --part 2 --loader"));
+        assert_eq!(argv[argv.len() - 1], "Linux Boot Manager");
+        assert_eq!(argv[argv.len() - 3], "\\EFI\\systemd\\systemd-bootx64.efi");
     }
 
     #[test]
