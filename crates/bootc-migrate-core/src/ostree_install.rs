@@ -260,6 +260,21 @@ impl OstreeInstallConfig<'_> {
                             self.target_image
                         );
                     }
+                    // bootc's ostree backend installs its bootloader through
+                    // bootupd and refuses without it ("bootupd is required for
+                    // ostree-based installs"); Dakota, GNOME OS-based, ships
+                    // none. Refusing here costs a scan; refusing there costs
+                    // the pull, the import and an emptied ESP.
+                    if !caps.bootupd_present && !self.force {
+                        bail!(
+                            "target image {} ships no bootupd (usr/bin/bootupctl + \
+                             usr/lib/bootupd/updates); bootc's ostree backend cannot install \
+                             a bootloader from it, so this route needs a target that ships \
+                             bootupd (Bluefin, Fedora or CentOS bootc images do). Use --force \
+                             to try anyway.",
+                            self.target_image
+                        );
+                    }
                     if !caps.ostree_capable {
                         eprintln!(
                             "Warning: target image {} has no prepare-root.conf; bootc's ostree \

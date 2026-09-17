@@ -263,6 +263,8 @@ const PROBE_PATHS: &[&str] = &[
     "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
     "usr/bin/bootc",
     "usr/lib/bootc",
+    "usr/bin/bootupctl",
+    "usr/lib/bootupd/updates",
     "usr/lib/dracut/modules.d",
     "usr/lib/bootc/install",
     // Package-manager frontends, the second lineage signal (#256).
@@ -338,6 +340,10 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .exists();
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
+    // bootc's own test (`supports_bootupd`): the binary on PATH and the
+    // updates directory in the deployment.
+    probe.has_bootupd = fs::symlink_metadata(scratch.path().join("usr/bin/bootupctl")).is_ok()
+        && scratch.path().join("usr/lib/bootupd/updates").is_dir();
     probe.pkg_family = crate::scan::pkg_family_from_root(scratch.path());
 
     let dracut_modules_dir = scratch.path().join("usr/lib/dracut/modules.d");

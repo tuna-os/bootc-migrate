@@ -160,6 +160,10 @@ pub struct ProbeFiles {
     pub has_systemd_boot_payload: bool,
     /// `/usr/bin/bootc` (or `/usr/lib/bootc/`) present.
     pub has_bootc: bool,
+    /// `/usr/bin/bootupctl` present together with `/usr/lib/bootupd/updates`:
+    /// the image can install a bootloader through bootupd, which bootc's
+    /// ostree backend requires (#260).
+    pub has_bootupd: bool,
     /// Any `/usr/lib/dracut/modules.d/*composefs*` directory name present —
     /// signals the image's initramfs already integrates composefs support,
     /// so it likely doesn't need regenerating for that reason.
@@ -183,6 +187,9 @@ pub struct Capabilities {
     pub systemd_boot_payload: bool,
     /// Ships bootc (required for switch-based strategies).
     pub bootc_present: bool,
+    /// Ships bootupd (required by `bootc install` on the ostree backend,
+    /// the composefs → ostree route's engine; #260).
+    pub bootupd_present: bool,
     /// Desktop environments inventoried from session files (`gnome`, `kde`, …).
     pub desktops: Vec<String>,
     /// Base identity for cross-base gating (#67).
@@ -375,6 +382,7 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
         ostree_capable: probe.prepare_root.is_some(),
         systemd_boot_payload: probe.has_systemd_boot_payload,
         bootc_present: probe.has_bootc,
+        bootupd_present: probe.has_bootupd,
         desktops: desktops_from_sessions(&probe.session_files),
         base: probe
             .os_release
@@ -754,6 +762,7 @@ mod tests {
             session_files: vec!["gnome.desktop".into()],
             has_systemd_boot_payload: true,
             has_bootc: true,
+            has_bootupd: true,
             ..Default::default()
         };
         let caps = assemble(&probe);
@@ -761,6 +770,7 @@ mod tests {
         assert!(caps.ostree_capable);
         assert!(caps.systemd_boot_payload);
         assert!(caps.bootc_present);
+        assert!(caps.bootupd_present);
         assert_eq!(caps.desktops, vec!["gnome"]);
         assert_eq!(caps.base.as_ref().unwrap().id, "fedora");
         assert_eq!(caps.sysusers.len(), 1);

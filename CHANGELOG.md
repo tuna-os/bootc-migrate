@@ -51,7 +51,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   restores them beside the new shim/GRUB, 3-way merges `/etc` (cross-family
   policy included), copies `/var` into the new stateroot, and puts the
   GRUB firmware entry first with "Linux Boot Manager" kept as rollback.
-  Exploratory; one non-gating E2E cell (dakota composefs-native → bluefin).
+  The target must ship bootupd, which bootc's ostree backend uses to
+  install its bootloader; the route's preflight refuses a target without
+  it (Dakota ships none) and `bootc-rebase scan` reports it. Exploratory;
+  one non-gating E2E cell.
 
 ### Changed
 
