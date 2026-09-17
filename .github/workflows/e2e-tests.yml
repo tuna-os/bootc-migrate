@@ -165,7 +165,7 @@ jobs:
             cross_family: true
             expect_os_id: opensuse-tumbleweed
             allow_failure: true
-          - name: dakota -> bluefin (composefs -> ostree, OstreeInstall)
+          - name: dakota -> dakota (composefs -> ostree, OstreeInstall)
             # #260: the reverse backend switch on a host that never had an
             # OSTree deployment. The base is installed composefs-native
             # (to-disk --composefs-backend); bootc-rebase then runs the
@@ -173,8 +173,14 @@ jobs:
             # carries /etc and /var, restores the composefs ESP artifacts
             # and puts GRUB first. Exploratory, non-gating: first execution
             # of the route on a real host.
+            #
+            # The target is dakota again, on the ostree backend: the cell
+            # tests the backend conversion, not an image change (the
+            # OstreeDeploy cells already switch images). bluefin:stable is
+            # 9 GB in 270 layers; pulling it and importing it into the
+            # OSTree repo inside the VM ran past the 90-minute job limit.
             base: ghcr.io/projectbluefin/dakota:stable
-            target: ghcr.io/projectbluefin/bluefin:stable
+            target: ghcr.io/projectbluefin/dakota:stable
             mode: composefs-to-ostree
             disk_size: 40G
             allow_failure: true

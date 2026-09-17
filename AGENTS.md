@@ -70,7 +70,7 @@ Also available via just: `just watch log="e2e-luks.log"`
 | ostree re-base GNOME -> KDE (non-gating) | bluefin:stable | aurora:stable | btrfs | 40G |
 | TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 40G |
 | Cross-family migration (`E2E_CROSS_FAMILY=1`, non-gating) | bluefin:stable | bootcrew/opensuse-bootc:latest | btrfs | 40G |
-| composefs → ostree (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | bluefin:stable | btrfs | 40G |
+| composefs → ostree (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | dakota:stable | btrfs | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place. A bug in the loopback path shows

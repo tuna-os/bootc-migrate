@@ -1563,14 +1563,18 @@ REVFIX
         echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
 
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
-    if ! ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --accept-cross-base" \
-        > /tmp/rebase-out.log 2>&1; then
-        sed 's/^/[rebase] /' /tmp/rebase-out.log
-        echo "FAIL: bootc-rebase exited nonzero"
+    # Streamed, not buffered: the pull and the OSTree import are the long
+    # steps of this mode, and a job that times out inside them must leave
+    # the progress in the log.
+    ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --accept-cross-base" 2>&1 \
+        | tee /tmp/rebase-out.log \
+        | awk '{ print "[rebase] " $0; fflush() }'
+    REBASE_RC=${PIPESTATUS[0]}
+    if [ "$REBASE_RC" != "0" ]; then
+        echo "FAIL: bootc-rebase exited nonzero ($REBASE_RC)"
         exit 1
     fi
-    sed 's/^/[rebase] /' /tmp/rebase-out.log
     grep -q "OSTree deployment staged" /tmp/rebase-out.log || {
         echo "FAIL: bootc-rebase did not report a staged OSTree deployment"; exit 1; }
 
