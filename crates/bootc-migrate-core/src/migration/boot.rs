@@ -750,7 +750,7 @@ fn install_systemd_boot_from_target(
 /// Idempotent — skips if an entry by that label already exists. Best-effort: warns
 /// on failure instead of erroring, since the removable-media loader at \EFI\BOOT\BOOTX64.EFI
 /// keeps the system bootable as a last resort.
-fn register_systemd_boot_nvram(esp_path: &str) {
+pub(crate) fn register_systemd_boot_nvram(esp_path: &str) {
     if let Ok(out) = Command::new("efibootmgr").arg("-v").output() {
         let txt = String::from_utf8_lossy(&out.stdout);
         if txt.lines().any(|l| l.contains("Linux Boot Manager")) {

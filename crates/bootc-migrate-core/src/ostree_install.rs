@@ -433,6 +433,18 @@ impl OstreeInstallConfig<'_> {
         println!("=== Bootloader: restoring the composefs rollback entry ===");
         let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
         println!("[esp] {} composefs artifact(s) restored", restored.len());
+        // A composefs host installed to disk boots systemd-boot through the
+        // removable-media path and may never have had a firmware entry of
+        // its own; bootupd just replaced that path with shim. The restored
+        // loader needs an entry to be reachable at all, so register one
+        // when it is missing (idempotent, best-effort), then put GRUB
+        // ahead of it.
+        if Path::new(&esp)
+            .join("EFI/systemd/systemd-bootx64.efi")
+            .is_file()
+        {
+            crate::migration::boot::register_systemd_boot_nvram(&esp);
+        }
         let grub_entry = put_grub_first()?;
 
         let report = OstreeInstallReport {
