@@ -48,7 +48,7 @@ use std::process::Command;
 use crate::cross_family;
 use crate::mergetc::{self, IdentityMergePolicy, MergePolicy};
 use crate::migration::rollback;
-use crate::migration::{PodmanImageMount, find_esp_or_mount};
+use crate::migration::{MountGuard, PodmanImageMount, find_esp_or_mount};
 use crate::preflight;
 use crate::rebase_controller::validate_target_image;
 use crate::registry;
@@ -628,7 +628,44 @@ struct SourceEtc {
     path: PathBuf,
     via: &'static str,
     _mount: Option<PodmanImageMount>,
+    // Declared before `_tmp` so the mount is released before its directory.
+    _cfs: Option<MountGuard>,
     _tmp: Option<tempfile::TempDir>,
+}
+
+/// The fs-verity digest of the booted composefs image, from the kernel
+/// command line's `composefs=` argument. Pure so it is table-tested.
+pub fn booted_composefs_verity(cmdline: &str) -> Option<String> {
+    cmdline
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("composefs="))
+        .map(|v| v.trim_start_matches("sha512:").to_string())
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Mount the booted composefs image read-only from the host's own store
+/// (`bootc internals cfs --system mount <verity> <dir>`): its `/etc` is the
+/// factory copy behind the live one, with no registry or podman storage
+/// involved. `None` when the host is not booted from composefs or the mount
+/// fails (an older bootc without that subcommand, say).
+fn mount_booted_composefs_image() -> Option<(tempfile::TempDir, MountGuard)> {
+    let cmdline = fs::read_to_string("/proc/cmdline").ok()?;
+    let verity = booted_composefs_verity(&cmdline)?;
+    let tmp = tempfile::Builder::new()
+        .prefix("bootc-rebase-booted-image-")
+        .tempdir_in("/var/tmp")
+        .ok()?;
+    let target = tmp.path().display().to_string();
+    let status = Command::new("bootc")
+        .args(["internals", "cfs", "--system", "mount", &verity, &target])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let guard = MountGuard::new(tmp.path());
+    Some((tmp, guard))
 }
 
 /// Obtain [`SourceEtc`] from the booted image's podman mount when it is
@@ -646,8 +683,25 @@ fn source_default_etc(booted_image: Option<&str>) -> Result<Option<SourceEtc>> {
             path: live_factory.to_path_buf(),
             via: "booted image (/usr/etc)",
             _mount: None,
+            _cfs: None,
             _tmp: None,
         }));
+    }
+    // An image without /usr/etc (Dakota keeps its factory copy at /etc):
+    // the booted composefs image itself, mounted from the host's store.
+    if let Some((tmp, guard)) = mount_booted_composefs_image() {
+        for rel in ["usr/etc", "etc"] {
+            let etc = tmp.path().join(rel);
+            if etc.is_dir() && etc.join("passwd").is_file() {
+                return Ok(Some(SourceEtc {
+                    path: etc,
+                    via: "booted image (composefs mount)",
+                    _mount: None,
+                    _cfs: Some(guard),
+                    _tmp: Some(tmp),
+                }));
+            }
+        }
     }
     let Some(image) = booted_image else {
         eprintln!("Warning: booted image unknown; /etc merge keeps every live path.");
@@ -665,6 +719,7 @@ fn source_default_etc(booted_image: Option<&str>) -> Result<Option<SourceEtc>> {
                 path: etc,
                 via: "booted image (podman mount)",
                 _mount: Some(mount),
+                _cfs: None,
                 _tmp: None,
             }));
         }
@@ -677,6 +732,7 @@ fn source_default_etc(booted_image: Option<&str>) -> Result<Option<SourceEtc>> {
             path: tmp.path().to_path_buf(),
             via: "booted image (registry stream)",
             _mount: None,
+            _cfs: None,
             _tmp: Some(tmp),
         })),
         Err(e) => {
@@ -926,6 +982,24 @@ mod tests {
             pairs(boot_bind_plan("/boot/efi", &["/boot/efi"])),
             vec![("/boot/efi".to_string(), "boot/efi".to_string())]
         );
+    }
+
+    #[test]
+    fn booted_composefs_verity_table() {
+        assert_eq!(
+            booted_composefs_verity("initrd=x rw composefs=abc123 console=ttyS0"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            booted_composefs_verity("composefs=sha512:0f1e"),
+            Some("0f1e".to_string())
+        );
+        assert_eq!(
+            booted_composefs_verity("root=UUID=x ostree=/ostree/boot.1/x/0"),
+            None
+        );
+        assert_eq!(booted_composefs_verity("composefs="), None);
+        assert_eq!(booted_composefs_verity("composefs=not-hex!"), None);
     }
 
     #[test]
