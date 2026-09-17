@@ -1621,6 +1621,20 @@ ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-s
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
 echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
+# bootc-rebase labelled the merged /etc with the target's SELinux policy;
+# the files written above came after that and the composefs host has no
+# policy of its own to label them with, so label them the same way the
+# route does: setfiles from the target image, against /sysroot.
+TARGET_IMAGE_REF=$(sed -n 's/.*"target_image": *"\([^"]*\)".*/\1/p' /var/lib/bootc-rebase/ostree-install-report.json | head -1)
+DEPLOY_ROOT=$(dirname "$DEPLOY_ETC")
+if [ -n "$TARGET_IMAGE_REF" ] && [ -f "$DEPLOY_ROOT/usr/etc/selinux/config" ]; then
+    podman run --rm --privileged --security-opt label=disable \
+        --mount type=bind,src=/sysroot,dst=/target "$TARGET_IMAGE_REF" \
+        setfiles -F -r "/target${DEPLOY_ROOT#/sysroot}" \
+        /etc/selinux/targeted/contexts/files/file_contexts \
+        "/target${DEPLOY_ETC#/sysroot}/systemd" "/target${DEPLOY_ETC#/sysroot}/ssh" \
+        || { echo "FAIL: could not label the injected sshd units with the target's policy"; exit 1; }
+fi
 REVSSH
 
     step "=== composefs-to-ostree: rebooting into the OSTree deployment ==="
