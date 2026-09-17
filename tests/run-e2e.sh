@@ -31,6 +31,11 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # tests/tui-e2e-driver.py on the VM, and every downstream assertion of
 # the default mode runs unchanged — this is the cell that proves the
 # terminal event loops CI could previously only compile (ROADMAP M5).
+# "composefs-to-ostree" (#260) installs the BASE image composefs-native,
+# then runs bootc-rebase --target-backend ostree: the target's own bootc
+# builds an OSTree deployment beside the composefs root (`bootc install
+# to-existing-root`), /etc and /var are carried over, the composefs entry
+# is kept as rollback, and the reboot must land in the OSTree deployment.
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
@@ -544,8 +549,19 @@ SFDISK
     SKIP_SETUP=true
     echo "LUKS disk setup complete (bootc install to-filesystem + keyfile, GRUB source)"
 else
-    echo "Installing base OSTree bootc system to disk image..."
+    # composefs-to-ostree (#260): the base is installed composefs-native so
+    # the re-base starts from a host that never had an OSTree deployment —
+    # the general case the route exists for. The base image's own bootc
+    # must support the flag (dakota's does).
+    COMPOSEFS_INSTALL_FLAGS=""
+    if [ "$E2E_MODE" = "composefs-to-ostree" ]; then
+        echo "Installing base composefs-native bootc system to disk image..."
+        COMPOSEFS_INSTALL_FLAGS="--composefs-backend"
+    else
+        echo "Installing base OSTree bootc system to disk image..."
+    fi
     # Run bootc install to-disk using podman on the loop device
+    # shellcheck disable=SC2086 # COMPOSEFS_INSTALL_FLAGS is intentionally word-split
     sudo podman run --privileged --pid=host --rm \
         -v /dev:/dev \
         -v /var/tmp:/var/tmp \
@@ -556,6 +572,7 @@ else
         --generic-image \
         --filesystem "$FILESYSTEM" \
         --root-ssh-authorized-keys /workspace/test_key.pub \
+        $COMPOSEFS_INSTALL_FLAGS \
         "$LOOP_DEV"
 fi
 fi
@@ -608,8 +625,17 @@ sudo mount "$ROOT_PART" "$MNT_DIR"
 # Wait a second for mount to settle
 sleep 1
 
+# The stateroot's /var: OSTree keeps it under ostree/deploy/<stateroot>/var,
+# a composefs-native install under state/os/<stateroot>/var.
+if [ "$E2E_MODE" = "composefs-to-ostree" ] || [ -d "$MNT_DIR/state/os/default" ]; then
+    STATEROOT_VAR="$MNT_DIR/state/os/default/var"
+else
+    STATEROOT_VAR="$MNT_DIR/ostree/deploy/default/var"
+fi
+echo "stateroot /var on disk: $STATEROOT_VAR"
+
 # Inject SSH key to root home (which is symlinked to /var/roothome on OSTree)
-ROOT_SSH_DIR="$MNT_DIR/ostree/deploy/default/var/roothome/.ssh"
+ROOT_SSH_DIR="$STATEROOT_VAR/roothome/.ssh"
 sudo mkdir -p "$ROOT_SSH_DIR"
 sudo chmod 700 "$ROOT_SSH_DIR"
 sudo cp ./test_key.pub "$ROOT_SSH_DIR/authorized_keys"
@@ -617,7 +643,7 @@ sudo chmod 600 "$ROOT_SSH_DIR/authorized_keys"
 sudo chown -R 0:0 "$ROOT_SSH_DIR"
 
 # Ensure SSH permits root login (already in derived image, but double-check)
-SSHD_CONFIG_DIR="$MNT_DIR/ostree/deploy/default/var/etc/ssh"
+SSHD_CONFIG_DIR="$STATEROOT_VAR/etc/ssh"
 sudo mkdir -p "$SSHD_CONFIG_DIR/sshd_config.d"
 echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.conf" >/dev/null 2>&1 || true
 
@@ -625,7 +651,7 @@ echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.con
 # Written to the live /etc so it's in `cur` but NOT in the OSTree factory `old`.
 # This ensures the ComposeFS 3-way merge treats it as a user-created file and
 # preserves it across migration.
-ETC_SYSTEMD="$MNT_DIR/ostree/deploy/default/var/etc/systemd/system"
+ETC_SYSTEMD="$STATEROOT_VAR/etc/systemd/system"
 sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants"
 sudo tee "$ETC_SYSTEMD/e2e-sshd.socket" >/dev/null <<'SOCKETEOF'
 [Unit]
@@ -1494,6 +1520,169 @@ echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
 
     step "=== ostree-rebase PASSED ==="
+    exit 0
+fi
+
+# composefs -> ostree (#260, Strategy::OstreeInstall): the reverse backend
+# switch on a host that never had an OSTree deployment.
+if [ "$E2E_MODE" = "composefs-to-ostree" ]; then
+    step "=== composefs-to-ostree: asserting the base booted composefs-native ==="
+    BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+    echo "  cmdline: $BASE_CMDLINE"
+    echo "$BASE_CMDLINE" | grep -qE '(^| )composefs=' || {
+        echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
+        echo "      composefs-native install (bootc install to-disk --composefs-backend)."
+        exit 1; }
+    ssh $SSH_OPTS root@localhost "bootc status" || true
+
+    step "=== composefs-to-ostree: copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+
+    step "=== composefs-to-ostree: injecting /etc + /var fixtures ==="
+    ssh $SSH_OPTS root@localhost bash <<'REVFIX'
+set -e
+mkdir -p /etc/rebase-test
+echo "etc-rebase-value" > /etc/rebase-test/marker.conf
+echo "# e2e rebase marker" >> /etc/hostname
+mkdir -p /var/rebase-test
+echo "var-rebase-value" > /var/rebase-test/marker.txt
+useradd -m -U realuser 2>/dev/null || true
+echo "real-home-data" > "$(getent passwd realuser | cut -d: -f6)/home-marker.txt"
+echo "--- pre-rebase ESP ---"
+find /boot -maxdepth 3 \( -path '*/EFI/*' -o -path '*/loader/*' \) 2>/dev/null | head -40
+echo "--- pre-rebase NVRAM ---"
+efibootmgr 2>/dev/null || true
+REVFIX
+
+    step "=== composefs-to-ostree: --plan resolves the OstreeInstall route ==="
+    PLAN_OUT=$(ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --plan" 2>&1) || {
+        echo "FAIL: bootc-rebase --plan exited nonzero"; echo "$PLAN_OUT"; exit 1; }
+    echo "$PLAN_OUT" | sed 's/^/[plan] /'
+    echo "$PLAN_OUT" | grep -q 'Route: composefs -> ostree via OstreeInstall (implemented)' || {
+        echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
+
+    step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
+    if ! ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --accept-cross-base" \
+        > /tmp/rebase-out.log 2>&1; then
+        sed 's/^/[rebase] /' /tmp/rebase-out.log
+        echo "FAIL: bootc-rebase exited nonzero"
+        exit 1
+    fi
+    sed 's/^/[rebase] /' /tmp/rebase-out.log
+    grep -q "OSTree deployment staged" /tmp/rebase-out.log || {
+        echo "FAIL: bootc-rebase did not report a staged OSTree deployment"; exit 1; }
+
+    step "=== composefs-to-ostree: verifying the staged deployment before reboot ==="
+    ssh $SSH_OPTS root@localhost bash <<'REVDIAG'
+set +e
+echo '--- /sysroot/ostree/deploy/default/deploy ---'
+ls -la /sysroot/ostree/deploy/default/deploy/ 2>&1
+echo '--- boot loader entries (root /boot) ---'
+ls -la /sysroot/boot/loader/entries/ /boot/loader/entries/ 2>&1
+for f in /sysroot/boot/loader/entries/*.conf /boot/loader/entries/*.conf; do [ -f "$f" ] && { echo ">>> $f"; cat "$f"; }; done
+echo '--- ESP after restore ---'
+for esp in /boot/efi /boot /efi; do
+    [ -d "$esp/EFI" ] || continue
+    echo ">>> $esp"; find "$esp" -maxdepth 3 -type f 2>/dev/null | head -60
+done
+echo '--- efibootmgr ---'
+efibootmgr -v 2>&1
+echo '--- report ---'
+cat /var/lib/bootc-rebase/ostree-install-report.json 2>&1
+echo '--- merged /etc spot checks ---'
+D=$(ls -d /sysroot/ostree/deploy/default/deploy/*.0 2>/dev/null | head -1)
+grep -H "e2e rebase marker" "$D/etc/hostname" 2>&1
+ls -la "$D/etc/rebase-test/" 2>&1
+grep -H '^realuser:' "$D/etc/passwd" 2>&1
+ls "$(dirname "$D")/../var/rebase-test/" 2>&1
+REVDIAG
+
+    # e2e-sshd.socket was baked into the base image, so the source factory
+    # and the live /etc agree and the target lacks it: the 3-way merge drops
+    # it (same semantics as every other mode). Recreate it in the new
+    # deployment's /etc, post-merge, pre-reboot.
+    step "=== composefs-to-ostree: re-injecting e2e-sshd into the OSTree deployment ==="
+    ssh $SSH_OPTS root@localhost bash <<'REVSSH'
+set -e
+DEPLOY_ETC=$(ls -d /sysroot/ostree/deploy/default/deploy/*.0 | head -1)/etc
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: deployment etc dir not found"; exit 1; }
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'ListenStream=22' 'Accept=yes' '[Install]' 'WantedBy=sockets.target' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
+echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
+REVSSH
+
+    step "=== composefs-to-ostree: rebooting into the OSTree deployment ==="
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    vm_tail vm-post &
+    TAIL_PID=$!
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>&1; then
+            step "VM accessible via SSH after re-base reboot ($((SECONDS - WAIT_START))s)."
+            kill "$TAIL_PID" 2>/dev/null || true
+            TAIL_PID=""
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for post-rebase SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "ERROR: VM did not boot back after the composefs -> ostree re-base."
+        serial_failure_lines | tail -40 || true
+        tail -120 qemu.log
+        exit 1
+    fi
+
+    step "=== composefs-to-ostree: post-reboot assertions ==="
+    POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+    echo "  cmdline: $POST_CMDLINE"
+    echo "$POST_CMDLINE" | grep -qE '(^| )ostree=' || {
+        echo "FAIL: post-reboot cmdline has no ostree= — the OSTree deployment was not booted"; exit 1; }
+    if echo "$POST_CMDLINE" | grep -qE '(^| )composefs='; then
+        echo "FAIL: post-reboot cmdline still carries composefs="; exit 1
+    fi
+    ssh $SSH_OPTS root@localhost "bootc status" || true
+    BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.booted.image.image.image // empty')
+    echo "  booted image: ${BOOTED_IMG:-<none>}"
+    if ! echo "$BOOTED_IMG" | grep -qF "$TARGET_REPO_TAG"; then
+        echo "FAIL: booted image is '$BOOTED_IMG', expected $VM_TARGET_IMAGE"; exit 1
+    fi
+    ETC_MARKER=$(ssh $SSH_OPTS root@localhost "cat /etc/rebase-test/marker.conf 2>/dev/null || echo MISSING")
+    [ "$ETC_MARKER" = "etc-rebase-value" ] || { echo "FAIL: /etc fixture not carried (got: $ETC_MARKER)"; exit 1; }
+    HOSTNAME_TAIL=$(ssh $SSH_OPTS root@localhost "tail -n1 /etc/hostname")
+    [ "$HOSTNAME_TAIL" = "# e2e rebase marker" ] || { echo "FAIL: /etc/hostname edit not carried (got: $HOSTNAME_TAIL)"; exit 1; }
+    VAR_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/rebase-test/marker.txt 2>/dev/null || echo MISSING")
+    [ "$VAR_MARKER" = "var-rebase-value" ] || { echo "FAIL: /var fixture not carried (got: $VAR_MARKER)"; exit 1; }
+    HOME_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/home/realuser/home-marker.txt 2>/dev/null || echo MISSING")
+    [ "$HOME_MARKER" = "real-home-data" ] || { echo "FAIL: /var/home data not carried (got: $HOME_MARKER)"; exit 1; }
+    REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
+    [ "$REALUSER" != "MISSING" ] || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
+    echo "OK: booted the OSTree deployment of $BOOTED_IMG with /etc, /var and /var/home carried over."
+
+    # The composefs deployment must remain reachable: its firmware entry and
+    # its ESP artifacts are the rollback path this route promises.
+    NVRAM=$(ssh $SSH_OPTS root@localhost "efibootmgr -v 2>/dev/null" || true)
+    echo "$NVRAM" | sed 's/^/  /'
+    echo "$NVRAM" | grep -qi "Linux Boot Manager" || {
+        echo "FAIL: the composefs deployment's 'Linux Boot Manager' firmware entry is gone"; exit 1; }
+    CFS_KERNELS=$(ssh $SSH_OPTS root@localhost "ls -d /boot/efi/EFI/Linux/bootc_composefs-* /boot/EFI/Linux/bootc_composefs-* 2>/dev/null | wc -l")
+    [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
+    echo "OK: composefs rollback entry and ESP artifacts preserved."
+
+    step "=== composefs-to-ostree PASSED ==="
     exit 0
 fi
 

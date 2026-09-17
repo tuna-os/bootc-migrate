@@ -40,9 +40,13 @@ pub enum Strategy {
     /// Planned; not yet implemented (issue #30, scenario A analog).
     ImageSwap,
     /// Deploy the target as a plain OSTree deployment, skipping the
-    /// composefs phases (issue #30, scenario A). Implemented for
-    /// ostree→ostree; composefs→ostree remains planned.
+    /// composefs phases (issue #30, scenario A). ostree→ostree.
     OstreeDeploy,
+    /// Build a fresh OSTree deployment beside a composefs root with the
+    /// target image's own `bootc install to-existing-root`, then carry
+    /// `/etc` and `/var` over and keep the composefs entry as rollback
+    /// (issue #260). composefs→ostree.
+    OstreeInstall,
 }
 
 /// A phase selected by the re-base planner. Keeping this list independent of
@@ -130,8 +134,8 @@ const ROUTES: &[Route] = &[
     Route {
         from: Backend::Composefs,
         to: Backend::Ostree,
-        strategy: Strategy::OstreeDeploy,
-        implemented: false,
+        strategy: Strategy::OstreeInstall,
+        implemented: true,
     },
 ];
 
@@ -236,12 +240,19 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_routes_are_marked() {
-        assert!(
-            !route(Backend::Composefs, Backend::Ostree)
-                .unwrap()
-                .implemented
-        );
+    fn composefs_to_ostree_is_implemented() {
+        let r = route(Backend::Composefs, Backend::Ostree).unwrap();
+        assert!(r.implemented);
+        assert_eq!(r.strategy, Strategy::OstreeInstall);
+    }
+
+    #[test]
+    fn every_route_is_implemented() {
+        for from in [Backend::Ostree, Backend::Composefs] {
+            for to in [Backend::Ostree, Backend::Composefs] {
+                assert!(route(from, to).unwrap().implemented, "{from} -> {to}");
+            }
+        }
     }
 
     #[test]

@@ -33,7 +33,7 @@ on:
         required: false
         default: composefs-migrate
         type: choice
-        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate]
+        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree]
       cross_base:
         description: >-
           Pass --accept-cross-base and assert the cross-base remap report is

@@ -35,9 +35,10 @@ Three deliverables share the code:
 
 **M0 (MVP hardening) and M1 (same-backend re-base engine) are done.** Every
 issue under both milestones is closed. `bootc-rebase` truthfully routes all
-four backend pairs (implemented for three of them; `composefs→ostree` remains
-explicitly refused, not silently attempted) and the capability scan (#24)
-covers every proposed probe.
+four backend pairs (all four implemented since #260 landed the
+`composefs→ostree` route as `Strategy::OstreeInstall`, exploratory and
+covered by one non-gating cell) and the capability scan (#24) covers every
+proposed probe.
 
 **In progress, with an explicit boundary between what's landed and what's
 deliberately deferred** — each of M2, M3, and M5 shipped a pure/unit-testable
@@ -112,6 +113,7 @@ validation named in that issue's own scope never shipped.
 | Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
+| composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | one non-gating cell (dakota composefs-native → bluefin) asserts the route, the fixtures and the preserved rollback entry; never executed on a real host before that cell | #260 |
 | Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | one non-gating cell (bluefin → bootcrew/opensuse-bootc) asserts the refusal, the staged `/etc` shape and the booted identity; it depends on a community image and has not yet passed end to end | #256 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
@@ -331,15 +333,18 @@ RFC](https://github.com/tuna-os/bootc-migrate/issues/30) but never
 got a milestone or an issue. Recorded here so they aren't lost, not because
 either is imminent:
 
-- **`composefs→ostree` (reverse backend switch)** — going back to an
-  OSTree-backed image from a composefs system that never had an OSTree
-  deployment. `bootc-rebase`'s routing table currently refuses this route
-  explicitly (see M1 above) rather than attempting it; `undo` only reverts a
-  migration this tool itself performed, which is a much narrower problem
-  (the prior OSTree deployment is already on disk). A general
-  `composefs→ostree` route needs to initialize an OSTree repo and bootstrap a
-  deployment from a pulled image with nothing to restore from — mechanically
-  the inverse of `Strategy::OstreeDeploy` (M1), not a variant of it.
+- **`composefs→ostree` (reverse backend switch)** — now implemented as
+  `Strategy::OstreeInstall` (#260, `crates/bootc-migrate-core/src/ostree_install.rs`):
+  the target image's own `bootc install to-existing-root` runs in a
+  privileged container against the physical root (`/sysroot`), building an
+  OSTree deployment beside the composefs one with nothing to restore from;
+  the composefs ESP artifacts are snapshotted before bootc's alongside mode
+  empties the ESP and restored beside the new shim/GRUB, `/etc` is 3-way
+  merged (cross-family policy included) and `/var` copied into the
+  stateroot, and the GRUB firmware entry goes first with "Linux Boot
+  Manager" kept as rollback. `undo` remains the narrow path for a migration
+  this tool itself performed. Exploratory: one non-gating cell (dakota →
+  bluefin) and no rollback subcommand for this direction yet.
 - **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch) via `bootc switch`** —
   M3's cross-base work (#67) stays within the Fedora family, where `/etc`
   defaults, UID/GID allocation, and the init/PAM stack share lineage. The

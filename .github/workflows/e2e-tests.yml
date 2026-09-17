@@ -165,6 +165,19 @@ jobs:
             cross_family: true
             expect_os_id: opensuse-tumbleweed
             allow_failure: true
+          - name: dakota -> bluefin (composefs -> ostree, OstreeInstall)
+            # #260: the reverse backend switch on a host that never had an
+            # OSTree deployment. The base is installed composefs-native
+            # (to-disk --composefs-backend); bootc-rebase then runs the
+            # target's own `bootc install to-existing-root` alongside,
+            # carries /etc and /var, restores the composefs ESP artifacts
+            # and puts GRUB first. Exploratory, non-gating: first execution
+            # of the route on a real host.
+            base: ghcr.io/projectbluefin/dakota:stable
+            target: ghcr.io/projectbluefin/bluefin:stable
+            mode: composefs-to-ostree
+            disk_size: 40G
+            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
