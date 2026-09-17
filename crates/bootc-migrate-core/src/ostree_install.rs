@@ -636,6 +636,19 @@ struct SourceEtc {
 /// warning) when neither works, which makes the merge keep every live path
 /// (safe, but no vendor update is applied).
 fn source_default_etc(booted_image: Option<&str>) -> Result<Option<SourceEtc>> {
+    // The booted image's own factory copy, kept at /usr/etc by every
+    // ostree-container build and visible on the composefs root: no
+    // registry, no podman storage, and by definition the right "old
+    // default" for what is live in /etc.
+    let live_factory = Path::new("/usr/etc");
+    if live_factory.is_dir() && live_factory.join("passwd").is_file() {
+        return Ok(Some(SourceEtc {
+            path: live_factory.to_path_buf(),
+            via: "booted image (/usr/etc)",
+            _mount: None,
+            _tmp: None,
+        }));
+    }
     let Some(image) = booted_image else {
         eprintln!("Warning: booted image unknown; /etc merge keeps every live path.");
         return Ok(None);
@@ -674,6 +687,23 @@ fn source_default_etc(booted_image: Option<&str>) -> Result<Option<SourceEtc>> {
             Ok(None)
         }
     }
+}
+
+/// Remove everything under `dir`, keeping `dir` itself.
+fn clear_dir_contents(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.symlink_metadata()?.file_type().is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Merge `/etc` into the new deployment: old default = the booted
@@ -724,10 +754,10 @@ fn merge_etc_into(
     }
 
     // Start from a clean tree: bootc left the factory copy here, and the
-    // merge writes the whole result.
-    if out.exists() {
-        fs::remove_dir_all(&out).with_context(|| format!("clearing {}", out.display()))?;
-    }
+    // merge writes the whole result. The directory itself stays: ostree
+    // marks the deployment root immutable, so unlinking `etc` from it is
+    // EPERM (the fourth E2E run); only its contents are ours.
+    clear_dir_contents(&out).with_context(|| format!("clearing {}", out.display()))?;
     mergetc::merge_etc_files_with_policy(
         old_default,
         current,
@@ -896,6 +926,23 @@ mod tests {
             pairs(boot_bind_plan("/boot/efi", &["/boot/efi"])),
             vec![("/boot/efi".to_string(), "boot/efi".to_string())]
         );
+    }
+
+    #[test]
+    fn clear_dir_contents_keeps_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().join("etc");
+        fs::create_dir_all(etc.join("sub/deeper")).unwrap();
+        fs::write(etc.join("a"), "x").unwrap();
+        fs::write(etc.join("sub/deeper/b"), "y").unwrap();
+        std::os::unix::fs::symlink("a", etc.join("link")).unwrap();
+        clear_dir_contents(&etc).unwrap();
+        assert!(etc.is_dir());
+        assert_eq!(fs::read_dir(&etc).unwrap().count(), 0);
+        // Absent: created.
+        let fresh = dir.path().join("fresh");
+        clear_dir_contents(&fresh).unwrap();
+        assert!(fresh.is_dir());
     }
 
     #[test]
