@@ -65,6 +65,134 @@ pub fn merge_etc_files_with_overrides(
     output_dir: &Path,
     overrides: Option<&EtcDriftManifest>,
 ) -> Result<()> {
+    merge_etc_files_with_policy(
+        old_default_dir,
+        current_dir,
+        new_default_dir,
+        output_dir,
+        &MergePolicy {
+            overrides,
+            identity: IdentityMergePolicy::SourceFirst,
+        },
+    )
+}
+
+/// Which side wins when an identity-DB entry (same account name) exists on
+/// both sides of the merge.
+///
+/// Within one base family the source's numbering is the numbering every
+/// file under `/var` already carries, so the source wins and the target's
+/// new accounts are appended ([`IdentityMergePolicy::SourceFirst`], the
+/// long-standing rule). Across families the target's numbering is the one
+/// its own services, sysusers.d and policy expect; there the target wins
+/// and the source's extra accounts are appended, and
+/// [`crate::cross_family`] renumbers `/var` to match
+/// ([`IdentityMergePolicy::TargetFirst`]). Password databases
+/// (`shadow`/`gshadow`) are always source-first regardless: the target's
+/// factory copy holds locked placeholders, and taking it would lock root
+/// out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityMergePolicy {
+    SourceFirst,
+    TargetFirst,
+}
+
+/// Everything that steers one `/etc` merge beyond the three trees.
+#[derive(Debug, Clone, Copy)]
+pub struct MergePolicy<'a> {
+    /// Per-path override decisions — see [`EtcDriftManifest`].
+    pub overrides: Option<&'a EtcDriftManifest>,
+    /// Identity-DB precedence — see [`IdentityMergePolicy`].
+    pub identity: IdentityMergePolicy,
+}
+
+/// One path's presence across the three merge inputs, and whether the user
+/// changed it relative to the source's factory copy — the same judgement
+/// [`merge_etc_files_with_policy`] makes for each path, exposed so a policy
+/// can be planned over the trees before the merge runs. Pure data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EtcPathState {
+    pub path: String,
+    pub in_source_default: bool,
+    pub in_current: bool,
+    pub in_target_default: bool,
+    /// `current` differs from the source default (added, deleted, edited,
+    /// or kind-changed). Always true for a path only the user has.
+    pub user_modified: bool,
+}
+
+/// Read the three trees and describe every path in their union — see
+/// [`EtcPathState`].
+pub fn etc_path_states(
+    old_default_dir: &Path,
+    current_dir: &Path,
+    new_default_dir: &Path,
+) -> Result<Vec<EtcPathState>> {
+    let old_entries = collect_relative_entries(old_default_dir)?;
+    let cur_entries = collect_relative_entries(current_dir)?;
+    let new_entries = collect_relative_entries(new_default_dir)?;
+    let mut all_paths: Vec<String> = old_entries
+        .keys()
+        .chain(cur_entries.keys())
+        .chain(new_entries.keys())
+        .cloned()
+        .collect();
+    all_paths.sort();
+    all_paths.dedup();
+    Ok(all_paths
+        .into_iter()
+        .map(|path| {
+            let old_entry = old_entries.get(&path);
+            let cur_entry = cur_entries.get(&path);
+            EtcPathState {
+                in_source_default: old_entry.is_some(),
+                in_current: cur_entry.is_some(),
+                in_target_default: new_entries.contains_key(&path),
+                user_modified: user_modified_at(
+                    old_entry,
+                    cur_entry,
+                    old_default_dir,
+                    current_dir,
+                    &path,
+                ),
+                path,
+            }
+        })
+        .collect())
+}
+
+/// Decide whether the user has modified `rel_path` relative to the source's
+/// factory. If old==cur in *both type and content*, the user didn't touch
+/// it; otherwise (added, deleted, edited, kind change) they did.
+fn user_modified_at(
+    old_entry: Option<&DirEntry>,
+    cur_entry: Option<&DirEntry>,
+    old_default_dir: &Path,
+    current_dir: &Path,
+    rel_path: &str,
+) -> bool {
+    match (old_entry, cur_entry) {
+        (Some(DirEntry::File), Some(DirEntry::File)) => {
+            read_file_at(old_default_dir, rel_path) != read_file_at(current_dir, rel_path)
+        }
+        (Some(DirEntry::Symlink(o)), Some(DirEntry::Symlink(c))) => o != c,
+        (None, Some(_)) => true,    // user added
+        (Some(_), None) => true,    // user deleted
+        (Some(_), Some(_)) => true, // type change (file↔symlink) by user
+        (None, None) => false,
+    }
+}
+
+/// The general form of [`merge_etc_files`]: the 3-way rule, per-path
+/// overrides, and the identity-DB precedence all come from `policy`.
+pub fn merge_etc_files_with_policy(
+    old_default_dir: &Path,
+    current_dir: &Path,
+    new_default_dir: &Path,
+    output_dir: &Path,
+    policy: &MergePolicy<'_>,
+) -> Result<()> {
+    let overrides = policy.overrides;
     fs::create_dir_all(output_dir)?;
 
     // Collect all paths relative to their roots (files + symlinks).
@@ -91,16 +219,8 @@ pub fn merge_etc_files_with_overrides(
         // didn't touch it — the 3-way result is whatever `new` provides
         // (including type changes like symlink→file across image lineages).
         // Otherwise the user's version wins.
-        let user_modified = match (old_entry, cur_entry) {
-            (Some(DirEntry::File), Some(DirEntry::File)) => {
-                read_file_at(old_default_dir, rel_path) != read_file_at(current_dir, rel_path)
-            }
-            (Some(DirEntry::Symlink(o)), Some(DirEntry::Symlink(c))) => o != c,
-            (None, Some(_)) => true,    // user added
-            (Some(_), None) => true,    // user deleted
-            (Some(_), Some(_)) => true, // type change (file↔symlink) by user
-            (None, None) => false,
-        };
+        let user_modified =
+            user_modified_at(old_entry, cur_entry, old_default_dir, current_dir, rel_path);
 
         // A drift-review decision for this path overrides the default rule:
         // `Some(false)` forces the target's new default even if the user
@@ -165,7 +285,7 @@ pub fn merge_etc_files_with_overrides(
                     //   2. The reverse: target's factory file would otherwise drop
                     //      every system user the source had accumulated (e.g. polkitd).
                     // machine-id keeps current verbatim (identity preservation).
-                    merge_identity_db(rel_path, cur.as_deref(), new.as_deref())
+                    merge_identity_db(rel_path, cur.as_deref(), new.as_deref(), policy.identity)
                 } else {
                     choose_merged_content(&MergeContext {
                         old_default: old,
@@ -387,39 +507,60 @@ pub fn diff_etc_factory_vs_live(factory_dir: &Path, live_dir: &Path) -> Result<V
     Ok(drift)
 }
 
+/// Password databases keep the source's entries first whatever the policy:
+/// the target's factory copy holds locked placeholders, so letting it win
+/// would lock root (and every carried account) out on first boot.
+fn is_password_db(rel_path: &str) -> bool {
+    matches!(rel_path, "shadow" | "shadow-" | "gshadow" | "gshadow-")
+}
+
 /// Union-merge an identity-DB file by colon-delimited first field.
-/// `current` lines come first (verbatim, preserving order and state); any line
-/// from `new` whose first field isn't already represented gets appended.
-/// machine-id is opaque — return current as-is.
+/// With [`IdentityMergePolicy::SourceFirst`], `current` lines come first
+/// (verbatim, preserving order and state) and any line from `new` whose
+/// first field isn't already represented gets appended; `TargetFirst`
+/// swaps the two roles except for the password databases (see
+/// [`is_password_db`]). machine-id is opaque — return current as-is.
 fn merge_identity_db(
     rel_path: &str,
     current: Option<&[u8]>,
     new: Option<&[u8]>,
+    policy: IdentityMergePolicy,
 ) -> Option<Vec<u8>> {
     if rel_path == "machine-id" {
         return current
             .map(|s| s.to_vec())
             .or_else(|| new.map(|s| s.to_vec()));
     }
-    let cur_text = match current {
+    let (first, second) = match policy {
+        IdentityMergePolicy::TargetFirst if !is_password_db(rel_path) => (new, current),
+        _ => (current, new),
+    };
+    let first_text = match first {
         Some(c) => std::str::from_utf8(c).ok()?,
-        None => return new.map(|s| s.to_vec()),
+        None => return second.map(|s| s.to_vec()),
     };
-    let new_text = match new {
+    let second_text = match second {
         Some(n) => std::str::from_utf8(n).ok()?,
-        None => return Some(cur_text.as_bytes().to_vec()),
+        None => return Some(first_text.as_bytes().to_vec()),
     };
+    Some(union_by_first_field(first_text, second_text).into_bytes())
+}
+
+/// The union of two colon-delimited tables keyed by their first field:
+/// every line of `first` verbatim, then each line of `second` whose key
+/// `first` lacks.
+fn union_by_first_field(first: &str, second: &str) -> String {
     let key_of = |line: &str| line.split(':').next().unwrap_or("").to_string();
     let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out = String::with_capacity(cur_text.len() + new_text.len());
-    for line in cur_text.lines() {
+    let mut out = String::with_capacity(first.len() + second.len());
+    for line in first.lines() {
         if !line.is_empty() {
             keys.insert(key_of(line));
         }
         out.push_str(line);
         out.push('\n');
     }
-    for line in new_text.lines() {
+    for line in second.lines() {
         if line.is_empty() {
             continue;
         }
@@ -430,7 +571,7 @@ fn merge_identity_db(
             keys.insert(k);
         }
     }
-    Some(out.into_bytes())
+    out
 }
 
 /// Identity-database files whose contents accumulate system state and must
@@ -1487,5 +1628,145 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Cross-family identity precedence (bootc-migrate#256): the target's
+    /// numbering wins for accounts both sides define, the source's extra
+    /// accounts (every human user) are appended, and the password
+    /// databases stay source-first so root keeps its password.
+    #[test]
+    fn identity_merge_policy_table() {
+        let cur_passwd = "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n";
+        let new_passwd = "root:x:0:0::/root:/bin/bash\nwheel:x:997:997::/:/sbin/nologin\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\n";
+        let cur_shadow = "root:$6$hash:19000:0:99999:7:::\nrealuser:$6$other:19000:0:99999:7:::\n";
+        let new_shadow = "root:*:19000:0:99999:7:::\nchrony:!:19000::::::\n";
+        let cases: &[(&str, &str, &str, IdentityMergePolicy, &str)] = &[
+            (
+                "passwd",
+                cur_passwd,
+                new_passwd,
+                IdentityMergePolicy::SourceFirst,
+                "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\n",
+            ),
+            (
+                "passwd",
+                cur_passwd,
+                new_passwd,
+                IdentityMergePolicy::TargetFirst,
+                "root:x:0:0::/root:/bin/bash\nwheel:x:997:997::/:/sbin/nologin\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n",
+            ),
+            // Passwords: source-first under both policies.
+            (
+                "shadow",
+                cur_shadow,
+                new_shadow,
+                IdentityMergePolicy::TargetFirst,
+                "root:$6$hash:19000:0:99999:7:::\nrealuser:$6$other:19000:0:99999:7:::\nchrony:!:19000::::::\n",
+            ),
+            (
+                "gshadow",
+                "root:::\nwheel:::realuser\n",
+                "root:::\nwheel:::\nchrony:!::\n",
+                IdentityMergePolicy::TargetFirst,
+                "root:::\nwheel:::realuser\nchrony:!::\n",
+            ),
+            // machine-id is opaque under both.
+            (
+                "machine-id",
+                "aaaa\n",
+                "bbbb\n",
+                IdentityMergePolicy::TargetFirst,
+                "aaaa\n",
+            ),
+        ];
+        for (path, cur, new, policy, want) in cases {
+            let got = merge_identity_db(path, Some(cur.as_bytes()), Some(new.as_bytes()), *policy)
+                .unwrap();
+            assert_eq!(String::from_utf8(got).unwrap(), *want, "{path} {policy:?}");
+        }
+        // One side missing: the other is taken verbatim under either policy.
+        for policy in [
+            IdentityMergePolicy::SourceFirst,
+            IdentityMergePolicy::TargetFirst,
+        ] {
+            assert_eq!(
+                merge_identity_db("group", None, Some(b"g:x:1:\n"), policy).unwrap(),
+                b"g:x:1:\n"
+            );
+            assert_eq!(
+                merge_identity_db("group", Some(b"g:x:1:\n"), None, policy).unwrap(),
+                b"g:x:1:\n"
+            );
+        }
+    }
+
+    /// `etc_path_states` must judge "user modified" exactly as the merge
+    /// does, for every presence combination and both entry kinds.
+    #[test]
+    fn etc_path_states_table() {
+        let old = tempdir().unwrap();
+        let cur = tempdir().unwrap();
+        let new = tempdir().unwrap();
+        let w = |d: &tempfile::TempDir, p: &str, c: &str| {
+            let full = d.path().join(p);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, c).unwrap();
+        };
+        let l = |d: &tempfile::TempDir, p: &str, t: &str| {
+            std::os::unix::fs::symlink(t, d.path().join(p)).unwrap();
+        };
+        w(&old, "same", "a");
+        w(&cur, "same", "a");
+        w(&new, "same", "b");
+        w(&old, "edited", "a");
+        w(&cur, "edited", "changed");
+        w(&old, "deleted", "a");
+        w(&new, "deleted", "a");
+        w(&cur, "added/marker.conf", "x");
+        w(&new, "target-only", "t");
+        l(&old, "link", "a");
+        l(&cur, "link", "a");
+        l(&old, "relinked", "a");
+        l(&cur, "relinked", "b");
+        w(&old, "kind", "file");
+        l(&cur, "kind", "elsewhere");
+
+        let states = etc_path_states(old.path(), cur.path(), new.path()).unwrap();
+        let by_path: HashMap<&str, &EtcPathState> =
+            states.iter().map(|s| (s.path.as_str(), s)).collect();
+        // (path, in_source, in_current, in_target, user_modified)
+        let want = [
+            ("same", true, true, true, false),
+            ("edited", true, true, false, true),
+            ("deleted", true, false, true, true),
+            ("added/marker.conf", false, true, false, true),
+            ("target-only", false, false, true, false),
+            ("link", true, true, false, false),
+            ("relinked", true, true, false, true),
+            ("kind", true, true, false, true),
+        ];
+        assert_eq!(states.len(), want.len(), "{states:?}");
+        for (p, s, c, t, m) in want {
+            let st = by_path[p];
+            assert_eq!(
+                (
+                    st.in_source_default,
+                    st.in_current,
+                    st.in_target_default,
+                    st.user_modified
+                ),
+                (s, c, t, m),
+                "{p}"
+            );
+        }
+        // Sorted output, so plans and reports built on it are stable.
+        let mut paths: Vec<&str> = states.iter().map(|s| s.path.as_str()).collect();
+        let sorted = {
+            let mut v = paths.clone();
+            v.sort();
+            v
+        };
+        assert_eq!(paths, sorted);
+        paths.clear();
     }
 }

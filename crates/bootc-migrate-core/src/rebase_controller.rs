@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::cross_base;
+use crate::cross_family;
 use crate::de_controller::DesktopMigrationController;
 use crate::migration;
 use crate::preflight::{self, readiness};
@@ -24,6 +25,10 @@ pub struct CoreMigrationConfig<'a> {
     pub skip_preflight: bool,
     pub force: bool,
     pub de_migrate: bool,
+    /// Proceed onto a target from another OS family with the cross-family
+    /// `/etc` policy (bootc-migrate#256). Deliberately not implied by
+    /// `force`: that flag waives warnings, this one selects a policy.
+    pub accept_cross_base: bool,
 }
 
 /// Reject target images that would corrupt the `.origin` file it is written
@@ -90,6 +95,12 @@ impl CoreMigrationConfig<'_> {
         readiness::print_readiness(&report);
         gate_decision(readiness::gate(&report, self.force, self.skip_preflight))?;
 
+        // #256: a target from another OS family is refused unless accepted,
+        // and when accepted Phase 4 applies the cross-family /etc policy.
+        // Before the DE step and before any mutation, so a --dry-run shows
+        // the verdict too.
+        cross_family::gate(self.target_image, self.accept_cross_base)?;
+
         // #68: decide the DE step before the pipeline runs so a --dry-run shows
         // it too, and stash before anything is staged.
         let de = DesktopMigrationController::new(self.de_migrate, self.target_image);
@@ -113,7 +124,10 @@ impl CoreMigrationConfig<'_> {
             self.skip_import,
             self.bootloader,
             self.force,
-            None,
+            migration::EtcPolicy {
+                overrides: None,
+                accept_cross_base: self.accept_cross_base,
+            },
         )?;
 
         if !self.dry_run
@@ -212,6 +226,10 @@ pub struct ImageSwapConfig<'a> {
     pub dry_run: bool,
     pub force: bool,
     pub de_migrate: bool,
+    /// Proceed onto a target from another OS family (bootc-migrate#256).
+    /// This route stages with `bootc switch` and applies no `/etc` policy
+    /// of its own, so acceptance here means the native merge's result.
+    pub accept_cross_base: bool,
 }
 
 /// Scenario A' (issue #66): swap the image on a composefs-backed system —
@@ -237,6 +255,19 @@ impl ImageSwapConfig<'_> {
                 "System is not booted from a composefs deployment (/proc/cmdline has no \
                  composefs= parameter). Use --force to override, or re-run with \
                  --source-backend auto."
+            );
+        }
+
+        // #256: refuse a cross-family target unless accepted. Unlike the
+        // conversion route there is no policy to apply afterwards — `bootc
+        // switch`'s native merge stages the /etc — so say so.
+        cross_family::gate(self.target_image, self.accept_cross_base)?;
+        if self.accept_cross_base {
+            eprintln!(
+                "Note: the image swap stages /etc with `bootc switch`'s native merge; the \
+                 cross-family /etc policy is not applied on this route. If the target is \
+                 from another OS family, expect to reconcile family-specific configuration \
+                 by hand after the reboot."
             );
         }
 

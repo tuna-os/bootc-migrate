@@ -381,6 +381,50 @@ pub fn is_cross_base(host: &BaseInfo, target: &BaseInfo) -> bool {
     !(like_contains(&host.id_like, &target.id) || like_contains(&target.id_like, &host.id))
 }
 
+/// How two bases relate, at the granularity the composefs conversion route
+/// cares about (bootc-migrate#256).
+///
+/// [`is_cross_base`] answers "do these two images disagree on identity at
+/// all?" — Bluefin and Dakota do (different `ID`, diverging `wheel` gid),
+/// and the OstreeDeploy route rightly plans a remap for them. But both
+/// declare `ID_LIKE=fedora`: they are the same *family*, their `/etc`
+/// defaults share a vendor lineage, and the same-lineage 3-way merge is the
+/// right merge for them. Fedora → openSUSE shares nothing, and there the
+/// same merge quietly carries one family's `/etc` onto the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lineage {
+    /// Identical `ID`.
+    SameBase,
+    /// Different `ID`, but a shared family: one side's `ID_LIKE` names the
+    /// other's `ID`, or the two `ID_LIKE` lists intersect.
+    SameFamily,
+    /// No identity overlap at all.
+    CrossFamily,
+}
+
+/// Classify the relation between `host` and `target` — see [`Lineage`].
+pub fn lineage(host: &BaseInfo, target: &BaseInfo) -> Lineage {
+    if host.id == target.id {
+        return Lineage::SameBase;
+    }
+    let words = |like: &Option<String>| -> Vec<String> {
+        like.as_deref()
+            .map(|l| l.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let host_like = words(&host.id_like);
+    let target_like = words(&target.id_like);
+    let related = host_like.contains(&target.id)
+        || target_like.contains(&host.id)
+        || host_like.iter().any(|w| target_like.contains(w));
+    if related {
+        Lineage::SameFamily
+    } else {
+        Lineage::CrossFamily
+    }
+}
+
 /// Read this host's own base identity from `/etc/os-release` (falling back
 /// to `/usr/lib/os-release`, the same precedence os-release(5) specifies),
 /// for cross-base gating (#67) against a target image's scanned identity.
@@ -390,6 +434,17 @@ pub fn read_host_base_info() -> Option<BaseInfo> {
     read_base_info_from(
         Path::new("/etc/os-release"),
         Path::new("/usr/lib/os-release"),
+    )
+}
+
+/// Read a mounted image's base identity from its root: `usr/lib/os-release`
+/// first (the vendor copy, always present in a bootc image), then
+/// `etc/os-release`. Registry-independent — this is what Phase 4 uses to
+/// decide the cross-family policy authoritatively (#256).
+pub fn read_base_info_from_root(root: &Path) -> Option<BaseInfo> {
+    read_base_info_from(
+        &root.join("usr/lib/os-release"),
+        &root.join("etc/os-release"),
     )
 }
 
@@ -706,5 +761,77 @@ mod tests {
         assert!(!is_cross_base(&dakota, &fedora));
         assert!(is_cross_base(&fedora, &centos));
         assert!(is_cross_base(&dakota, &centos));
+    }
+
+    /// The composefs route keys on family, not bare identity: Bluefin and
+    /// Dakota are cross-base to `is_cross_base` (and correctly so for the
+    /// OstreeDeploy remap) yet same-family here, so the MVP path keeps its
+    /// same-lineage merge; Fedora and openSUSE are the pair that must not.
+    #[test]
+    fn lineage_table() {
+        let base = |id: &str, like: Option<&str>| BaseInfo {
+            id: id.into(),
+            id_like: like.map(Into::into),
+            version_id: None,
+        };
+        let cases = [
+            ("fedora", None, "fedora", None, Lineage::SameBase),
+            // Same ID, even with different ID_LIKE noise.
+            ("fedora", None, "fedora", Some("rhel"), Lineage::SameBase),
+            // One side's ID_LIKE names the other's ID (either direction).
+            (
+                "fedora",
+                None,
+                "dakota",
+                Some("fedora"),
+                Lineage::SameFamily,
+            ),
+            (
+                "dakota",
+                Some("fedora"),
+                "fedora",
+                None,
+                Lineage::SameFamily,
+            ),
+            // Both derive from the same parent: the ID_LIKE lists intersect.
+            (
+                "bluefin",
+                Some("fedora"),
+                "dakota",
+                Some("fedora"),
+                Lineage::SameFamily,
+            ),
+            (
+                "centos",
+                Some("rhel fedora"),
+                "dakota",
+                Some("fedora"),
+                Lineage::SameFamily,
+            ),
+            // No overlap anywhere.
+            (
+                "fedora",
+                None,
+                "opensuse-tumbleweed",
+                Some("opensuse suse"),
+                Lineage::CrossFamily,
+            ),
+            (
+                "bluefin",
+                Some("fedora"),
+                "opensuse-tumbleweed",
+                Some("opensuse suse"),
+                Lineage::CrossFamily,
+            ),
+            ("fedora", None, "debian", None, Lineage::CrossFamily),
+            ("ubuntu", Some("debian"), "arch", None, Lineage::CrossFamily),
+        ];
+        for (h, hl, t, tl, want) in cases {
+            assert_eq!(
+                lineage(&base(h, hl), &base(t, tl)),
+                want,
+                "{h} ({hl:?}) -> {t} ({tl:?})"
+            );
+        }
     }
 }

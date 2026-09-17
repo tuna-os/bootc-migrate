@@ -24,8 +24,26 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ## [Unreleased]
 
-Nothing yet. Work lands here until a version bump in `Cargo.toml`
-merges to `main`, which is what cuts the release — see RELEASING.md.
+### Added
+
+- Cross-family migration on the composefs route (#256). `bootc-migrate`
+  and `bootc-rebase`'s `CoreMigration`/`ImageSwap` routes now read the
+  target's `os-release` and refuse a target whose `ID`/`ID_LIKE` share
+  nothing with the host's (Fedora → openSUSE). `--accept-cross-base` (new
+  on `bootc-migrate` and in the TUI's options) proceeds with a
+  cross-family `/etc` policy in Phase 4: the target's defaults win,
+  source-vendor-only files are dropped, machine state and user-added paths
+  are carried, identity databases merge target-first with the source's
+  accounts appended, `/var` ownership is renumbered to the target's ids,
+  displaced edits are kept as `.rebase-old` sidecars, and a first-boot
+  unit relabels for SELinux (or defers the `/var` remap) when needed. A
+  JSON report is written beside the deployment. Non-gating E2E cell:
+  bluefin → `ghcr.io/bootcrew/opensuse-bootc`.
+
+### Changed
+
+- `mergetc` grew a merge policy (identity-DB precedence and per-path
+  states); the default behaviour is unchanged.
 
 ---
 

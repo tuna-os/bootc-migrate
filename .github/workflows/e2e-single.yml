@@ -42,6 +42,20 @@ on:
         required: false
         default: false
         type: boolean
+      cross_family:
+        description: >-
+          Cross-family pair (#256, composefs-migrate mode only): assert the
+          gate refuses without --accept-cross-base, opt in, and check the
+          cross-family /etc policy before and after the reboot.
+        required: false
+        default: false
+        type: boolean
+      expect_os_id:
+        description: >-
+          os-release ID the migrated system must report (cross_family only,
+          e.g. opensuse-tumbleweed). Empty skips the identity assertion.
+        required: false
+        default: ""
       runner:
         description: >-
           Runner override for THIS dispatch only (e.g. ubuntu-24.04, or a
@@ -161,6 +175,8 @@ jobs:
             DISK_SIZE="${{ inputs.disk_size }}" \
             E2E_MODE="${{ inputs.mode }}" \
             E2E_CROSS_BASE="${{ inputs.cross_base && '1' || '0' }}" \
+            E2E_CROSS_FAMILY="${{ inputs.cross_family && '1' || '0' }}" \
+            E2E_EXPECT_OS_ID="${{ inputs.expect_os_id }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       # tui-migrate runs record both interactive flows as asciicast v2

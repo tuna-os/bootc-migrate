@@ -32,6 +32,7 @@ pub mod composefs;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
 pub mod cross_base;
+pub mod cross_family;
 pub mod de_controller;
 pub mod de_detect;
 pub mod de_migrate;

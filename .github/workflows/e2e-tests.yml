@@ -148,6 +148,23 @@ jobs:
             # composefs, rollback round-trip, commit.
             mode: tui-migrate
             disk_size: 40G
+          - name: bluefin -> openSUSE Tumbleweed (cross-family composefs migration)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # #256: the only pair in the matrix with NO shared ID_LIKE
+            # lineage (fedora vs "opensuse suse"). Exploratory, non-gating:
+            # first execution of the cross-family /etc policy on a real
+            # target. The harness asserts the gate refuses without
+            # --accept-cross-base, opts in, checks the staged /etc's shape
+            # (target defaults, .rebase-old sidecars, carried machine
+            # state) before the reboot, and the booted os-release ID plus
+            # the first-boot unit's outcome after it. bootcrew's image is a
+            # community composefs-native openSUSE bootc build; there is no
+            # official one yet.
+            target: ghcr.io/bootcrew/opensuse-bootc:latest
+            disk_size: 40G
+            cross_family: true
+            expect_os_id: opensuse-tumbleweed
+            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration
@@ -246,6 +263,8 @@ jobs:
             echo "E2E_MODE=${{ matrix.scenario.mode || 'composefs-migrate' }}"
             echo "E2E_DE_MIGRATE=${{ matrix.scenario.de_migrate && '1' || '0' }}"
             echo "E2E_BOOT_ENTRIES=${{ matrix.scenario.boot_entries && '1' || '0' }}"
+            echo "E2E_CROSS_FAMILY=${{ matrix.scenario.cross_family && '1' || '0' }}"
+            echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
           } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E

@@ -10,10 +10,13 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 use crate::VerityDigest;
-use crate::migration::deploy_layout::{self, DeploymentLayout};
+use crate::cross_family::{self, PostMergeInputs, StagedVar};
+use crate::migration::EtcPolicy;
+use crate::migration::deploy_layout::{self, DeploymentLayout, VarStaging};
 use crate::migration::etc_transition::EtcTransition;
 use crate::migration::pull::PulledImage;
 use crate::migration::target_compat;
+use crate::selinux;
 
 pub fn phase4_stage_deploy(
     verity: &VerityDigest,
@@ -22,9 +25,10 @@ pub fn phase4_stage_deploy(
     sealed_config: &str,
     dry_run: bool,
     force: bool,
-    etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
+    etc_policy: EtcPolicy<'_>,
 ) -> Result<PathBuf> {
     println!("=== Phase 4: Staging Deployment State ===");
+    let etc_overrides = etc_policy.overrides;
 
     let layout = DeploymentLayout::for_verity(verity);
     let content_image = &pulled_image.image_reference;
@@ -63,6 +67,7 @@ pub fn phase4_stage_deploy(
         sealed_config,
         etc_dir: &layout.etc_dir,
         overrides: etc_overrides,
+        accept_cross_base: etc_policy.accept_cross_base,
     }
     .run()?;
     if etc_report.fell_back_to_flat_copy {
@@ -98,7 +103,36 @@ pub fn phase4_stage_deploy(
     layout.write_origin(target_image, verity, &pulled_image.manifest_digest)?;
     layout.write_imginfo(&pulled_image.config_digest);
 
-    deploy_layout::migrate_var_state()?;
+    let var_staging = deploy_layout::migrate_var_state()?;
+
+    // #256: the identity merge above renumbered shared accounts to the
+    // target's ids; make the files agree, and schedule what can only run
+    // on the target's own first boot.
+    if let Some(outcome) = etc_report.cross_family.as_ref() {
+        let staged_var = match var_staging {
+            VarStaging::Copied => {
+                StagedVar::Copied(std::path::Path::new(deploy_layout::STATEROOT_VAR))
+            }
+            VarStaging::InPlace => StagedVar::InPlace,
+            // A --force refresh after a completed run: that /var was already
+            // renumbered, and cycle-safe steps must not run over it twice.
+            VarStaging::PreviouslyCopied => StagedVar::PreviouslyStaged,
+        };
+        let source_passwd = std::fs::read_to_string("/etc/passwd")
+            .context("failed to read /etc/passwd for the cross-family remap")?;
+        let source_group = std::fs::read_to_string("/etc/group")
+            .context("failed to read /etc/group for the cross-family remap")?;
+        cross_family::apply_post_merge(&PostMergeInputs {
+            etc_outcome: outcome,
+            deploy_dir: &layout.deploy_dir,
+            etc_dir: &layout.etc_dir,
+            staged_var,
+            host_selinux: selinux::read_host_selinux_config(),
+            source_passwd: &source_passwd,
+            source_group: &source_group,
+        })
+        .context("cross-family post-merge steps failed")?;
+    }
 
     layout.install_runtime_composefs_mount();
 

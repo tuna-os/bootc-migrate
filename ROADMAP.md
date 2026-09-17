@@ -112,6 +112,7 @@ validation named in that issue's own scope never shipped.
 | Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
+| Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | one non-gating cell (bluefin → bootcrew/opensuse-bootc) asserts the refusal, the staged `/etc` shape and the booted identity; it depends on a community image and has not yet passed end to end | #256 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -339,14 +340,22 @@ either is imminent:
   `composefs→ostree` route needs to initialize an OSTree repo and bootstrap a
   deployment from a pulled image with nothing to restore from — mechanically
   the inverse of `Strategy::OstreeDeploy` (M1), not a variant of it.
-- **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch)** — M3's cross-base work
-  (#67) stays within the Fedora family, where `/etc` defaults, UID/GID
-  allocation, and the init/PAM stack share lineage. A cross-family route
-  would need to treat most of `/etc` as non-mergeable (drop rather than
-  3-way-merge family-specific package-manager and service config), carry
-  only universally meaningful state (`/var/home`, containers, flatpaks,
-  accounts), and regenerate target-family defaults from scratch — closer to
-  a "reinstall with data preservation" than an in-place migration.
+- **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch) via `bootc switch`** —
+  M3's cross-base work (#67) stays within the Fedora family, where `/etc`
+  defaults, UID/GID allocation, and the init/PAM stack share lineage. The
+  composefs *conversion* route now has a cross-family policy (#256,
+  `crates/bootc-migrate-core/src/cross_family.rs`): most of `/etc` is
+  non-mergeable (the target's defaults win, the source vendor's files are
+  dropped), an explicit allowlist of machine state and every user-added
+  path are carried, identity databases merge target-first with a `/var`
+  remap, and displaced edits survive as `.rebase-old` sidecars — the
+  "reinstall with data preservation" shape this entry described before it
+  existed. It is gated behind `--accept-cross-base`, exploratory, and
+  covered by one non-gating cell. The `bootc switch` routes (OstreeDeploy,
+  ImageSwap) refuse a cross-family target on the same gate but apply no
+  policy: their `/etc` is the native merge's, which is the same-lineage
+  rule. A cross-family policy over a `bootc switch`-staged deployment would
+  reuse `etc_conflict`'s post-merge seam; not planned.
 
 ### 1.0 — Universal migrator
 

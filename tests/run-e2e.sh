@@ -48,6 +48,16 @@ LVM_VG="e2e_vg_${UUID_SUFFIX}"
 # Test variant: "migrate" (default — migrate, commit, rollback round-trip) or
 # "undo" (migrate, then verify `undo` cleans up and falls back to OSTree).
 E2E_TEST_MODE="${E2E_TEST_MODE:-migrate}"
+# Cross-family migration (#256): the base and target share no ID_LIKE
+# lineage (Fedora-family -> openSUSE). composefs-migrate mode then asserts
+# that the migration REFUSES without --accept-cross-base, opts in, and
+# checks the cross-family /etc policy's outcome before and after the reboot.
+# The Dakota-specific rollback/commit/subscription tail is skipped: this is
+# the first execution of an exploratory route, and its deliverable is the
+# policy under assertion, not Dakota's lifecycle on an openSUSE guest.
+E2E_CROSS_FAMILY="${E2E_CROSS_FAMILY:-0}"
+# os-release ID the migrated system must report (cross-family cells only).
+E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -1542,6 +1552,23 @@ mkdir -p /var/cache/.hidden-dir
 echo "hidden-file-content" > /var/cache/.hidden-dir/secret
 ETCFIX
 
+# #256: fixtures that only the cross-family policy can get right. One file
+# both families ship (the target's copy must win, the edit must survive as
+# a sidecar) and one only the source's vendor ships (must be dropped, the
+# edit must survive as a sidecar). Both would be kept verbatim by the
+# same-lineage merge — which is the bug.
+if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+    step "=== cross-family: injecting family-specific /etc fixtures (#256) ==="
+    ssh $SSH_OPTS root@localhost bash <<'CROSSFIX'
+set -e
+test -f /etc/default/useradd || { echo "FAIL: source ships no /etc/default/useradd"; exit 1; }
+echo "# e2e cross-family edit" >> /etc/default/useradd
+test -f /etc/dnf/dnf.conf || { echo "FAIL: source ships no /etc/dnf/dnf.conf"; exit 1; }
+echo "max_parallel_downloads=20" >> /etc/dnf/dnf.conf
+echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' ')"
+CROSSFIX
+fi
+
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
 ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
@@ -1592,9 +1619,35 @@ if [ "$E2E_MODE" = "tui-migrate" ]; then
 else
     MIGRATE_CMD="/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
 fi
+
+# #256: the gate must REFUSE a cross-family target without an explicit
+# opt-in — and --force is deliberately not one (it waives warnings; this
+# selects a policy). The early gate refuses when the registry scan can see
+# the pair; when it cannot, it warns and Phase 4 refuses from the pulled
+# image instead (a --dry-run stops before that). Proceeding silently past
+# a scanned cross-family pair is the bug this cell exists to catch.
+if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+    step "=== cross-family: asserting the gate refuses without --accept-cross-base (#256) ==="
+    GATE_OUT=$(ssh $SSH_OPTS root@localhost "$MIGRATE_CMD --dry-run" 2>&1 || true)
+    if echo "$GATE_OUT" | grep -q "Cross-family re-base detected"; then
+        echo "OK: target scanned as cross-family; gate refused."
+    elif echo "$GATE_OUT" | grep -q "base lineage unknown before the pull"; then
+        echo "OK: target could not be scanned; the early gate warned instead of deciding."
+        echo "    NOTE: the refusal is then Phase 4's, from the pulled image's own"
+        echo "    os-release, and a --dry-run never reaches Phase 4 — so this run"
+        echo "    proves the policy (below) but not the registry-side refusal."
+    else
+        echo "FAIL: the cross-family gate did not refuse without --accept-cross-base."
+        echo "$GATE_OUT" | sed 's/^/[gate] /'
+        exit 1
+    fi
+    MIGRATE_CMD="$MIGRATE_CMD --accept-cross-base"
+fi
+
 MIGRATE_START=$SECONDS
 {
     ssh $SSH_OPTS root@localhost "$MIGRATE_CMD" 2>&1 \
+      | tee /tmp/e2e-migrate.log \
       | awk '{ print "[migrate] " $0; fflush() }'
     echo "MIGRATE_RC=${PIPESTATUS[0]}" > /tmp/e2e-migrate.rc
 } &
@@ -1634,6 +1687,50 @@ fi
 
 if [ "$E2E_MODE" = "tui-migrate" ]; then
     fetch_tui_artifacts
+fi
+
+# #256: the policy must have RUN, and the staged /etc must show its shape
+# before the reboot — the point where a wrong outcome is still cheap.
+if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+    step "=== cross-family: asserting the policy executed (#256) ==="
+    for needle in "Cross-family re-base accepted" \
+                  "=== Cross-family /etc policy report ===" \
+                  "=== Cross-base UID/GID remap report ==="; do
+        if ! grep -qF "$needle" /tmp/e2e-migrate.log; then
+            echo "FAIL: migration output lacks '$needle' — the cross-family policy did not run."
+            exit 1
+        fi
+    done
+    echo "OK: cross-family policy and remap reports emitted."
+
+    ssh $SSH_OPTS root@localhost bash <<'CROSSCHECK'
+set -e
+DEPLOY=$(echo /sysroot/state/deploy/*)
+[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment under /sysroot/state/deploy"; exit 1; }
+ETC="$DEPLOY/etc"
+echo "--- staged deployment: $DEPLOY ---"
+test -f "$DEPLOY/bootc-migrate-cross-family-report.json" \
+    || { echo "FAIL: cross-family report JSON missing"; exit 1; }
+head -c 2000 "$DEPLOY/bootc-migrate-cross-family-report.json"; echo
+# Both families ship default/useradd: the target's copy, and our edit beside it.
+grep -q "e2e cross-family edit" "$ETC/default/useradd" \
+    && { echo "FAIL: /etc/default/useradd still carries the source edit (target default did not win)"; exit 1; }
+grep -q "e2e cross-family edit" "$ETC/default/useradd.rebase-old" \
+    || { echo "FAIL: /etc/default/useradd.rebase-old missing or without the displaced edit"; exit 1; }
+# Only the source's vendor ships dnf.conf: dropped, edit preserved.
+test -e "$ETC/dnf/dnf.conf" \
+    && { echo "FAIL: /etc/dnf/dnf.conf (source-vendor-only) was carried onto the target"; exit 1; }
+grep -q "max_parallel_downloads=20" "$ETC/dnf/dnf.conf.rebase-old" \
+    || { echo "FAIL: /etc/dnf/dnf.conf.rebase-old missing or without the displaced edit"; exit 1; }
+# Machine state and user additions carried verbatim (the same-lineage
+# assertions after the reboot check them too; fail early here).
+grep -q "e2e migration marker" "$ETC/hostname" || { echo "FAIL: /etc/hostname not carried"; exit 1; }
+test -f "$ETC/migration-test/marker.conf" || { echo "FAIL: user-added /etc path not carried"; exit 1; }
+# Identity: the human account survives the target-first merge.
+grep -q "^realuser:" "$ETC/passwd" || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
+grep -q "^realuser:" "$ETC/shadow" || { echo "FAIL: realuser missing from the merged shadow"; exit 1; }
+echo "OK: staged /etc has the cross-family shape (target defaults, sidecars, carried state)."
+CROSSCHECK
 fi
 
 # e2e-sshd.socket baked into the base image (see MODIFIED_IMAGE above) is
@@ -1795,6 +1892,18 @@ if [ "$BOOTED_BACKEND" = "null" ]; then
     exit 1
 fi
 echo "OK: Booted backend is ComposeFS."
+
+# #256: the whole point — the migrated system is the target's family.
+if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+    step "=== cross-family: asserting the booted OS identity (#256) ==="
+    BOOTED_OS=$(ssh $SSH_OPTS root@localhost "grep -E '^(ID|ID_LIKE|PRETTY_NAME)=' /etc/os-release" 2>/dev/null || true)
+    echo "$BOOTED_OS" | sed 's/^/  /'
+    BOOTED_ID=$(echo "$BOOTED_OS" | sed -n 's/^ID=//p' | tr -d '"')
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"; exit 1
+    fi
+    echo "OK: booted into $BOOTED_ID."
+fi
 
 # For the dedicated-/var-LV scenario, dump exactly where /var landed before the
 # persistence assertions run, so a failure pinpoints empty-LV vs shadowed-bind.
@@ -2138,6 +2247,41 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
     echo "OK: user data preserved through undo ($WP_UNDO bytes)."
 
     step "=== E2E TEST PASSED SUCCESSFULY ==="
+    exit 0
+fi
+
+# #256: the live /etc after the reboot must still show the policy's
+# shape, and the first-boot unit — when Phase 4 installed one — must have
+# run and disarmed itself. Then stop: the rollback/commit/subscription tail
+# below is Dakota's lifecycle, out of this exploratory cell's scope.
+if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+    step "=== cross-family: post-reboot /etc + first-boot assertions (#256) ==="
+    ssh $SSH_OPTS root@localhost bash <<'CROSSPOST'
+set -e
+grep -q "e2e cross-family edit" /etc/default/useradd \
+    && { echo "FAIL: live /etc/default/useradd carries the source edit"; exit 1; }
+test -f /etc/default/useradd.rebase-old || { echo "FAIL: live sidecar for default/useradd missing"; exit 1; }
+test -e /etc/dnf/dnf.conf && { echo "FAIL: live /etc/dnf/dnf.conf exists on the target"; exit 1; }
+test -f /etc/dnf/dnf.conf.rebase-old || { echo "FAIL: live sidecar for dnf.conf missing"; exit 1; }
+REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+test -f "$REPORT" || { echo "FAIL: cross-family report missing after reboot"; exit 1; }
+if grep -q '"firstboot_unit_installed": true' "$REPORT"; then
+    if [ -e /etc/bootc-migrate/cross-family-firstboot ]; then
+        echo "FAIL: first-boot unit was installed but its marker is still armed (it did not run)"
+        systemctl status bootc-migrate-cross-family-firstboot.service --no-pager 2>&1 || true
+        exit 1
+    fi
+    echo "OK: first-boot unit ran and disarmed itself."
+else
+    echo "OK: no first-boot unit was needed."
+fi
+echo "--- package manager on the target ---"
+command -v zypper && ls /etc/zypp/repos.d 2>&1 || echo "(no zypper / no repos.d — informational)"
+echo "--- wheel group numbering (remap evidence) ---"
+getent group wheel || true
+find /var/home -maxdepth 1 -mindepth 1 -exec stat -c '%U:%G %n' {} + 2>/dev/null | head -5
+CROSSPOST
+    step "=== E2E TEST PASSED SUCCESSFULY (cross-family scope) ==="
     exit 0
 fi
 

@@ -349,6 +349,7 @@ pub struct App {
     opt_bootloader: Bootloader,
     opt_skip_preflight: bool,
     opt_force: bool,
+    opt_accept_cross_base: bool,
     options_cursor: usize,
 
     // Running
@@ -400,6 +401,7 @@ impl App {
             opt_bootloader: Bootloader::SystemdBoot,
             opt_skip_preflight: false,
             opt_force: false,
+            opt_accept_cross_base: false,
             options_cursor: 0,
             phases: default_phases(),
             log_lines: Vec::new(),
@@ -470,6 +472,9 @@ impl App {
         }
         if self.opt_force {
             args.push("--force".to_owned());
+        }
+        if self.opt_accept_cross_base {
+            args.push("--accept-cross-base".to_owned());
         }
         args
     }
@@ -864,8 +869,9 @@ impl App {
     }
 
     fn handle_options_key(&mut self, key: KeyCode) -> bool {
-        // 5 options: dry_run(0), skip_import(1), bootloader(2), skip_preflight(3), force(4)
-        const NUM_OPTIONS: usize = 5;
+        // 6 options: dry_run(0), skip_import(1), bootloader(2),
+        // skip_preflight(3), force(4), accept_cross_base(5)
+        const NUM_OPTIONS: usize = 6;
         match key {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if self.options_cursor > 0 {
@@ -913,6 +919,7 @@ impl App {
             }
             3 => self.opt_skip_preflight = !self.opt_skip_preflight,
             4 => self.opt_force = !self.opt_force,
+            5 => self.opt_accept_cross_base = !self.opt_accept_cross_base,
             _ => {}
         }
     }
@@ -1366,16 +1373,20 @@ mod tests {
         assert!(args.contains(&"systemd-boot".to_string()));
         assert!(!args.contains(&"--force".to_string()));
 
+        assert!(!args.contains(&"--accept-cross-base".to_string()));
+
         app.opt_dry_run = false;
         app.opt_skip_import = true;
         app.opt_force = true;
         app.opt_skip_preflight = true;
+        app.opt_accept_cross_base = true;
         app.opt_bootloader = Bootloader::Grub2;
         let args = app.build_command_args();
         assert!(!args.contains(&"--dry-run".to_string()));
         assert!(args.contains(&"--skip-import".to_string()));
         assert!(args.contains(&"--force".to_string()));
         assert!(args.contains(&"--skip-preflight".to_string()));
+        assert!(args.contains(&"--accept-cross-base".to_string()));
         assert!(args.contains(&"grub2".to_string()));
     }
 
