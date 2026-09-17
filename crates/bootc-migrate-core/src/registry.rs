@@ -230,26 +230,110 @@ pub fn extract_paths_into_dir(image_ref: &str, paths: &[&str], dst_root: &Path) 
             continue;
         }
 
+        // ostree-exported layers (fedora-bootc, the base layers of every
+        // rpm-ostree-built image) store each file once under
+        // sysroot/ostree/repo/objects and put its real path in the archive
+        // as a hard link to it. Extracting the path alone then fails ("Cannot
+        // hard link"), so the link targets are extracted alongside, into a
+        // per-layer staging directory that keeps them out of `dst_root`.
+        let link_targets = hardlink_targets(&blob_path, paths);
+        let staging = scratch.path().join("staging");
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)?;
+        let mut members: Vec<String> = Vec::new();
         for path in paths {
             // OCI layer tarballs store paths with or without a leading `./`;
-            // try both. tar exits non-zero when the member is absent from
-            // this layer, which is the common case, so its status is
-            // deliberately not checked here.
-            for candidate in [format!("./{path}"), (*path).to_string()] {
-                let _ = Command::new("tar")
-                    .arg("-xaf")
-                    .arg(&blob_path)
-                    .arg("-C")
-                    .arg(dst_root)
-                    .args(["--overwrite", "--no-same-owner"])
-                    .arg(&candidate)
-                    .stderr(std::process::Stdio::null())
-                    .status();
+            // ask for both.
+            members.push(format!("./{path}"));
+            members.push((*path).to_string());
+        }
+        members.extend(link_targets);
+        // tar exits non-zero when a member is absent from this layer, which
+        // is the common case, so its status is deliberately not checked.
+        let _ = Command::new("tar")
+            .arg("-xaf")
+            .arg(&blob_path)
+            .arg("-C")
+            .arg(&staging)
+            .args(["--overwrite", "--no-same-owner"])
+            .args(&members)
+            .stderr(std::process::Stdio::null())
+            .status();
+        for path in paths {
+            let src = staging.join(path);
+            if fs::symlink_metadata(&src).is_err() {
+                continue;
             }
+            let dst = dst_root.join(path);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // Later layers overwrite earlier ones, whole files and whole
+            // directory contents alike (`-a` keeps links and modes).
+            let _ = Command::new("cp")
+                .args(["-a", "-f", "-T"])
+                .arg(&src)
+                .arg(&dst)
+                .stderr(std::process::Stdio::null())
+                .status();
         }
         let _ = fs::remove_file(&blob_path);
     }
     Ok(())
+}
+
+/// The hard-link targets of every archive member under one of `paths`,
+/// read from `tar -tv`, whose listing prints a hard link as
+/// `h... <name> link to <target>`. Empty when the layer has none, or when
+/// tar cannot list it (the extraction then proceeds as before).
+fn hardlink_targets(blob: &Path, paths: &[&str]) -> Vec<String> {
+    let Ok(out) = Command::new("tar").arg("-tvf").arg(blob).output() else {
+        return Vec::new();
+    };
+    let listing = String::from_utf8_lossy(&out.stdout);
+    hardlink_targets_from_listing(&listing, paths)
+}
+
+/// Pure core of [`hardlink_targets`].
+fn hardlink_targets_from_listing(listing: &str, paths: &[&str]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for line in listing.lines() {
+        if !line.starts_with('h') {
+            continue;
+        }
+        let Some((left, target)) = line.rsplit_once(" link to ") else {
+            continue;
+        };
+        // perms owner/group size date time name: skip five
+        // whitespace-separated fields, the rest is the name.
+        let mut rest = left;
+        let mut ok = true;
+        for _ in 0..5 {
+            rest = rest.trim_start();
+            match rest.find(char::is_whitespace) {
+                Some(end) => rest = &rest[end..],
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let name = rest.trim_start().trim_start_matches("./");
+        let wanted = paths.iter().any(|p| {
+            let p = p.trim_end_matches('/');
+            name == p || name.starts_with(&format!("{p}/"))
+        });
+        if wanted {
+            let target = target.trim().to_string();
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    targets
 }
 
 /// Probe paths [`fetch_probe_files_via_registry`] pulls out of a target image.
@@ -849,6 +933,35 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ostree-exported layers: the real path is a hard link to the object.
+    #[test]
+    fn hardlink_targets_from_tar_listing() {
+        let listing = "\
+-rw-r--r-- root/root       197 2026-09-01 00:00 sysroot/ostree/repo/objects/ab/cdef.file
+hrw-r--r-- root/root         0 2026-09-01 00:00 usr/lib/os-release link to sysroot/ostree/repo/objects/ab/cdef.file
+hrwxr-xr-x root/root         0 2026-09-01 00:00 ./usr/bin/bootupctl link to sysroot/ostree/repo/objects/12/3456.file
+hrw-r--r-- root/root         0 2026-09-01 00:00 usr/lib/sysusers.d/basic.conf link to sysroot/ostree/repo/objects/78/9abc.file
+hrw-r--r-- root/root         0 2026-09-01 00:00 usr/share/doc/x link to sysroot/ostree/repo/objects/de/f012.file
+lrwxrwxrwx root/root         0 2026-09-01 00:00 etc/os-release -> ../usr/lib/os-release
+";
+        let got = hardlink_targets_from_listing(
+            listing,
+            &[
+                "usr/lib/os-release",
+                "usr/bin/bootupctl",
+                "usr/lib/sysusers.d",
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                "sysroot/ostree/repo/objects/ab/cdef.file",
+                "sysroot/ostree/repo/objects/12/3456.file",
+                "sysroot/ostree/repo/objects/78/9abc.file",
+            ]
+        );
+    }
 
     /// Through an HTTP proxy, `curl -D -` emits the CONNECT reply first:
     ///
