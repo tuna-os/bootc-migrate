@@ -1033,8 +1033,7 @@ pub(crate) fn esp_source_device(findmnt_stdout: &str) -> Option<String> {
     findmnt_stdout
         .lines()
         .map(str::trim)
-        .filter(|l| l.starts_with("/dev/"))
-        .next_back()
+        .rfind(|l| l.starts_with("/dev/"))
         .map(str::to_string)
 }
 
