@@ -1394,7 +1394,17 @@ echo '--- finalize units ---'
 systemctl status --no-pager ostree-finalize-staged.service ostree-finalize-staged-hold.service 2>&1 | head -40
 echo '--- /boot/loader ---'
 ls -la /boot/loader /boot/loader/entries /boot/loader.0/entries /boot/loader.1/entries 2>&1
-findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS /boot /boot/efi 2>&1
+echo '--- mount topology (/boot, /sysroot, ESP) ---'
+findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION 2>&1 | grep -E 'TARGET|/boot|/sysroot|/efi|esp' 
+echo '--- fstab ---'
+cat /etc/fstab 2>&1
+echo '--- boot mount units ---'
+systemctl list-units --all --no-pager 'boot*' '*esp*' 2>&1 | head -20
+systemctl cat boot.mount boot.automount 2>&1 | head -40
+echo '--- this boot: boot.mount / automount journal ---'
+journalctl -b --no-pager -o short-monotonic -u boot.mount -u boot.automount 2>&1 | tail -30
+echo '--- who has /boot open ---'
+fuser -vm /boot 2>&1 | head -20
 # Diagnostics only: never let a missing path here fail the cell.
 exit 0
 PREDIAG
