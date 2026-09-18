@@ -558,13 +558,12 @@ impl RegistryEndpoint {
     fn resolve(image_ref: &str) -> Result<Self> {
         let (host, repo, reference) = parse_image_ref(image_ref)?;
 
-        // Pick http for plain non-standard ports (local dev registries), https otherwise.
-        // We probe /v2/ to confirm and to discover any bearer challenge.
-        let candidates: &[&str] = if host_is_plain_http(&host) {
-            &["http"]
-        } else {
-            &["https", "http"]
-        };
+        // Local development registries are allowed to use plain HTTP. Every other
+        // registry must use HTTPS: falling back after a TLS failure would let a
+        // network attacker turn an image pull into an unsigned plaintext fetch.
+        // We probe /v2/ to confirm reachability and to discover any bearer
+        // challenge.
+        let candidates = registry_schemes(&host);
 
         // Keep every scheme's failure. Discarding them (this used to be
         // `Err(_) => continue`) collapsed curl-not-installed, DNS failure, a
@@ -603,8 +602,9 @@ impl RegistryEndpoint {
             args.push("-H".into());
             args.push(format!("Authorization: Bearer {}", token));
         }
+        args.push("--url".into());
         args.push(url);
-        let out = Command::new("curl")
+        let out = registry_curl(self.base_url.starts_with("http://"))
             .args(&args)
             .output()
             .context("failed to invoke curl for manifest fetch")?;
@@ -636,8 +636,9 @@ impl RegistryEndpoint {
             args.push("-H".into());
             args.push(format!("Authorization: Bearer {}", token));
         }
+        args.push("--url".into());
         args.push(url);
-        let status = Command::new("curl")
+        let status = registry_curl(self.base_url.starts_with("http://"))
             .args(&args)
             .status()
             .context("failed to invoke curl for blob fetch")?;
@@ -679,17 +680,48 @@ impl RegistryEndpoint {
     }
 }
 
-/// Hosts that should always use plain HTTP: bare IPv4 with a port, or `localhost`.
+/// Local-development hosts that are allowed to use plain HTTP.
+///
+/// Public numeric addresses must not be treated as local just because they have a
+/// port: that would allow a TLS failure to downgrade an image pull to HTTP.
 fn host_is_plain_http(host: &str) -> bool {
-    if host.starts_with("localhost") {
+    let host_only = host.rsplit_once(':').map_or(host, |(name, _)| name);
+    if host_only == "localhost" {
         return true;
     }
-    // IPv4-with-port like 10.0.2.2:5000
-    let host_only = host.split(':').next().unwrap_or(host);
-    host_only
-        .split('.')
-        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        && host_only.split('.').count() == 4
+    // IPv4-with-port like 10.0.2.2:5000. The E2E VM uses this QEMU host
+    // address; loopback and RFC1918 ranges are intentional local exceptions.
+    let Ok(ip) = host_only.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    ip.is_loopback() || ip.is_private()
+}
+
+fn registry_schemes(host: &str) -> &'static [&'static str] {
+    if host_is_plain_http(host) {
+        &["http"]
+    } else {
+        &["https"]
+    }
+}
+
+/// Do not let redirects or a user curlrc weaken the registry transport policy.
+/// Local development endpoints may start over HTTP, but redirects and bearer
+/// token endpoints must use HTTPS, even for a local registry.
+fn registry_curl(allow_plain_http: bool) -> Command {
+    let mut command = Command::new("curl");
+    command.args([
+        "--disable",
+        "--proto",
+        if allow_plain_http {
+            "=http,https"
+        } else {
+            "=https"
+        },
+        "--proto-redir",
+        "=https",
+    ]);
+    command
 }
 
 /// Build the failure message for a registry we could not reach, naming what
@@ -716,7 +748,7 @@ fn unreachable_registry_message(host: &str, failures: &[(String, String)]) -> St
 /// on transport failure.
 fn probe_v2(base_url: &str, repo: &str) -> Result<Option<String>> {
     let url = format!("{}/v2/", base_url);
-    let out = Command::new("curl")
+    let out = registry_curl(base_url.starts_with("http://"))
         .args([
             "-sS",
             "-o",
@@ -725,6 +757,7 @@ fn probe_v2(base_url: &str, repo: &str) -> Result<Option<String>> {
             "-",
             "--max-time",
             "10",
+            "--url",
             &url,
         ])
         .output()
@@ -827,8 +860,8 @@ fn fetch_bearer_token(challenge: &str, repo: &str) -> Result<String> {
     let _ = scope;
     let url = token_url(&realm, service.as_deref(), repo);
 
-    let out = Command::new("curl")
-        .args(["-sSL", "--fail", &url])
+    let out = registry_curl(false)
+        .args(["-sSL", "--fail", "--url", &url])
         .output()
         .context("curl token fetch failed")?;
     if !out.status.success() {
@@ -1135,10 +1168,60 @@ lrwxrwxrwx root/root         0 2026-09-01 00:00 etc/os-release -> ../usr/lib/os-
         assert!(host_is_plain_http("localhost:5000"));
         assert!(host_is_plain_http("10.0.2.2:5000"));
         assert!(host_is_plain_http("127.0.0.1"));
+        assert!(host_is_plain_http("192.168.1.10:5000"));
+        assert!(host_is_plain_http("172.16.0.1:5000"));
         assert!(!host_is_plain_http("ghcr.io"));
         assert!(!host_is_plain_http("quay.io:443"));
+        assert!(!host_is_plain_http("localhost.attacker.example"));
+        assert!(!host_is_plain_http("8.8.8.8:5000"));
+        assert!(!host_is_plain_http("172.32.0.1:5000"));
         // Not a full dotted quad — must stay HTTPS.
         assert!(!host_is_plain_http("10.0.2"));
+    }
+
+    #[test]
+    fn transport_policy_has_no_remote_plaintext_retry() {
+        for (host, expected) in [
+            ("ghcr.io", &["https"][..]),
+            ("quay.io:443", &["https"][..]),
+            ("8.8.8.8:5000", &["https"][..]),
+            ("localhost.attacker.example", &["https"][..]),
+            ("localhost:5000", &["http"][..]),
+            ("10.0.2.2:5000", &["http"][..]),
+        ] {
+            assert_eq!(registry_schemes(host), expected, "{host}");
+        }
+    }
+
+    #[test]
+    fn curl_policy_disables_config_and_plaintext_redirects() {
+        for (local, protocols) in [(false, "=https"), (true, "=http,https")] {
+            let command = registry_curl(local);
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(
+                args,
+                ["--disable", "--proto", protocols, "--proto-redir", "=https"]
+            );
+        }
+    }
+
+    #[test]
+    fn curl_rejects_plaintext_token_realms_before_connecting() {
+        // Port 1 need not exist: a protocol-policy failure must happen before
+        // any connection, not merely fail because the endpoint is unavailable.
+        let output = registry_curl(false)
+            .args([
+                "--silent",
+                "--show-error",
+                "--url",
+                "http://127.0.0.1:1/token",
+            ])
+            .output()
+            .expect("curl is required for registry access");
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("disabled"), "{error}");
+        assert!(error.contains("http"), "{error}");
     }
 
     #[test]
