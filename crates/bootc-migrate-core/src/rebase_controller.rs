@@ -175,7 +175,7 @@ pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
         }
         None => bail!("no staged deployment found after bootc switch"),
     }
-    finalize_staged_now()
+    Ok(())
 }
 
 /// libostree's record of a staged deployment awaiting finalization.
@@ -198,6 +198,10 @@ const STAGED_DEPLOYMENT_MARKER: &str = "/run/ostree/staged-deployment";
 /// an error. Only an ostree-backed staging leaves the marker this reads; a
 /// composefs host's `bootc switch` is finalized by bootc itself and is left
 /// alone.
+///
+/// Call this last. Finalization marks the deployment root immutable, so every
+/// write into it (the cross-base remap and /etc policy, their reports, the
+/// SELinux relabel marker, the desktop-migration step) must come before.
 fn finalize_staged_now() -> Result<()> {
     if !std::path::Path::new(STAGED_DEPLOYMENT_MARKER).exists() {
         return Ok(());
@@ -259,6 +263,7 @@ fn finalize_staged_now() -> Result<()> {
 fn ensure_boot_mounted() {
     let mounted = std::process::Command::new("findmnt")
         .args(["-n", "/boot"])
+        .stdout(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -416,6 +421,8 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
+        finalize_staged_now()?;
+
         println!(
             "Image swap staged. Reboot to enter the new deployment; the previous \
              deployment remains in the boot menu as rollback."
@@ -537,6 +544,9 @@ impl OstreeDeployConfig<'_> {
         if let Some(plan) = &de_plan {
             de.run_post_switch(plan, false)?;
         }
+
+        // #262: last, after every write into the deployment root above.
+        finalize_staged_now()?;
 
         println!(
             "Re-base staged. Reboot to enter the new deployment; the previous \
