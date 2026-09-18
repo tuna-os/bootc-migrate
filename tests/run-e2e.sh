@@ -1445,6 +1445,8 @@ ls -la /boot/loader/ /boot/loader/entries/ 2>&1
 echo '--- previous boot: ostree-finalize-staged ---'
 journalctl -b -1 --no-pager -o short-monotonic \
     -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service 2>&1 | tail -60
+echo '--- previous boot: what surrounded each boot.mount event ---'
+journalctl -b -1 --no-pager -o short-monotonic 2>&1 | grep -n -B6 -A2 'boot\.mount' | tail -80
 echo '--- previous boot: finalize vs boot mounts at shutdown ---'
 journalctl -b -1 --no-pager -o short-monotonic 2>&1 \
     | grep -E 'finalize|boot\.mount|boot-efi|sysroot\.mount|Unmount' | tail -40
