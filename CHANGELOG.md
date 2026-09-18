@@ -44,10 +44,24 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   JSON report is written beside the deployment. Non-gating E2E cell:
   bluefin → `ghcr.io/bootcrew/opensuse-bootc`.
 
+- composefs → ostree route (#260): `bootc-rebase --target-backend ostree`
+  on a composefs host now runs the target image's own `bootc install
+  to-existing-root` in a privileged container against the physical root,
+  snapshots the composefs ESP artifacts before bootc empties the ESP and
+  restores them beside the new shim/GRUB, 3-way merges `/etc` (cross-family
+  policy included), copies `/var` into the new stateroot, and puts the
+  GRUB firmware entry first with "Linux Boot Manager" kept as rollback.
+  The target must ship bootupd, which bootc's ostree backend uses to
+  install its bootloader; the route's preflight refuses a target without
+  it (Dakota ships none) and `bootc-rebase scan` reports it. Exploratory;
+  one non-gating E2E cell.
+
 ### Changed
 
 - `mergetc` grew a merge policy (identity-DB precedence and per-path
   states); the default behaviour is unchanged.
+- `bootc-rebase`'s routing table marks every backend pair implemented;
+  `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
 

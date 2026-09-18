@@ -382,6 +382,7 @@ fn execute_rebase(args: &Args) -> Result<()> {
         Strategy::CoreMigration => run_core_migration(args),
         Strategy::OstreeDeploy => run_ostree_deploy(args),
         Strategy::ImageSwap => run_image_swap(args),
+        Strategy::OstreeInstall => run_ostree_install(args),
     }
 }
 
@@ -427,6 +428,22 @@ fn run_image_swap(args: &Args) -> Result<()> {
         dry_run: args.dry_run,
         force: args.force,
         de_migrate: args.de_migrate,
+        accept_cross_base: args.accept_cross_base,
+    }
+    .run()
+}
+
+/// composefs → ostree (issue #260): a fresh OSTree deployment built beside
+/// the composefs root by the target's own bootc. The route lives in
+/// `bootc_migrate_core::ostree_install`; this only checks privilege and
+/// translates flags.
+fn run_ostree_install(args: &Args) -> Result<()> {
+    check_root_privilege()?;
+    bootc_migrate_core::ostree_install::OstreeInstallConfig {
+        target_image: &args.target_image,
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_preflight: args.skip_preflight,
         accept_cross_base: args.accept_cross_base,
     }
     .run()
