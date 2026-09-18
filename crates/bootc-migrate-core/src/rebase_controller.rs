@@ -169,12 +169,133 @@ pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
     match staged_image_from_status(&json) {
         Some(img) if staged_image_matches(target_image, img) => {
             println!("Staged deployment verified: {img}");
-            Ok(())
         }
         Some(img) => {
             bail!("bootc switch staged '{img}' but the requested target was '{target_image}'")
         }
         None => bail!("no staged deployment found after bootc switch"),
+    }
+    finalize_staged_now()
+}
+
+/// libostree's record of a staged deployment awaiting finalization.
+const STAGED_DEPLOYMENT_MARKER: &str = "/run/ostree/staged-deployment";
+
+/// Complete the staged deployment now instead of at shutdown (#262).
+///
+/// libostree finalizes a staged deployment from the `ExecStop=` of
+/// `ostree-finalize-staged.service`, i.e. while the machine is going down.
+/// On a `bootc install to-disk` layout with no separate /boot partition,
+/// /boot is a bind mount of the physical root's boot directory that systemd
+/// can drop before that `ExecStop=` runs; libostree then remounts /boot
+/// read-write without checking that it is still a mountpoint and gets
+/// `EINVAL` (ostreedev/ostree#3365). The finalization fails, the bootloader
+/// entries are never written, and the next boot lands in the previous
+/// deployment with nothing on the console to say why.
+///
+/// Finalizing here, while /boot is mounted and the caller is still watching,
+/// writes the bootloader entries at once and turns that silent misboot into
+/// an error. Only an ostree-backed staging leaves the marker this reads; a
+/// composefs host's `bootc switch` is finalized by bootc itself and is left
+/// alone.
+fn finalize_staged_now() -> Result<()> {
+    if !std::path::Path::new(STAGED_DEPLOYMENT_MARKER).exists() {
+        return Ok(());
+    }
+    ensure_boot_mounted();
+    println!("Finalizing the staged deployment now (writing the bootloader entries)...");
+    // Stopping the unit runs its ExecStop= — the same `ostree admin
+    // finalize-staged`, in the same sandbox, that shutdown would have run —
+    // and leaves nothing for shutdown to repeat. Fall back to the command
+    // itself where the unit is not active.
+    let unit = "ostree-finalize-staged.service";
+    let unit_active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let status = if unit_active {
+        std::process::Command::new("systemctl")
+            .args(["stop", unit])
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to execute systemctl stop {unit}: {e}"))?
+    } else {
+        std::process::Command::new("ostree")
+            .args(["admin", "finalize-staged"])
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to execute ostree admin finalize-staged: {e}"))?
+    };
+    if !status.success() {
+        bail!(
+            "finalizing the staged deployment failed (exit {status}); the previous \
+             deployment would boot next. See `journalctl -u {unit}` and \
+             https://github.com/ostreedev/ostree/issues/3365."
+        );
+    }
+    let out = std::process::Command::new("ostree")
+        .args(["admin", "status"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to execute ostree admin status: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match finalized_state(&stdout) {
+        FinalizedState::Pending => {
+            println!("Staged deployment finalized: it is the pending boot target.");
+            Ok(())
+        }
+        FinalizedState::StillStaged => bail!(
+            "the deployment is still staged after finalization; the previous deployment \
+             would boot next"
+        ),
+        FinalizedState::NoOtherDeployment => bail!(
+            "no pending deployment after finalization:\n{}",
+            stdout.trim()
+        ),
+    }
+}
+
+/// Mount /boot if it is not, so the finalization that follows has a
+/// mountpoint to remount. Best effort: a failure here surfaces as the
+/// finalization's own error.
+fn ensure_boot_mounted() {
+    let mounted = std::process::Command::new("findmnt")
+        .args(["-n", "/boot"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if mounted {
+        return;
+    }
+    eprintln!("Note: /boot is not mounted; mounting it before finalization (#262).");
+    let started = std::process::Command::new("systemctl")
+        .args(["start", "boot.mount"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !started {
+        let _ = std::process::Command::new("mount").arg("/boot").status();
+    }
+}
+
+/// What `ostree admin status` says about the deployment that is not booted.
+#[derive(Debug, PartialEq, Eq)]
+enum FinalizedState {
+    /// A deployment is listed as `(pending)`: finalized, boots next.
+    Pending,
+    /// A deployment is still listed as `(staged)`.
+    StillStaged,
+    /// Only the booted deployment is listed.
+    NoOtherDeployment,
+}
+
+/// Classify `ostree admin status` output after a finalization attempt.
+fn finalized_state(status_stdout: &str) -> FinalizedState {
+    let lines: Vec<&str> = status_stdout.lines().map(str::trim).collect();
+    if lines.iter().any(|l| l.ends_with("(staged)")) {
+        FinalizedState::StillStaged
+    } else if lines.iter().any(|l| l.ends_with("(pending)")) {
+        FinalizedState::Pending
+    } else {
+        FinalizedState::NoOtherDeployment
     }
 }
 
@@ -428,6 +549,24 @@ impl OstreeDeployConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalized_state_table() {
+        let staged = "  default 594b.0 (staged)\n    origin: <unknown origin type>\n* default bef2.0\n    origin: <unknown origin type>\n";
+        let pending = "  default 594b.0 (pending)\n    origin: <unknown origin type>\n* default bef2.0\n    origin: <unknown origin type>\n";
+        let booted_only = "* default bef2.0\n    origin: <unknown origin type>\n";
+        let rollback_only =
+            "* default bef2.0\n    origin: <unknown origin type>\n  default 1234.0 (rollback)\n";
+        for (input, want) in [
+            (staged, FinalizedState::StillStaged),
+            (pending, FinalizedState::Pending),
+            (booted_only, FinalizedState::NoOtherDeployment),
+            (rollback_only, FinalizedState::NoOtherDeployment),
+            ("", FinalizedState::NoOtherDeployment),
+        ] {
+            assert_eq!(finalized_state(input), want, "input: {input:?}");
+        }
+    }
 
     #[test]
     fn staged_image_extracted_from_status_json() {

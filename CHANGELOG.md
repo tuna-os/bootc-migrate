@@ -51,6 +51,14 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `bootc-rebase` finalizes the deployment `bootc switch` staged before it
+  returns, instead of leaving it to shutdown (#262). On a `bootc install
+  to-disk` layout with no separate /boot partition, libostree's shutdown-time
+  finalization fails to remount /boot (ostreedev/ostree#3365). The next boot
+  then lands in the previous deployment, and the console does not say why.
+  The bootloader entries are now written at once, and a failure is an error
+  the user sees.
+
 - Phase 4's dangling-symlink prune resolved a relative target such as
   `/etc/os-release -> ../usr/lib/os-release` against the staged
   deployment directory, which holds `etc` alone, and removed the link.
