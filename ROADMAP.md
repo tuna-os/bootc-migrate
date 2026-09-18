@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-09-03. Living document; the issue tracker is authoritative
+Status date: 2026-09-17. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 Caveat on that split, recorded because it has already misled readers: five
