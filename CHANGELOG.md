@@ -26,6 +26,14 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- E2E checks that a migrated system works, not only that its data survived.
+  After every reboot into a migrated system, `tests/e2e-health.sh` requires
+  a completed boot, no unexpected failed units, a working system bus and
+  logind, the expected display manager, every account the target declares,
+  and correct SELinux labels. The composefs migration mode now fails when a
+  file that the target image ships in `/etc` is missing afterwards. The
+  GNOME → KDE cell also runs the desktop restore on the booted target and
+  asserts that the stashed config comes back.
 - Dakota → Utah E2E coverage for the composefs `ImageSwap` route. A new
   harness mode (`E2E_MODE=image-swap`, `just e2e-image-swap`) installs the
   base composefs-native, runs `bootc-rebase --target-backend composefs`

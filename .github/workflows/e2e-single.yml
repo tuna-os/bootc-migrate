@@ -57,6 +57,18 @@ on:
           identity assertion.
         required: false
         default: ""
+      expect_dm:
+        description: >-
+          Display manager the migrated system must run (gdm, sddm). Empty
+          accepts any when the default target is graphical.
+        required: false
+        default: ""
+      allowed_failed_units:
+        description: >-
+          Space-separated glob patterns of units allowed to be failed after
+          the reboot (tests/e2e-health.sh).
+        required: false
+        default: ""
       runner:
         description: >-
           Runner override for THIS dispatch only (e.g. ubuntu-24.04, or a
@@ -178,6 +190,8 @@ jobs:
             E2E_CROSS_BASE="${{ inputs.cross_base && '1' || '0' }}" \
             E2E_CROSS_FAMILY="${{ inputs.cross_family && '1' || '0' }}" \
             E2E_EXPECT_OS_ID="${{ inputs.expect_os_id }}" \
+            E2E_EXPECT_DM="${{ inputs.expect_dm }}" \
+            E2E_ALLOWED_FAILED_UNITS="${{ inputs.allowed_failed_units }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       # tui-migrate runs record both interactive flows as asciicast v2

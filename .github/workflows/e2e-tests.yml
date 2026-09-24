@@ -63,12 +63,16 @@ jobs:
           - name: bluefin -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             # 20G intermittently ENOSPCs during the Phase-2 podman pull
             # (#42-class; last seen 2026-07-19) — match the other cells.
             disk_size: 40G
           - name: bluefin LTS -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             filesystem: ext4
             # 20G default has intermittently ENOSPC'd (#42) — no XFS loopback
             # is involved here (ext4 natively supports fs-verity), so this is
@@ -77,11 +81,15 @@ jobs:
           - name: bluefin LTS -> dakota (LUKS + systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             filesystem: xfs+crypt
             disk_size: 40G
           - name: bluefin LTS -> dakota (LVM-on-LUKS, separate /var + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             filesystem: xfs+lvm+crypt
             # Was 40G — still ENOSPC'd during Phase-2 image pull twice (#42).
             # The BIOS-boot + ESP + separate /boot partitions and the fixed
@@ -104,6 +112,8 @@ jobs:
             # mechanism from cross-DE identity-DB differences (see the
             # aurora cell below).
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             mode: ostree-rebase
             # bootc switch pulls the full target into ostree storage inside
             # the guest — needs headroom beyond the tracer's 20G.
@@ -124,6 +134,8 @@ jobs:
             # useful signal, but not a reason to block the OstreeDeploy
             # strategy itself.
             target: ghcr.io/ublue-os/aurora:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: sddm
             mode: ostree-rebase
             disk_size: 40G
             # #188: this is the only genuinely cross-DE pair in the matrix, so
@@ -135,6 +147,8 @@ jobs:
           - name: bluefin -> dakota (TUI-driven migration)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             # The composefs pipeline with a simulated human at the
             # controls: tests/tui-e2e-driver.py drives the interactive
             # Config Drift Review checklist (#15) and then the whole
@@ -196,6 +210,8 @@ jobs:
           - name: "dakota -> utah (composefs -> composefs, ImageSwap)"
             base: ghcr.io/projectbluefin/dakota:stable
             target: ghcr.io/projectbluefin/utah:testing
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             mode: image-swap
             disk_size: 40G
             expect_os_id: utah
@@ -300,6 +316,8 @@ jobs:
             echo "E2E_BOOT_ENTRIES=${{ matrix.scenario.boot_entries && '1' || '0' }}"
             echo "E2E_CROSS_FAMILY=${{ matrix.scenario.cross_family && '1' || '0' }}"
             echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
+            echo "E2E_EXPECT_DM=${{ matrix.scenario.expect_dm || '' }}"
+            echo "E2E_ALLOWED_FAILED_UNITS=${{ matrix.scenario.allowed_failed_units || '' }}"
           } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E

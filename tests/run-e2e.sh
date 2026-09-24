@@ -68,6 +68,13 @@ E2E_TEST_MODE="${E2E_TEST_MODE:-migrate}"
 E2E_CROSS_FAMILY="${E2E_CROSS_FAMILY:-0}"
 # os-release ID the migrated system must report (cross-family cells only).
 E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
+# Display manager the migrated system must run (gdm, sddm, ...); empty
+# accepts any when the default target is graphical. Checked by
+# tests/e2e-health.sh after every reboot into a migrated system.
+E2E_EXPECT_DM="${E2E_EXPECT_DM:-}"
+# Glob patterns of units allowed to be failed after the reboot. Every entry
+# needs a reason next to where it is set (the matrix cell).
+E2E_ALLOWED_FAILED_UNITS="${E2E_ALLOWED_FAILED_UNITS:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -96,6 +103,24 @@ vm_tail() {
 serial_failure_lines() {
     sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[()][0-9A-Za-z]//g' qemu.log \
       | grep -E '\[FAILED\]|DEPEND\]'
+}
+
+# assert_system_healthy <label>: run tests/e2e-health.sh inside the VM. It
+# checks that the migrated system works, not only that data survived: boot
+# completed, no unexpected failed unit, D-Bus and logind answer, the display
+# manager runs, the target's declared accounts exist, and SELinux labels are
+# correct. Exits the run on any failure.
+assert_system_healthy() {
+    step "=== $1: system health after reboot ==="
+    local rc=0
+    # pipefail: rc is the remote script's status, not sed's.
+    ssh $SSH_OPTS root@localhost \
+        "E2E_EXPECT_DM='$E2E_EXPECT_DM' E2E_ALLOWED_FAILED_UNITS='$E2E_ALLOWED_FAILED_UNITS' bash -s" \
+        < "$(dirname "$0")/e2e-health.sh" 2>&1 | sed 's/^/[health] /' || rc=$?
+    if [ "$rc" != 0 ]; then
+        echo "FAIL: the migrated system is not healthy (see the [health] lines above)"
+        exit 1
+    fi
 }
 
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
@@ -1524,6 +1549,29 @@ loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus
 echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
 
+    if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
+        # #68's other half: the stash is only useful if switching back
+        # brings the config home. Emulate the return trip on the booted
+        # target: restore the stashed GNOME config and assert the seeded
+        # marker is back in place and gone from the stash.
+        step "=== ostree-rebase: DE restore round trip (#68) ==="
+        ssh $SSH_OPTS root@localhost bash <<'DERESTORE' 2>&1 | sed 's/^/[de-restore] /'
+set -e
+u=$(awk -F: '$3>=1000 && $3<65534 && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+h=$(getent passwd "$u" | cut -d: -f6)
+[ -n "$h" ] || { echo "FAIL: no human account found after the reboot"; exit 1; }
+test -e "$h/.config/dconf/user" && { echo "FAIL: the GNOME config is back in \$HOME before any restore"; exit 1; }
+/var/tmp/bootc-rebase de-migrate restore --to-de gnome --home "$h" --stash-dir "$h/.local/share/de-migrate"
+grep -q e2e-gnome-marker "$h/.config/dconf/user" \
+    || { echo "FAIL: restore did not bring the stashed GNOME config back into \$HOME"; exit 1; }
+test -e "$h/.local/share/de-migrate/gnome/.config/dconf/user" \
+    && { echo "FAIL: the restored config is still in the stash (copied, not moved)"; exit 1; }
+echo "OK: stash -> restore round trip returned the GNOME config to $h"
+DERESTORE
+    fi
+
+    assert_system_healthy "ostree-rebase"
+
     step "=== ostree-rebase PASSED ==="
     exit 0
 fi
@@ -1719,6 +1767,8 @@ ESPCHECK
 )
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
+
+    assert_system_healthy "composefs-to-ostree"
 
     step "=== composefs-to-ostree PASSED ==="
     exit 0
@@ -1941,6 +1991,8 @@ SWAPSSH
     [ -n "$ROLLBACK_IMG" ] || [ "$BASE_DIR_PRESENT" = "yes" ] || {
         echo "FAIL: the base deployment $BASE_VERITY is gone — no rollback left"; exit 1; }
     echo "OK: base deployment kept as rollback."
+
+    assert_system_healthy "image-swap"
 
     step "=== image-swap PASSED ==="
     exit 0
@@ -2396,6 +2448,8 @@ if [ "$BOOTED_BACKEND" = "null" ]; then
     exit 1
 fi
 echo "OK: Booted backend is ComposeFS."
+
+assert_system_healthy "post-migration"
 
 # #256: the whole point — the migrated system is the target's family.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then
@@ -3050,5 +3104,31 @@ echo "=== End diff ===" >> e2e-run.log
 # Count lines for summary.
 EXTRA_COUNT=$(comm -23 /tmp/e2e-post-commit-files.txt /tmp/e2e-fresh-dakota-files.txt 2>/dev/null | wc -l)
 echo "Post-commit diff summary: $EXTRA_COUNT paths present beyond fresh Dakota factory state (expected: user /etc + /var data)." | tee -a e2e-run.log
+
+# The other direction is an assertion: every file the target image ships in
+# /etc must exist on the migrated system. A missing vendor file means the
+# /etc merge dropped target configuration (the class of bug that lost Utah's
+# accounts). Paths the migration removes on purpose go in the list below,
+# each with its reason.
+step "=== Asserting the target's vendor /etc survived the migration ==="
+VENDOR_ETC_ALLOWED_MISSING=""
+# comm needs one collation; the two listings were sorted on different hosts.
+LC_ALL=C sort -u -o /tmp/e2e-post-commit-files.txt /tmp/e2e-post-commit-files.txt
+grep '^/etc/' /tmp/e2e-fresh-dakota-files.txt | LC_ALL=C sort -u > /tmp/e2e-vendor-etc.txt || true
+VENDOR_ETC_COUNT=$(wc -l < /tmp/e2e-vendor-etc.txt)
+if [ "$VENDOR_ETC_COUNT" -eq 0 ]; then
+    echo "FAIL: the reference listing of $TARGET_IMAGE has no /etc files; the comparison would pass vacuously"
+    exit 1
+fi
+MISSING_VENDOR=$(LC_ALL=C comm -13 /tmp/e2e-post-commit-files.txt /tmp/e2e-vendor-etc.txt || true)
+for allowed in $VENDOR_ETC_ALLOWED_MISSING; do
+    MISSING_VENDOR=$(echo "$MISSING_VENDOR" | grep -vxF "$allowed" || true)
+done
+if [ -n "$MISSING_VENDOR" ]; then
+    echo "FAIL: $(echo "$MISSING_VENDOR" | wc -l) file(s) the target image ships in /etc are missing after the migration:"
+    echo "$MISSING_VENDOR" | head -40 | sed 's/^/  /'
+    exit 1
+fi
+echo "OK: all $VENDOR_ETC_COUNT /etc files the target image ships are present."
 
 step "=== E2E TEST PASSED SUCCESSFULY ==="
