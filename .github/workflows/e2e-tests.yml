@@ -63,12 +63,16 @@ jobs:
           - name: bluefin -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             # 20G intermittently ENOSPCs during the Phase-2 podman pull
             # (#42-class; last seen 2026-07-19) — match the other cells.
             disk_size: 40G
           - name: bluefin LTS -> dakota (systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             filesystem: ext4
             # 20G default has intermittently ENOSPC'd (#42) — no XFS loopback
             # is involved here (ext4 natively supports fs-verity), so this is
@@ -77,11 +81,15 @@ jobs:
           - name: bluefin LTS -> dakota (LUKS + systemd-boot + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             filesystem: xfs+crypt
             disk_size: 40G
           - name: bluefin LTS -> dakota (LVM-on-LUKS, separate /var + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             filesystem: xfs+lvm+crypt
             # Was 40G — still ENOSPC'd during Phase-2 image pull twice (#42).
             # The BIOS-boot + ESP + separate /boot partitions and the fixed
@@ -104,6 +112,8 @@ jobs:
             # mechanism from cross-DE identity-DB differences (see the
             # aurora cell below).
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             mode: ostree-rebase
             # bootc switch pulls the full target into ostree storage inside
             # the guest — needs headroom beyond the tracer's 20G.
@@ -124,6 +134,8 @@ jobs:
             # useful signal, but not a reason to block the OstreeDeploy
             # strategy itself.
             target: ghcr.io/ublue-os/aurora:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: sddm
             mode: ostree-rebase
             disk_size: 40G
             # #188: this is the only genuinely cross-DE pair in the matrix, so
@@ -135,6 +147,8 @@ jobs:
           - name: bluefin -> dakota (TUI-driven migration)
             base: ghcr.io/projectbluefin/bluefin:stable
             target: ghcr.io/projectbluefin/dakota:stable
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             # The composefs pipeline with a simulated human at the
             # controls: tests/tui-e2e-driver.py drives the interactive
             # Config Drift Review checklist (#15) and then the whole
@@ -193,9 +207,99 @@ jobs:
           # /var and /var/home carried and the Dakota deployment kept as
           # rollback. utah publishes only :testing (pre-alpha), so this
           # cell is non-gating.
+          # tunaOS desktop ring (Albacore, AlmaLinux 10): every
+          # desktop is both a source and a target once, and every
+          # display-manager hand-off runs (gdm -> greetd/DMS -> cosmic-greeter
+          # -> greetd/gtkgreet -> gdm). OstreeDeploy with --de-migrate: the
+          # outgoing desktop's config is seeded, stashed and restored, and
+          # tests/e2e-health.sh requires the target's display manager after
+          # the reboot. The images are about 2 GB, a fifth of Bluefin.
+          # Not Yellowfin: its rolling Kitten 10 base cannot start D-Bus
+          # after a fresh install (dbus_contexts is denied, tunaOS#2485),
+          # so every Yellowfin base fails before the migration starts.
+          # Non-gating until each pair has passed once.
+          - name: "tunaOS albacore gnome -> niri (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:gnome
+            target: ghcr.io/tuna-os/albacore:niri
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: gnome
+            expect_dm: greetd
+            # tunaOS's own boot check: it waits up to 4 min for the system
+            # to settle while it is itself still starting, and timed out
+            # here with every migration check passing. It judges the image,
+            # not the migration.
+            allowed_failed_units: tunaos-base-contract.service
+            # albacore:gnome's own policy is inconsistent: its
+            # file_contexts.subs_dist maps /var/home to /home, but its
+            # file_contexts.homedirs is written for /var/home, so it labels
+            # every home default_t (niri, cosmic and xfce map /home to
+            # /var/home and label homes user_home_t). /var/home labels then
+            # differ across this pair whichever way the migration goes.
+            # /etc stays fully checked.
+            allowed_mislabeled: "/var/home/*"
+            allow_failure: true
+          - name: "tunaOS albacore niri -> cosmic (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:niri
+            target: ghcr.io/tuna-os/albacore:cosmic
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: niri
+            expect_dm: cosmic-greeter
+            # tunaOS's own boot check: it waits up to 4 min for the system
+            # to settle while it is itself still starting, and timed out
+            # here with every migration check passing. It judges the image,
+            # not the migration.
+            allowed_failed_units: tunaos-base-contract.service
+            allow_failure: true
+          - name: "tunaOS albacore cosmic -> xfce (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:cosmic
+            target: ghcr.io/tuna-os/albacore:xfce
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: cosmic
+            expect_dm: greetd
+            # tunaOS's own boot check: it waits up to 4 min for the system
+            # to settle while it is itself still starting, and timed out
+            # here with every migration check passing. It judges the image,
+            # not the migration.
+            allowed_failed_units: tunaos-base-contract.service
+            allow_failure: true
+          - name: "tunaOS albacore xfce -> gnome (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:xfce
+            target: ghcr.io/tuna-os/albacore:gnome
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: xfce
+            expect_dm: gdm
+            # tunaOS's own boot check: it waits up to 4 min for the system
+            # to settle while it is itself still starting, and timed out
+            # here with every migration check passing. It judges the image,
+            # not the migration.
+            allowed_failed_units: tunaos-base-contract.service
+            # albacore:gnome's own policy is inconsistent: its
+            # file_contexts.subs_dist maps /var/home to /home, but its
+            # file_contexts.homedirs is written for /var/home, so it labels
+            # every home default_t (niri, cosmic and xfce map /home to
+            # /var/home and label homes user_home_t). /var/home labels then
+            # differ across this pair whichever way the migration goes.
+            # /etc stays fully checked.
+            allowed_mislabeled: "/var/home/*"
+            # Forward the journal to the serial console on one ring cell, so
+            # an EL10 base that cannot start D-Bus (and so never reaches
+            # SSH) leaves the reason in qemu.log. This is how tunaOS#2485
+            # showed up on Yellowfin.
+            console_journal: true
+            allow_failure: true
           - name: "dakota -> utah (composefs -> composefs, ImageSwap)"
             base: ghcr.io/projectbluefin/dakota:stable
             target: ghcr.io/projectbluefin/utah:testing
+            # Display manager tests/e2e-health.sh requires after the reboot.
+            expect_dm: gdm
             mode: image-swap
             disk_size: 40G
             expect_os_id: utah
@@ -300,6 +404,11 @@ jobs:
             echo "E2E_BOOT_ENTRIES=${{ matrix.scenario.boot_entries && '1' || '0' }}"
             echo "E2E_CROSS_FAMILY=${{ matrix.scenario.cross_family && '1' || '0' }}"
             echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
+            echo "E2E_EXPECT_DM=${{ matrix.scenario.expect_dm || '' }}"
+            echo "E2E_ALLOWED_FAILED_UNITS=${{ matrix.scenario.allowed_failed_units || '' }}"
+            echo "E2E_ALLOWED_MISLABELED=${{ matrix.scenario.allowed_mislabeled || '' }}"
+            echo "E2E_DE_FROM=${{ matrix.scenario.de_from || 'gnome' }}"
+            echo "E2E_CONSOLE_JOURNAL=${{ matrix.scenario.console_journal && '1' || '0' }}"
           } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E

@@ -131,6 +131,36 @@ pub fn install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
     argv
 }
 
+/// Where [`seed_var_command`] mounts the stateroot `/var` inside the
+/// target image's container.
+const CONTAINER_VAR_TARGET: &str = "/target-var";
+
+/// The `podman run` argv that fills the stateroot `/var` with the target
+/// image's own `/var` skeleton, without overwriting anything the live copy
+/// put there (`cp -a --no-clobber`). The stateroot `/var` of an alongside
+/// install starts empty, so without this the target boots with the source's
+/// `/var` only, and a unit that expects a directory its package created at
+/// build time fails (fedora-bootc's chronyd: `/var/lib/chrony: No such file
+/// or directory`). Pure so it is table-tested.
+pub fn seed_var_command(target_image: &str) -> Vec<String> {
+    vec![
+        "podman".into(),
+        "run".into(),
+        "--rm".into(),
+        "--privileged".into(),
+        "--security-opt".into(),
+        "label=disable".into(),
+        "--mount".into(),
+        format!("type=bind,src={OSTREE_STATEROOT_VAR},dst={CONTAINER_VAR_TARGET}"),
+        target_image.into(),
+        "cp".into(),
+        "-a".into(),
+        "--no-clobber".into(),
+        "/var/.".into(),
+        format!("{CONTAINER_VAR_TARGET}/"),
+    ]
+}
+
 /// Whether an ESP-relative path (forward slashes) belongs to the composefs
 /// deployment or its loader — what alongside mode's ESP wipe would destroy
 /// and what must come back afterwards. Everything bootupd writes
@@ -391,6 +421,9 @@ impl OstreeInstallConfig<'_> {
         // ---- /var ----
         println!("=== /var: carrying the live tree into the stateroot ===");
         let var_copied = copy_var_into_stateroot()?;
+        if var_copied {
+            seed_var_from_target(self.target_image);
+        }
 
         if let Some(outcome) = cross.as_ref() {
             let source_passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
@@ -1081,6 +1114,25 @@ fn copy_var_into_stateroot() -> Result<bool> {
     Ok(true)
 }
 
+/// Fill the stateroot `/var` with the target's own `/var` skeleton (see
+/// [`seed_var_command`]). Best-effort: a path the source has as a different
+/// file type (a directory where the target ships a symlink) makes `cp`
+/// report an error for that path while still copying the rest, and the
+/// carried data must win there anyway.
+fn seed_var_from_target(target_image: &str) {
+    let argv = seed_var_command(target_image);
+    println!("[var] {}", argv.join(" "));
+    match Command::new(&argv[0]).args(&argv[1..]).status() {
+        Ok(s) if s.success() => println!("[var] target /var skeleton added"),
+        Ok(s) => eprintln!(
+            "Warning: filling /var from the target image reported errors (exit {:?}); \
+             paths the source already had are kept as carried.",
+            s.code()
+        ),
+        Err(e) => eprintln!("Warning: could not run the target image to fill /var: {e}"),
+    }
+}
+
 /// Put the shim/GRUB entry bootupd registered first in `BootOrder`, keeping
 /// every other entry (the composefs "Linux Boot Manager" included) behind
 /// it. Returns the entry id, or `None` with a warning when no such entry
@@ -1118,6 +1170,25 @@ fn put_grub_first() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_var_command_never_overwrites_carried_data() {
+        let argv = seed_var_command("quay.io/fedora/fedora-bootc:44");
+        assert_eq!(argv[0], "podman");
+        assert!(argv.contains(&format!(
+            "type=bind,src={OSTREE_STATEROOT_VAR},dst={CONTAINER_VAR_TARGET}"
+        )));
+        let image_pos = argv
+            .iter()
+            .position(|a| a == "quay.io/fedora/fedora-bootc:44")
+            .unwrap();
+        // The copy runs in the target image, from its /var into the
+        // stateroot, and must not replace what the live copy carried.
+        assert_eq!(
+            &argv[image_pos + 1..],
+            &["cp", "-a", "--no-clobber", "/var/.", "/target-var/"]
+        );
+    }
 
     #[test]
     fn install_command_shape() {

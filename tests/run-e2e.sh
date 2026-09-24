@@ -68,6 +68,35 @@ E2E_TEST_MODE="${E2E_TEST_MODE:-migrate}"
 E2E_CROSS_FAMILY="${E2E_CROSS_FAMILY:-0}"
 # os-release ID the migrated system must report (cross-family cells only).
 E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
+# Display manager the migrated system must run (gdm, sddm, ...); empty
+# accepts any when the default target is graphical. Checked by
+# tests/e2e-health.sh after every reboot into a migrated system.
+E2E_EXPECT_DM="${E2E_EXPECT_DM:-}"
+# Desktop the base image runs, for E2E_DE_MIGRATE cells: the harness seeds
+# one config file of this desktop, asserts that the re-base stashes it, and
+# restores it after the reboot. DE_SEED_REL is that file, relative to $HOME,
+# and must be inside one of the desktop's stash paths (de_migrate.rs).
+E2E_DE_FROM="${E2E_DE_FROM:-gnome}"
+# 1: also forward the journal to the serial console on the base image's
+# boots, so a unit that fails before SSH comes up (the base image's own
+# D-Bus, for example) leaves its error in qemu.log. Off by default: the
+# extra serial output slows every boot.
+E2E_CONSOLE_JOURNAL="${E2E_CONSOLE_JOURNAL:-0}"
+case "$E2E_DE_FROM" in
+    gnome) DE_SEED_REL=".config/dconf/user" ;;
+    kde) DE_SEED_REL=".config/kdeglobals" ;;
+    cosmic) DE_SEED_REL=".config/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark" ;;
+    niri) DE_SEED_REL=".config/niri/config.kdl" ;;
+    xfce) DE_SEED_REL=".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" ;;
+    *) echo "ERROR: unknown E2E_DE_FROM '$E2E_DE_FROM' (gnome, kde, cosmic, niri, xfce)"; exit 1 ;;
+esac
+DE_MARKER="e2e-${E2E_DE_FROM}-marker"
+# Glob patterns of units allowed to be failed after the reboot. Every entry
+# needs a reason next to where it is set (the matrix cell).
+E2E_ALLOWED_FAILED_UNITS="${E2E_ALLOWED_FAILED_UNITS:-}"
+# Glob patterns of paths whose new SELinux mislabel the health check
+# reports instead of failing. The matrix cell carries the reason.
+E2E_ALLOWED_MISLABELED="${E2E_ALLOWED_MISLABELED:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -96,6 +125,45 @@ vm_tail() {
 serial_failure_lines() {
     sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b[()][0-9A-Za-z]//g' qemu.log \
       | grep -E '\[FAILED\]|DEPEND\]'
+}
+
+# assert_system_healthy <label>: run tests/e2e-health.sh inside the VM. It
+# checks that the migrated system works, not only that data survived: boot
+# completed, no unexpected failed unit, D-Bus and logind answer, the display
+# manager runs, the target's declared accounts exist, and SELinux labels are
+# correct. Exits the run on any failure, unless the second argument is
+# "report": then it only prints, for a baseline of an unmigrated image.
+assert_system_healthy() {
+    step "=== $1: system health ==="
+    local rc=0
+    # pipefail: rc is the remote script's status, not sed's.
+    ssh $SSH_OPTS root@localhost \
+        "E2E_EXPECT_DM='$E2E_EXPECT_DM' E2E_ALLOWED_FAILED_UNITS='$E2E_ALLOWED_FAILED_UNITS' E2E_ALLOWED_MISLABELED='$E2E_ALLOWED_MISLABELED' bash -s" \
+        < "$(dirname "$0")/e2e-health.sh" 2>&1 | sed 's/^/[health] /' || rc=$?
+    if [ "$rc" != 0 ] && [ "${2:-}" = "report" ]; then
+        echo "NOTE: baseline health findings above are reported, not asserted"
+    elif [ "$rc" != 0 ]; then
+        echo "FAIL: the migrated system is not healthy (see the [health] lines above)"
+        exit 1
+    fi
+}
+
+# capture_health_baseline: just before a migration, record which paths under
+# /etc and /var/home the base itself already has mislabeled, so the
+# post-reboot health check fails only on mislabels the migration introduced
+# (tunaOS labels /var/home/linuxbrew home_root_t on a fresh install, for
+# example). /var carries over on every route, so the list survives the
+# reboot. A base without SELinux records nothing, and every mislabel after
+# the migration then counts.
+capture_health_baseline() {
+    ssh $SSH_OPTS root@localhost 'mkdir -p /var/lib/e2e-health
+        : > /var/lib/e2e-health/label-baseline
+        if command -v restorecon >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]; then
+            restorecon -Rnv /etc /var/home 2>/dev/null \
+                | sed -n "s/^Would relabel \([^ ]*\) from.*/\1/p" | sort -u > /var/lib/e2e-health/label-baseline
+        fi
+        echo "health baseline: $(wc -l < /var/lib/e2e-health/label-baseline) path(s) already mislabeled on the base"' \
+        2>&1 | sed 's/^/[health-baseline] /' || true
 }
 
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
@@ -704,7 +772,9 @@ for part in "${LOOP_DEV}p1" "${LOOP_DEV}p2" "${LOOP_DEV}p3" "${LOOP_DEV}p4"; do
             for conf in "$entries"/*.conf; do
                 [ -f "$conf" ] || continue
                 if ! grep -q 'console=ttyS0' "$conf"; then
-                    sudo sed -i 's|^\(options .*\)$|\1 console=ttyS0,115200n8 console=tty0 systemd.log_level=info|' "$conf" 2>/dev/null || true
+                    EXTRA_KARGS="console=ttyS0,115200n8 console=tty0 systemd.log_level=info"
+                    [ "$E2E_CONSOLE_JOURNAL" = "1" ] && EXTRA_KARGS="$EXTRA_KARGS systemd.journald.forward_to_console=1"
+                    sudo sed -i "s|^\(options .*\)\$|\1 $EXTRA_KARGS|" "$conf" 2>/dev/null || true
                     echo "  patched: $(basename "$conf")"
                     PATCHED=$((PATCHED + 1))
                 fi
@@ -889,6 +959,10 @@ step "=== Target image: ${VM_TARGET_IMAGE} (pulled directly by the migration) ==
 # Tracer mode (#63): verify bootc-rebase route resolution on a real
 # OSTree-booted system, then exit before any migration machinery runs.
 if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
+    # A freshly installed, unmigrated base: the reference for which health
+    # findings an image has on its own. Dispatch this mode with the target
+    # of a cell as its base to tell a migration bug from an image's own.
+    assert_system_healthy "ostree-rebase-plan: baseline of $BASE_IMAGE" report
     step "=== ostree-rebase-plan: copying bootc-rebase to VM ==="
     scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
     step "=== ostree-rebase-plan: resolving route on the VM ==="
@@ -963,12 +1037,22 @@ REBASEFIX
     # reason and the assertion called that a failure. What must never happen is
     # the re-base proceeding unguarded, so that is what this checks.
     step "=== ostree-rebase: asserting the cross-base gate refuses without opt-in (#191) ==="
+    # --dry-run: the gate is evaluated before the dry-run exit, so every
+    # refusal still fires, but a pair that passes the gate (same lineage)
+    # does not stage the target here and leave a pending deployment that
+    # makes the real run below refuse with "Pending OSTree transaction".
     GATE_OUT=$(ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" 2>&1 || true)
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --dry-run" 2>&1 || true)
     if echo "$GATE_OUT" | grep -q "Cross-base re-base detected"; then
         echo "OK: target scanned cleanly and the pair IS cross-base; gate refused."
         echo "    The remap report above is #67's code executing for real."
         CROSS_BASE_EXECUTED=1
+    elif echo "$GATE_OUT" | grep -q "Cross-base check: host and target share an OS lineage"; then
+        # A same-base pair (tunaOS albacore:gnome -> albacore:niri): the gate
+        # scanned the target, found one lineage, and correctly let the
+        # re-base through (as a dry run, so nothing was staged).
+        echo "OK: target scanned cleanly and the pair shares a lineage; gate passed."
+        CROSS_BASE_EXECUTED=0
     elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
         echo "OK: target could not be scanned; gate refused on unknown status (#191)."
         echo "    NOTE: is_cross_base was never evaluated, so this run proves the"
@@ -996,7 +1080,7 @@ REBASEFIX
     # exercising the re-base route while proving nothing about #68.
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         REBASE_FLAGS="$REBASE_FLAGS --de-migrate"
-        step "=== ostree-rebase: seeding a GNOME config to stash (#188) ==="
+        step "=== ostree-rebase: seeding a $E2E_DE_FROM config to stash (#188) ==="
         # The ostree VM is installed straight from the base image, which ships
         # no human account at all. Without one the controller correctly takes
         # its "no human accounts to stash" branch and #68's stash never runs,
@@ -1011,20 +1095,21 @@ REBASEFIX
             fi
             h=$(getent passwd "$u" | cut -d: -f6)
             [ -n "$h" ] || { echo "NO_HOME for $u"; exit 1; }
-            mkdir -p "$h/.config/dconf" "$h/.local/share/gnome-shell"
-            echo "e2e-gnome-marker" > "$h/.config/dconf/user"
+            mkdir -p "$(dirname "$h/'"$DE_SEED_REL"'")"
+            echo "'"$DE_MARKER"'" > "$h/'"$DE_SEED_REL"'"
             chown -R "$u" "$h/.config" "$h/.local" 2>/dev/null || true
             echo "SEEDED user=$u home=$h"
         ' > /tmp/de-seed.log 2>&1 || true
         sed "s/^/[de-seed] /" /tmp/de-seed.log
         if ! grep -q "^SEEDED " /tmp/de-seed.log; then
-            echo "FAIL: could not seed a GNOME config for a human user. The DE"
+            echo "FAIL: could not seed a $E2E_DE_FROM config for a human user. The DE"
             echo "      assertions below would pass or fail for reasons that have"
             echo "      nothing to do with #68."
             exit 1
         fi
     fi
 
+    capture_health_baseline
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree $REBASE_FLAGS" \
@@ -1108,21 +1193,21 @@ REBASEFIX
                 # The seeded marker must be under the stash, and gone from the
                 # place it was seeded: a copy is not a stash, and an empty
                 # stash directory would satisfy a bare test -d.
-                grep -q e2e-gnome-marker "$h/.local/share/de-migrate/gnome/.config/dconf/user" \
-                    && ! test -e "$h/.config/dconf/user"
+                grep -q "'"$DE_MARKER"'" "$h/.local/share/de-migrate/'"$E2E_DE_FROM/$DE_SEED_REL"'" \
+                    && ! test -e "$h/'"$DE_SEED_REL"'"
             '; then
-                echo "FAIL: DE migration reported a plan, but the seeded GNOME"
+                echo "FAIL: DE migration reported a plan, but the seeded $E2E_DE_FROM"
                 echo "      config was not moved into ~/.local/share/de-migrate."
                 echo "      The plan ran and the move did not — that is #68's"
                 echo "      unshipped half."
                 ssh $SSH_OPTS root@localhost '
                     u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
                     h=$(getent passwd "$u" | cut -d: -f6)
-                    echo "home=$h"; ls -la "$h/.config/dconf" "$h/.local/share/de-migrate" 2>&1
+                    echo "home=$h"; ls -laR "$h/.local/share/de-migrate" 2>&1 | head -40
                 ' 2>&1 | sed "s/^/[de-stash] /" || true
                 exit 1
             fi
-            echo "OK: the seeded GNOME config was moved into the stash."
+            echo "OK: the seeded $E2E_DE_FROM config was moved into the stash."
         elif grep -q "skipped (--de-migrate not passed)" /tmp/rebase-out.log; then
             echo "FAIL: --de-migrate was in REBASE_FLAGS but the controller still"
             echo "      reported it as not passed — the flag is not reaching the"
@@ -1524,6 +1609,30 @@ loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus
 echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
 
+    if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
+        # #68's other half: the stash is only useful if switching back
+        # brings the config home. Emulate the return trip on the booted
+        # target: restore the stashed config and assert the seeded marker
+        # is back in place and gone from the stash.
+        step "=== ostree-rebase: DE restore round trip (#68) ==="
+        ssh $SSH_OPTS root@localhost \
+            "DE_FROM='$E2E_DE_FROM' SEED='$DE_SEED_REL' MARKER='$DE_MARKER' bash -s" <<'DERESTORE' 2>&1 | sed 's/^/[de-restore] /'
+set -e
+u=$(awk -F: '$3>=1000 && $3<65534 && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
+h=$(getent passwd "$u" | cut -d: -f6)
+[ -n "$h" ] || { echo "FAIL: no human account found after the reboot"; exit 1; }
+test -e "$h/$SEED" && { echo "FAIL: the $DE_FROM config is back in \$HOME before any restore"; exit 1; }
+/var/tmp/bootc-rebase de-migrate restore --to-de "$DE_FROM" --home "$h" --stash-dir "$h/.local/share/de-migrate"
+grep -q "$MARKER" "$h/$SEED" \
+    || { echo "FAIL: restore did not bring the stashed $DE_FROM config back into \$HOME"; exit 1; }
+test -e "$h/.local/share/de-migrate/$DE_FROM/$SEED" \
+    && { echo "FAIL: the restored config is still in the stash (copied, not moved)"; exit 1; }
+echo "OK: stash -> restore round trip returned the $DE_FROM config to $h"
+DERESTORE
+    fi
+
+    assert_system_healthy "ostree-rebase"
+
     step "=== ostree-rebase PASSED ==="
     exit 0
 fi
@@ -1567,6 +1676,7 @@ REVFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> ostree via OstreeInstall (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
 
+    capture_health_baseline
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
     # steps of this mode, and a job that times out inside them must leave
@@ -1720,6 +1830,38 @@ ESPCHECK
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
+    # What backs /var on the OSTree deployment. On a clean fedora-bootc
+    # install chronyd and gssproxy start; after this route both fail on
+    # missing /var/lib state even though the target's tmpfiles.d creates it
+    # at boot, which points at a /var mount carried over from the composefs
+    # source and mounted over the stateroot /var after tmpfiles ran.
+    step "=== composefs-to-ostree: /var mount diagnostics ==="
+    ssh $SSH_OPTS root@localhost bash <<'VARDIAG' 2>&1 | sed 's/^/[var-diag] /' || true
+set +e
+echo '--- findmnt /var'; findmnt /var
+echo '--- /etc/fstab'; grep -v '^#' /etc/fstab | sed '/^$/d'
+echo '--- /var mount units'; systemctl list-units --all --no-legend '*var*.mount'
+for u in $(systemctl list-units --all --no-legend --plain '*var*.mount' | awk '{print $1}'); do
+    echo ">>> $u"; systemctl cat "$u" 2>&1 | head -20
+done
+echo '--- /etc/systemd/system mounts'; ls -la /etc/systemd/system/*.mount /etc/systemd/system/*/*.mount 2>&1
+echo '--- chrony dirs'; ls -ld /var/lib/chrony /sysroot/ostree/deploy/default/var/lib/chrony 2>&1
+echo '--- tmpfiles-setup'; systemctl status --no-pager --lines 5 systemd-tmpfiles-setup.service 2>&1 | head -12
+echo '--- gssproxy dirs'; ls -ld /var/lib/gssproxy /var/lib/gssproxy/* 2>&1 | head
+echo '--- tmpfiles-setup errors (exit 65 = some lines failed)'
+journalctl -b --no-pager -o cat -u systemd-tmpfiles-setup.service 2>&1 | grep -v '^Starting\|^Finished' | head -40
+echo '--- chrony account'; getent passwd chrony; getent group chrony
+echo '--- /etc/passwd source of chrony'; grep -H '^chrony:' /etc/passwd /usr/lib/passwd 2>&1
+echo '--- krb5 / crypto-policies'; ls -la /etc/krb5.conf /etc/krb5.conf.d/ 2>&1; ls -la /etc/crypto-policies/back-ends/ 2>&1 | head -20
+echo '--- vendor /usr/etc files missing from the merged /etc'
+( cd /usr/etc && find . \( -type f -o -type l \) | sed 's|^\./||' | sort ) > /tmp/usr-etc.txt
+( cd /etc && find . \( -type f -o -type l \) | sed 's|^\./||' | sort ) > /tmp/etc.txt
+comm -23 /tmp/usr-etc.txt /tmp/etc.txt | head -60
+echo "(missing: $(comm -23 /tmp/usr-etc.txt /tmp/etc.txt | wc -l) of $(wc -l < /tmp/usr-etc.txt))"
+VARDIAG
+
+    assert_system_healthy "composefs-to-ostree"
+
     step "=== composefs-to-ostree PASSED ==="
     exit 0
 fi
@@ -1763,6 +1905,7 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    capture_health_baseline
     step "=== image-swap: running bootc-rebase --target-backend composefs ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
     # long step of this mode, and a job that times out inside it must leave
@@ -1942,6 +2085,8 @@ SWAPSSH
         echo "FAIL: the base deployment $BASE_VERITY is gone — no rollback left"; exit 1; }
     echo "OK: base deployment kept as rollback."
 
+    assert_system_healthy "image-swap"
+
     step "=== image-swap PASSED ==="
     exit 0
 fi
@@ -2073,6 +2218,7 @@ echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' 
 CROSSFIX
 fi
 
+capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
 ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
@@ -2396,6 +2542,8 @@ if [ "$BOOTED_BACKEND" = "null" ]; then
     exit 1
 fi
 echo "OK: Booted backend is ComposeFS."
+
+assert_system_healthy "post-migration"
 
 # #256: the whole point — the migrated system is the target's family.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then
@@ -3050,5 +3198,39 @@ echo "=== End diff ===" >> e2e-run.log
 # Count lines for summary.
 EXTRA_COUNT=$(comm -23 /tmp/e2e-post-commit-files.txt /tmp/e2e-fresh-dakota-files.txt 2>/dev/null | wc -l)
 echo "Post-commit diff summary: $EXTRA_COUNT paths present beyond fresh Dakota factory state (expected: user /etc + /var data)." | tee -a e2e-run.log
+
+# The other direction is an assertion: every file the target image ships in
+# /etc must exist on the migrated system. A missing vendor file means the
+# /etc merge dropped target configuration (the class of bug that lost Utah's
+# accounts). Paths the migration removes on purpose go in the list below,
+# each with its reason.
+step "=== Asserting the target's vendor /etc survived the migration ==="
+# GRUB and ostree-remount belong to the ostree boot path that a composefs +
+# systemd-boot system no longer uses. Phase 4 drops them from the new /etc
+# (drop_ostree_era_etc_artifacts) and commit removes the remount link again
+# (transaction.rs), so their absence is the migration working.
+VENDOR_ETC_ALLOWED_MISSING="
+/etc/grub.d/15_ostree
+/etc/grub.d/35_fwupd
+/etc/systemd/system/local-fs.target.wants/ostree-remount.service
+"
+# comm needs one collation; the two listings were sorted on different hosts.
+LC_ALL=C sort -u -o /tmp/e2e-post-commit-files.txt /tmp/e2e-post-commit-files.txt
+grep '^/etc/' /tmp/e2e-fresh-dakota-files.txt | LC_ALL=C sort -u > /tmp/e2e-vendor-etc.txt || true
+VENDOR_ETC_COUNT=$(wc -l < /tmp/e2e-vendor-etc.txt)
+if [ "$VENDOR_ETC_COUNT" -eq 0 ]; then
+    echo "FAIL: the reference listing of $TARGET_IMAGE has no /etc files; the comparison would pass vacuously"
+    exit 1
+fi
+MISSING_VENDOR=$(LC_ALL=C comm -13 /tmp/e2e-post-commit-files.txt /tmp/e2e-vendor-etc.txt || true)
+for allowed in $VENDOR_ETC_ALLOWED_MISSING; do
+    MISSING_VENDOR=$(echo "$MISSING_VENDOR" | grep -vxF "$allowed" || true)
+done
+if [ -n "$MISSING_VENDOR" ]; then
+    echo "FAIL: $(echo "$MISSING_VENDOR" | wc -l) file(s) the target image ships in /etc are missing after the migration:"
+    echo "$MISSING_VENDOR" | head -40 | sed 's/^/  /'
+    exit 1
+fi
+echo "OK: all $VENDOR_ETC_COUNT /etc files the target image ships are present."
 
 step "=== E2E TEST PASSED SUCCESSFULY ==="
