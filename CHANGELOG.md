@@ -72,6 +72,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `bootc-rebase`'s composefs image swap now arms a first-boot SELinux
+  relabel when the target enforces a policy the host did not label for.
+  `bootc switch` on Dakota, which has no SELinux policy, stages `/etc`
+  without labels. Utah then boots enforcing, denies its own services every
+  file in `/etc` and `/var`, and never finishes booting. The staged
+  deployment now gets the cross-family first-boot unit, which runs the
+  target's `restorecon` over `/etc` and `/var` before `sysinit.target`.
 - `bootc-rebase` finalizes the deployment `bootc switch` staged before it
   returns, instead of leaving it to shutdown (#262). On a `bootc install
   to-disk` layout with no separate /boot partition, libostree's shutdown-time
