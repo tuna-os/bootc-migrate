@@ -1016,8 +1016,12 @@ REBASEFIX
     # reason and the assertion called that a failure. What must never happen is
     # the re-base proceeding unguarded, so that is what this checks.
     step "=== ostree-rebase: asserting the cross-base gate refuses without opt-in (#191) ==="
+    # --dry-run: the gate is evaluated before the dry-run exit, so every
+    # refusal still fires, but a pair that passes the gate (same lineage)
+    # does not stage the target here and leave a pending deployment that
+    # makes the real run below refuse with "Pending OSTree transaction".
     GATE_OUT=$(ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree" 2>&1 || true)
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --dry-run" 2>&1 || true)
     if echo "$GATE_OUT" | grep -q "Cross-base re-base detected"; then
         echo "OK: target scanned cleanly and the pair IS cross-base; gate refused."
         echo "    The remap report above is #67's code executing for real."
@@ -1025,8 +1029,7 @@ REBASEFIX
     elif echo "$GATE_OUT" | grep -q "Cross-base check: host and target share an OS lineage"; then
         # A same-base pair (tunaOS albacore:gnome -> albacore:niri): the gate
         # scanned the target, found one lineage, and correctly let the
-        # re-base through. It staged the target, which the real run below
-        # stages again with its own flags.
+        # re-base through (as a dry run, so nothing was staged).
         echo "OK: target scanned cleanly and the pair shares a lineage; gate passed."
         CROSS_BASE_EXECUTED=0
     elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
