@@ -17,6 +17,10 @@
 #   E2E_ALLOWED_FAILED_UNITS  space-separated glob patterns of units allowed
 #                             to be failed; each must carry a reason where it
 #                             is set (the matrix cell or the default below).
+#   E2E_ALLOWED_MISLABELED    space-separated glob patterns of paths whose
+#                             new mislabel is reported, not failed. Only for
+#                             an image whose own policy is inconsistent; the
+#                             matrix cell carries the reason.
 #
 # Exit status: 0 when every check passes, 1 otherwise. All checks run before
 # exiting so one run reports every problem.
@@ -165,9 +169,41 @@ if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enfo
     else
         new_mislabeled=$(printf '%s\n' "$mislabeled" | sed '/^$/d')
     fi
+    if [ -n "$new_mislabeled" ] && [ -n "${E2E_ALLOWED_MISLABELED:-}" ]; then
+        kept=""
+        allowed_count=0
+        while IFS= read -r path; do
+            permitted=0
+            for pattern in $E2E_ALLOWED_MISLABELED; do
+                # shellcheck disable=SC2254 # patterns are globs on purpose
+                case "$path" in $pattern) permitted=1 ;; esac
+            done
+            if [ "$permitted" = 1 ]; then
+                allowed_count=$((allowed_count + 1))
+            else
+                kept="$kept$path"$'\n'
+            fi
+        done <<< "$new_mislabeled"
+        echo "  $allowed_count new mislabeled path(s) match E2E_ALLOWED_MISLABELED (not counted)"
+        new_mislabeled=$(printf '%s' "$kept" | sed '/^$/d')
+    fi
     if [ -n "$new_mislabeled" ]; then
         bad "$(echo "$new_mislabeled" | wc -l) path(s) under /etc or /var/home are mislabeled for the target's policy and were not on the base"
         restorecon -Rnv /etc /var/home 2>/dev/null | grep -F -f <(echo "$new_mislabeled" | head -20 | sed 's/$/ from/') | head -20 | sed 's/^/    /'
+        # A home directory the policy maps to default_t means the policy's
+        # /var/home -> /home equivalence (file_contexts.subs*) or its home
+        # contexts (file_contexts.homedirs) did not survive the /etc merge.
+        if echo "$new_mislabeled" | grep -q '^/var/home/'; then
+            fc=/etc/selinux/targeted/contexts/files
+            echo "  policy home-directory mapping:"
+            matchpathcon /var/home /home 2>&1 | sed 's/^/    /'
+            for f in "$fc"/file_contexts.subs "$fc"/file_contexts.subs_dist; do
+                [ -f "$f" ] && echo "    $f:" && grep -E 'home' "$f" | sed 's/^/      /'
+            done
+            ls -l "$fc"/file_contexts.homedirs* 2>&1 | sed 's/^/    /'
+            grep -c . "$fc"/file_contexts.homedirs 2>&1 | sed 's/^/    homedirs lines: /'
+            [ -d /usr/etc/selinux ] && diff -rq /usr/etc/selinux /etc/selinux 2>&1 | head -20 | sed 's/^/    vendor diff: /'
+        fi
     else
         ok "the migration left no path under /etc or /var/home mislabeled"
     fi

@@ -204,6 +204,11 @@ the VM and fails the cell when any of these is not true:
   that the base already has mislabeled. Those paths are reported but do
   not fail the cell. For example, tunaOS labels `/var/home/linuxbrew`
   `home_root_t` on a fresh install.
+  A cell can also list path globs in `allowed_mislabeled` when the image's
+  own policy is not consistent. The cell must give the reason. The
+  `albacore:gnome` policy maps `/var/home` to `/home` but writes its home
+  contexts for `/var/home`, so the two ring cells that include it allow
+  `/var/home/*`.
 
 The composefs migration mode also asserts the other direction of the
 fresh-image comparison. Every file that the target image ships in `/etc` must

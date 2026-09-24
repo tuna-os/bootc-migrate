@@ -94,6 +94,9 @@ DE_MARKER="e2e-${E2E_DE_FROM}-marker"
 # Glob patterns of units allowed to be failed after the reboot. Every entry
 # needs a reason next to where it is set (the matrix cell).
 E2E_ALLOWED_FAILED_UNITS="${E2E_ALLOWED_FAILED_UNITS:-}"
+# Glob patterns of paths whose new SELinux mislabel the health check
+# reports instead of failing. The matrix cell carries the reason.
+E2E_ALLOWED_MISLABELED="${E2E_ALLOWED_MISLABELED:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -135,7 +138,7 @@ assert_system_healthy() {
     local rc=0
     # pipefail: rc is the remote script's status, not sed's.
     ssh $SSH_OPTS root@localhost \
-        "E2E_EXPECT_DM='$E2E_EXPECT_DM' E2E_ALLOWED_FAILED_UNITS='$E2E_ALLOWED_FAILED_UNITS' bash -s" \
+        "E2E_EXPECT_DM='$E2E_EXPECT_DM' E2E_ALLOWED_FAILED_UNITS='$E2E_ALLOWED_FAILED_UNITS' E2E_ALLOWED_MISLABELED='$E2E_ALLOWED_MISLABELED' bash -s" \
         < "$(dirname "$0")/e2e-health.sh" 2>&1 | sed 's/^/[health] /' || rc=$?
     if [ "$rc" != 0 ] && [ "${2:-}" = "report" ]; then
         echo "NOTE: baseline health findings above are reported, not asserted"
@@ -1845,6 +1848,16 @@ echo '--- /etc/systemd/system mounts'; ls -la /etc/systemd/system/*.mount /etc/s
 echo '--- chrony dirs'; ls -ld /var/lib/chrony /sysroot/ostree/deploy/default/var/lib/chrony 2>&1
 echo '--- tmpfiles-setup'; systemctl status --no-pager --lines 5 systemd-tmpfiles-setup.service 2>&1 | head -12
 echo '--- gssproxy dirs'; ls -ld /var/lib/gssproxy /var/lib/gssproxy/* 2>&1 | head
+echo '--- tmpfiles-setup errors (exit 65 = some lines failed)'
+journalctl -b --no-pager -o cat -u systemd-tmpfiles-setup.service 2>&1 | grep -v '^Starting\|^Finished' | head -40
+echo '--- chrony account'; getent passwd chrony; getent group chrony
+echo '--- /etc/passwd source of chrony'; grep -H '^chrony:' /etc/passwd /usr/lib/passwd 2>&1
+echo '--- krb5 / crypto-policies'; ls -la /etc/krb5.conf /etc/krb5.conf.d/ 2>&1; ls -la /etc/crypto-policies/back-ends/ 2>&1 | head -20
+echo '--- vendor /usr/etc files missing from the merged /etc'
+( cd /usr/etc && find . \( -type f -o -type l \) | sed 's|^\./||' | sort ) > /tmp/usr-etc.txt
+( cd /etc && find . \( -type f -o -type l \) | sed 's|^\./||' | sort ) > /tmp/etc.txt
+comm -23 /tmp/usr-etc.txt /tmp/etc.txt | head -60
+echo "(missing: $(comm -23 /tmp/usr-etc.txt /tmp/etc.txt | wc -l) of $(wc -l < /tmp/usr-etc.txt))"
 VARDIAG
 
     assert_system_healthy "composefs-to-ostree"
@@ -3192,7 +3205,15 @@ echo "Post-commit diff summary: $EXTRA_COUNT paths present beyond fresh Dakota f
 # accounts). Paths the migration removes on purpose go in the list below,
 # each with its reason.
 step "=== Asserting the target's vendor /etc survived the migration ==="
-VENDOR_ETC_ALLOWED_MISSING=""
+# GRUB and ostree-remount belong to the ostree boot path that a composefs +
+# systemd-boot system no longer uses. Phase 4 drops them from the new /etc
+# (drop_ostree_era_etc_artifacts) and commit removes the remount link again
+# (transaction.rs), so their absence is the migration working.
+VENDOR_ETC_ALLOWED_MISSING="
+/etc/grub.d/15_ostree
+/etc/grub.d/35_fwupd
+/etc/systemd/system/local-fs.target.wants/ostree-remount.service
+"
 # comm needs one collation; the two listings were sorted on different hosts.
 LC_ALL=C sort -u -o /tmp/e2e-post-commit-files.txt /tmp/e2e-post-commit-files.txt
 grep '^/etc/' /tmp/e2e-fresh-dakota-files.txt | LC_ALL=C sort -u > /tmp/e2e-vendor-etc.txt || true

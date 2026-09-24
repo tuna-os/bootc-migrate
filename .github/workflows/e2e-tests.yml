@@ -231,6 +231,14 @@ jobs:
             # here with every migration check passing. It judges the image,
             # not the migration.
             allowed_failed_units: tunaos-base-contract.service
+            # albacore:gnome's own policy is inconsistent: its
+            # file_contexts.subs_dist maps /var/home to /home, but its
+            # file_contexts.homedirs is written for /var/home, so it labels
+            # every home default_t (niri, cosmic and xfce map /home to
+            # /var/home and label homes user_home_t). /var/home labels then
+            # differ across this pair whichever way the migration goes.
+            # /etc stays fully checked.
+            allowed_mislabeled: "/var/home/*"
             allow_failure: true
           - name: "tunaOS albacore niri -> cosmic (OstreeDeploy, --de-migrate)"
             base: ghcr.io/tuna-os/albacore:niri
@@ -273,6 +281,14 @@ jobs:
             # here with every migration check passing. It judges the image,
             # not the migration.
             allowed_failed_units: tunaos-base-contract.service
+            # albacore:gnome's own policy is inconsistent: its
+            # file_contexts.subs_dist maps /var/home to /home, but its
+            # file_contexts.homedirs is written for /var/home, so it labels
+            # every home default_t (niri, cosmic and xfce map /home to
+            # /var/home and label homes user_home_t). /var/home labels then
+            # differ across this pair whichever way the migration goes.
+            # /etc stays fully checked.
+            allowed_mislabeled: "/var/home/*"
             # Forward the journal to the serial console on one ring cell, so
             # an EL10 base that cannot start D-Bus (and so never reaches
             # SSH) leaves the reason in qemu.log. This is how tunaOS#2485
@@ -390,6 +406,7 @@ jobs:
             echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
             echo "E2E_EXPECT_DM=${{ matrix.scenario.expect_dm || '' }}"
             echo "E2E_ALLOWED_FAILED_UNITS=${{ matrix.scenario.allowed_failed_units || '' }}"
+            echo "E2E_ALLOWED_MISLABELED=${{ matrix.scenario.allowed_mislabeled || '' }}"
             echo "E2E_DE_FROM=${{ matrix.scenario.de_from || 'gnome' }}"
             echo "E2E_CONSOLE_JOURNAL=${{ matrix.scenario.console_journal && '1' || '0' }}"
           } >> "$GITHUB_ENV"
