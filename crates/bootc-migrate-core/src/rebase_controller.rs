@@ -244,25 +244,28 @@ fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
     Ok(std::path::Path::new(COMPOSEFS_DEPLOY_ROOT).join(verity))
 }
 
-/// Arm a first-boot SELinux relabel in the staged deployment when the
-/// target enforces a policy the host did not label for.
+/// Arm the image-swap first-boot unit in the staged deployment.
 ///
-/// `bootc switch` writes the merged `/etc` with the host's labels. A host
-/// with no SELinux policy (Dakota) writes none, so a target that boots
-/// enforcing (Utah) denies its own services every file in `/etc` and
-/// `/var`: D-Bus fails and the machine never finishes booting. The
-/// cross-family first-boot unit runs the target's `restorecon` over both
-/// trees before `sysinit.target`, with the target's own policy. The unit
-/// and its links are labelled here so the booting system can read them.
-fn schedule_staged_composefs_relabel() -> Result<()> {
+/// On composefs, `bootc switch` merges the host's `/etc` into the new
+/// deployment at shutdown. Two things break when the host is another
+/// distribution (Dakota to Utah):
+///
+/// - The host's locally created account databases replace the target's,
+///   so the target's system users (`dbus`) are missing. The unit runs the
+///   target's `systemd-sysusers` and `ldconfig` to restore them.
+/// - A host with no SELinux policy writes the merged files unlabeled, and
+///   a target that boots enforcing then denies its own services every file
+///   in `/etc` and `/var`. When the target enforces a policy the host did
+///   not label for, the unit also runs the target's `restorecon`.
+///
+/// The unit runs before `sysinit.target`. Its own files are labelled here
+/// so the booting system can read them.
+fn schedule_image_swap_firstboot() -> Result<()> {
     let deploy = staged_composefs_deployment()?;
     let host = selinux::read_host_selinux_config();
     let target = selinux::read_deployment_selinux_config(&deploy);
-    if !cross_family::relabel_needed(host.as_ref(), target.as_ref()) {
-        return Ok(());
-    }
-    let unit = cross_family::render_firstboot_unit(&[], true)
-        .context("the first-boot relabel unit rendered empty")?;
+    let relabel = cross_family::relabel_needed(host.as_ref(), target.as_ref());
+    let unit = cross_family::render_image_swap_firstboot_unit(relabel);
     let etc = deploy.join("etc");
     cross_family::install_firstboot_unit(&etc, &unit)?;
     let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
@@ -300,10 +303,16 @@ fn schedule_staged_composefs_relabel() -> Result<()> {
         }
     }
     println!(
-        "[selinux] the target enforces SELinux and the host labelled nothing for it: \
-         {} will relabel /etc and /var on first boot",
+        "[firstboot] {} will add the target's system users and rebuild the library cache on first boot",
         cross_family::FIRSTBOOT_UNIT
     );
+    if relabel {
+        println!(
+            "[selinux] the target enforces SELinux and the host labelled nothing for it: \
+             {} will relabel /etc and /var on first boot",
+            cross_family::FIRSTBOOT_UNIT
+        );
+    }
     Ok(())
 }
 
@@ -550,7 +559,7 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
-        schedule_staged_composefs_relabel()?;
+        schedule_image_swap_firstboot()?;
 
         finalize_staged_now()?;
 

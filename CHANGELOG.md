@@ -72,13 +72,19 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
-- `bootc-rebase`'s composefs image swap now arms a first-boot SELinux
-  relabel when the target enforces a policy the host did not label for.
-  `bootc switch` on Dakota, which has no SELinux policy, stages `/etc`
-  without labels. Utah then boots enforcing, denies its own services every
-  file in `/etc` and `/var`, and never finishes booting. The staged
-  deployment now gets the cross-family first-boot unit, which runs the
-  target's `restorecon` over `/etc` and `/var` before `sysinit.target`.
+- `bootc-rebase`'s composefs image swap now prepares the new deployment's
+  first boot when the target is another distribution. On composefs, `bootc
+  switch` merges the running `/etc` at shutdown. From Dakota to Utah, this
+  merge has two results:
+  - Dakota creates its accounts at runtime, so its `/etc/passwd` replaces
+    Utah's, and Utah's `dbus` user is missing.
+  - Dakota has no SELinux policy, so the merged files have no labels, and
+    Utah boots enforcing.
+  In both cases D-Bus does not start and the boot never completes. The
+  route now installs a first-boot unit that runs the target's
+  `systemd-sysusers` and `ldconfig` before `sysinit.target`. When the
+  target enforces a policy that the host did not label for, the unit
+  also runs the target's `restorecon` over `/etc` and `/var`.
 - `bootc-rebase` finalizes the deployment `bootc switch` staged before it
   returns, instead of leaving it to shutdown (#262). On a `bootc install
   to-disk` layout with no separate /boot partition, libostree's shutdown-time

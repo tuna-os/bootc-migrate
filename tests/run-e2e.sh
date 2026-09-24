@@ -1923,14 +1923,15 @@ SWAPSSH
     REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
     [ "$REALUSER" != "MISSING" ] || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
     echo "OK: booted the $BOOTED_IMG deployment ($POST_VERITY) with /etc, /var and /var/home carried over."
-    # The target enforces SELinux and the host labelled nothing: the route
-    # armed a first-boot relabel, which removes its marker once it has run.
-    if grep -q "will relabel /etc and /var on first boot" /tmp/rebase-out.log; then
-        RELABEL_LEFT=$(ssh $SSH_OPTS root@localhost "[ -e /etc/bootc-migrate/cross-family-firstboot ] && echo armed || echo done")
-        [ "$RELABEL_LEFT" = "done" ] || { echo "FAIL: the first-boot SELinux relabel did not run"; exit 1; }
-        ssh $SSH_OPTS root@localhost "ls -Z /etc/passwd /etc/ld.so.cache" || true
-        echo "OK: first-boot SELinux relabel ran."
-    fi
+    # The route armed a first-boot unit (target system users, library
+    # cache, and an SELinux relabel when the target enforces a policy the
+    # host did not label for). It removes its marker once it has run.
+    grep -q "\[firstboot\]" /tmp/rebase-out.log || {
+        echo "FAIL: bootc-rebase did not arm the image-swap first-boot unit"; exit 1; }
+    FIRSTBOOT_LEFT=$(ssh $SSH_OPTS root@localhost "[ -e /etc/bootc-migrate/cross-family-firstboot ] && echo armed || echo done")
+    [ "$FIRSTBOOT_LEFT" = "done" ] || { echo "FAIL: the image-swap first-boot unit did not run"; exit 1; }
+    ssh $SSH_OPTS root@localhost "getent passwd dbus; ls -Z /etc/passwd /etc/ld.so.cache 2>/dev/null" || true
+    echo "OK: image-swap first-boot unit ran."
 
     # The base deployment must remain as rollback: bootc reports it, or at
     # least its deployment directory is still on disk.
