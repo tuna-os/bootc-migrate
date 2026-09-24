@@ -15,37 +15,74 @@
 //!
 //! Both support `dry_run` previews. Callers are responsible for privilege
 //! checks; these functions assume root.
+//!
+//! `commit`'s bootloader/entries-dir detection is split out into
+//! [`discover_commit_plan`], which returns an inspectable [`CommitPlan`]
+//! before any mutation happens. That is one step toward a full plan/executor
+//! split for this module (tracked separately) — the rest of `commit`'s body,
+//! and all of `undo`, still interleave discovery with destructive filesystem
+//! operations, in the same order they always have.
 
 use crate::migration;
 use crate::motd;
 use anyhow::{Context, Result};
 use std::path::{Component, Path, PathBuf};
 
-pub fn commit(dry_run: bool) -> Result<()> {
-    println!("=== Committing composefs deployment as permanent default ===");
-    if dry_run {
-        println!("*** DRY RUN — no changes will be made ***");
-    }
+/// Boot-layout facts [`discover_commit_plan`] gathers before [`commit`]
+/// mutates anything.
+///
+/// This is discovery only — no filesystem writes, no deletions, no mount
+/// calls beyond the read-only auto-mount [`migration::find_esp_or_mount`]
+/// already performs when the ESP isn't where `/etc/fstab` expects it. Naming
+/// these facts here (rather than leaving them as local variables threaded
+/// through `commit`'s body) is the first step toward the plan/executor split
+/// this module's docs describe as still missing: a caller or test can now
+/// inspect exactly what `commit` detected without also triggering the
+/// destructive second half of the function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitPlan {
+    /// Directory that held the `bootc_*` BLS entries this plan was built
+    /// from — either the default `/boot/loader/entries`, an ESP-mounted
+    /// `loader/entries`, or the auto-mounted ESP fallback's `loader/entries`.
+    pub entries_dir: PathBuf,
+    /// True when a systemd-boot ESP layout was detected (composefs `bootc_*`
+    /// entries found under some `entries_dir`); false means GRUB2.
+    pub is_systemd_boot: bool,
+    /// `bootc_*` BLS entry filenames found under `entries_dir`, unsorted —
+    /// `commit` picks the highest-priority one after sorting.
+    pub composefs_entries: Vec<String>,
+}
 
-    // Sanity check: refuse to run if booted via the OSTree side. Committing
-    // would delete the rootfs we're currently mounted on top of.
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if !cmdline.contains("composefs=") {
-        anyhow::bail!(
-            "/proc/cmdline does not contain composefs= — current boot looks like OSTree. \
-             Reboot into the composefs entry before running commit.\n\
-             cmdline: {}",
-            cmdline.trim()
-        );
-    }
-
+/// Detect the bootloader layout and composefs BLS entries `commit` needs,
+/// without mutating anything.
+///
+/// Mirrors the precedence `commit` has always used: default `/boot` entries
+/// first, then each ESP candidate (`/boot/efi`, `/efi`), then — only if
+/// nothing was found yet — an auto-mount attempt via
+/// [`migration::find_esp_or_mount`] for the case where the ESP is mounted at
+/// a non-standard path and the boot-time fstab doesn't know about it.
+/// Detect the bootloader layout and composefs BLS entries `commit` needs,
+/// without mutating anything.
+///
+/// Mirrors the precedence `commit` has always used: default `<boot_root>/boot`
+/// entries first, then each ESP candidate under `boot_root`
+/// (`boot/efi`, `efi`), then — only if nothing was found yet and
+/// `try_esp_auto_mount` is set — a real auto-mount attempt via
+/// [`migration::find_esp_or_mount`] for the case where the ESP is mounted at
+/// a non-standard path and the boot-time fstab doesn't know about it.
+///
+/// `boot_root` and `try_esp_auto_mount` exist so tests can point this at a
+/// tempdir fixture without also triggering a real `lsblk`/mount call; the
+/// public [`commit`] entry point always passes `boot_root = "/"` and
+/// `try_esp_auto_mount = true`.
+fn discover_commit_plan_at(boot_root: &Path, try_esp_auto_mount: bool) -> Result<CommitPlan> {
     // Detect bootloader — check ESP entries for systemd-boot first.
-    let esp_candidates = ["/boot/efi", "/efi"];
-    let mut entries_dir = PathBuf::from("/boot/loader/entries");
+    let esp_candidates = ["boot/efi", "efi"];
+    let mut entries_dir = boot_root.join("boot/loader/entries");
     let mut is_systemd_boot = false;
 
     for esp in &esp_candidates {
-        let esp_entries = Path::new(esp).join("loader/entries");
+        let esp_entries = boot_root.join(esp).join("loader/entries");
         if esp_entries.exists() {
             // Check if there are bootc_ entries on the ESP.
             if let Ok(mut rd) = std::fs::read_dir(&esp_entries)
@@ -61,7 +98,7 @@ pub fn commit(dry_run: bool) -> Result<()> {
         }
     }
 
-    let mut composefs_entries: Vec<_> = Vec::new();
+    let mut composefs_entries: Vec<String> = Vec::new();
     if entries_dir.exists() {
         for entry in std::fs::read_dir(&entries_dir)? {
             let entry = entry?;
@@ -81,8 +118,11 @@ pub fn commit(dry_run: bool) -> Result<()> {
     // Fallback: the ESP may be unmounted or at a non-standard path
     // (e.g. after LUKS migration where Phase 5 auto-mounted it at
     // /var/tmp/esp-migration and the boot-time fstab doesn't know about
-    // it). Try auto-mounting the ESP by partition type GUID.
-    if composefs_entries.is_empty()
+    // it). Try auto-mounting the ESP by partition type GUID. Only ever
+    // attempted against the real root — tests pass try_esp_auto_mount=false
+    // because this hits lsblk and a real mount syscall.
+    if try_esp_auto_mount
+        && composefs_entries.is_empty()
         && let Ok(esp_path) = migration::find_esp_or_mount()
     {
         let esp_entries = Path::new(&esp_path).join("loader/entries");
@@ -105,8 +145,41 @@ pub fn commit(dry_run: bool) -> Result<()> {
         }
     }
 
-    if composefs_entries.is_empty() {
-        if is_systemd_boot {
+    Ok(CommitPlan {
+        entries_dir,
+        is_systemd_boot,
+        composefs_entries,
+    })
+}
+
+/// [`discover_commit_plan_at`] against the real root, with the real
+/// `lsblk`/auto-mount fallback enabled — what [`commit`] actually calls.
+fn discover_commit_plan() -> Result<CommitPlan> {
+    discover_commit_plan_at(Path::new("/"), true)
+}
+
+pub fn commit(dry_run: bool) -> Result<()> {
+    println!("=== Committing composefs deployment as permanent default ===");
+    if dry_run {
+        println!("*** DRY RUN — no changes will be made ***");
+    }
+
+    // Sanity check: refuse to run if booted via the OSTree side. Committing
+    // would delete the rootfs we're currently mounted on top of.
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if !cmdline.contains("composefs=") {
+        anyhow::bail!(
+            "/proc/cmdline does not contain composefs= — current boot looks like OSTree. \
+             Reboot into the composefs entry before running commit.\n\
+             cmdline: {}",
+            cmdline.trim()
+        );
+    }
+
+    let plan = discover_commit_plan()?;
+
+    if plan.composefs_entries.is_empty() {
+        if plan.is_systemd_boot {
             println!("No composefs BLS entries found on ESP. Nothing to commit.");
             println!(
                 "Note: for systemd-boot, the composefs entry should already be the default if it has the lowest sort-key."
@@ -118,9 +191,12 @@ pub fn commit(dry_run: bool) -> Result<()> {
     }
 
     // Sort by priority (higher first) and pick the highest
+    let mut composefs_entries = plan.composefs_entries;
     composefs_entries.sort();
     composefs_entries.reverse();
     let primary = composefs_entries[0].trim_end_matches(".conf");
+    let entries_dir = plan.entries_dir;
+    let is_systemd_boot = plan.is_systemd_boot;
 
     // /sysroot is typically read-only on a composefs-booted system. Prepare
     // a writable view of the same filesystem before retiring the rollback
@@ -994,6 +1070,89 @@ pub fn undo(dry_run: bool, full: bool) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn discover_commit_plan_finds_composefs_entries_at_the_default_boot_path() {
+        let temp = tempdir().unwrap();
+        let entries = temp.path().join("boot/loader/entries");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::write(entries.join("bootc_1.conf"), "title Target\n").unwrap();
+        std::fs::write(entries.join("ostree-0.conf"), "title Old\n").unwrap();
+
+        let plan = discover_commit_plan_at(temp.path(), false).unwrap();
+
+        assert_eq!(plan.entries_dir, entries);
+        assert!(plan.is_systemd_boot);
+        assert_eq!(plan.composefs_entries, vec!["bootc_1.conf".to_string()]);
+    }
+
+    #[test]
+    fn discover_commit_plan_prefers_an_esp_candidate_with_bootc_entries() {
+        let temp = tempdir().unwrap();
+        // A default-path entries dir exists but carries no bootc_ entries —
+        // must not be picked over the ESP candidate that has them.
+        let default_entries = temp.path().join("boot/loader/entries");
+        std::fs::create_dir_all(&default_entries).unwrap();
+        std::fs::write(default_entries.join("ostree-0.conf"), "title Old\n").unwrap();
+
+        let esp_entries = temp.path().join("boot/efi/loader/entries");
+        std::fs::create_dir_all(&esp_entries).unwrap();
+        std::fs::write(esp_entries.join("bootc_2.conf"), "title Target\n").unwrap();
+
+        let plan = discover_commit_plan_at(temp.path(), false).unwrap();
+
+        assert_eq!(plan.entries_dir, esp_entries);
+        assert!(plan.is_systemd_boot);
+        assert_eq!(plan.composefs_entries, vec!["bootc_2.conf".to_string()]);
+    }
+
+    #[test]
+    fn discover_commit_plan_is_empty_and_not_systemd_boot_when_nothing_matches() {
+        let temp = tempdir().unwrap();
+        // No boot/, no efi/ — the ESP-candidate loop and the default-path
+        // read both see a directory that doesn't exist.
+
+        let plan = discover_commit_plan_at(temp.path(), false).unwrap();
+
+        assert!(plan.composefs_entries.is_empty());
+        assert!(!plan.is_systemd_boot);
+        assert_eq!(plan.entries_dir, temp.path().join("boot/loader/entries"));
+    }
+
+    #[test]
+    fn discover_commit_plan_ignores_non_bootc_entries_at_the_default_path() {
+        let temp = tempdir().unwrap();
+        let entries = temp.path().join("boot/loader/entries");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::write(entries.join("ostree-0.conf"), "title Old\n").unwrap();
+        std::fs::write(entries.join("ostree-1.conf"), "title Older\n").unwrap();
+
+        let plan = discover_commit_plan_at(temp.path(), false).unwrap();
+
+        assert!(plan.composefs_entries.is_empty());
+        assert!(!plan.is_systemd_boot);
+    }
+
+    #[test]
+    fn discover_commit_plan_skips_an_esp_candidate_with_no_bootc_entries() {
+        let temp = tempdir().unwrap();
+        // ESP entries dir exists, but has nothing starting with bootc_ — the
+        // detection loop's `rd.any(...)` must reject it and fall through to
+        // the default path (which, here, has the real composefs entry).
+        let esp_entries = temp.path().join("efi/loader/entries");
+        std::fs::create_dir_all(&esp_entries).unwrap();
+        std::fs::write(esp_entries.join("something-else.conf"), "irrelevant\n").unwrap();
+
+        let default_entries = temp.path().join("boot/loader/entries");
+        std::fs::create_dir_all(&default_entries).unwrap();
+        std::fs::write(default_entries.join("bootc_1.conf"), "title Target\n").unwrap();
+
+        let plan = discover_commit_plan_at(temp.path(), false).unwrap();
+
+        assert_eq!(plan.entries_dir, default_entries);
+        assert!(plan.is_systemd_boot);
+        assert_eq!(plan.composefs_entries, vec!["bootc_1.conf".to_string()]);
+    }
 
     #[test]
     fn test_format_bytes() {
