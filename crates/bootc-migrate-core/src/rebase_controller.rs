@@ -178,6 +178,144 @@ pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where a composefs host keeps each deployment's `/etc` and `.origin`.
+const COMPOSEFS_DEPLOY_ROOT: &str = "/sysroot/state/deploy";
+
+/// The verity digest in `composefs=` on the kernel command line. A leading
+/// `?` marks an image booted without signature enforcement; it is not part
+/// of the digest.
+pub fn booted_composefs_verity(cmdline: &str) -> Option<&str> {
+    cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("composefs="))
+        .map(|v| v.trim_start_matches('?'))
+        .filter(|v| !v.is_empty())
+}
+
+/// The staged deployment's verity: bootc's own report when it gives one,
+/// else the most recently written deployment directory other than the
+/// booted one. `candidates` are `(verity, modified)` pairs for the
+/// directories that carry a `.origin`.
+fn pick_staged_verity(
+    reported: Option<&str>,
+    booted: Option<&str>,
+    candidates: &[(String, std::time::SystemTime)],
+) -> Option<String> {
+    if let Some(v) = reported.filter(|v| !v.is_empty()) {
+        return Some(v.to_string());
+    }
+    candidates
+        .iter()
+        .filter(|(v, _)| Some(v.as_str()) != booted)
+        .max_by_key(|(_, t)| *t)
+        .map(|(v, _)| v.clone())
+}
+
+/// The directory of the deployment `bootc switch` just staged on a
+/// composefs host.
+fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
+    let out = std::process::Command::new("bootc")
+        .args(["status", "--json"])
+        .output()
+        .context("failed to execute bootc status")?;
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let reported = json
+        .pointer("/status/staged/composefs/verity")
+        .and_then(|v| v.as_str());
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let booted = booted_composefs_verity(&cmdline);
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(COMPOSEFS_DEPLOY_ROOT)
+        .with_context(|| format!("failed to list {COMPOSEFS_DEPLOY_ROOT}"))?
+    {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.path().join(format!("{name}.origin")).exists() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        candidates.push((name, modified));
+    }
+    let verity = pick_staged_verity(reported, booted, &candidates)
+        .context("no staged composefs deployment found beside the booted one")?;
+    Ok(std::path::Path::new(COMPOSEFS_DEPLOY_ROOT).join(verity))
+}
+
+/// Arm the image-swap first-boot unit in the staged deployment.
+///
+/// On composefs, `bootc switch` merges the host's `/etc` into the new
+/// deployment at shutdown. Two things break when the host is another
+/// distribution (Dakota to Utah):
+///
+/// - The host's locally created account databases replace the target's,
+///   so the target's system users (`dbus`) are missing. The unit runs the
+///   target's `systemd-sysusers` and `ldconfig` to restore them.
+/// - A host with no SELinux policy writes the merged files unlabeled, and
+///   a target that boots enforcing then denies its own services every file
+///   in `/etc` and `/var`. When the target enforces a policy the host did
+///   not label for, the unit also runs the target's `restorecon`.
+///
+/// The unit runs before `sysinit.target`. Its own files are labelled here
+/// so the booting system can read them.
+fn schedule_image_swap_firstboot() -> Result<()> {
+    let deploy = staged_composefs_deployment()?;
+    let host = selinux::read_host_selinux_config();
+    let target = selinux::read_deployment_selinux_config(&deploy);
+    let relabel = cross_family::relabel_needed(host.as_ref(), target.as_ref());
+    let unit = cross_family::render_image_swap_firstboot_unit(relabel);
+    let etc = deploy.join("etc");
+    cross_family::install_firstboot_unit(&etc, &unit)?;
+    let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
+    let etc_ctx = "system_u:object_r:etc_t:s0";
+    let unit_dir = etc.join("systemd/system");
+    let marker = etc.join(cross_family::FIRSTBOOT_MARKER);
+    let labels = [
+        (unit_dir.join(cross_family::FIRSTBOOT_UNIT), unit_ctx),
+        (unit_dir.join("sysinit.target.wants"), unit_ctx),
+        (
+            unit_dir
+                .join("sysinit.target.wants")
+                .join(cross_family::FIRSTBOOT_UNIT),
+            unit_ctx,
+        ),
+        (
+            marker
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default(),
+            etc_ctx,
+        ),
+        (marker, etc_ctx),
+    ];
+    for (path, ctx) in &labels {
+        let mut value = ctx.as_bytes().to_vec();
+        value.push(0);
+        if let Err(e) = rustix::fs::lsetxattr(
+            path,
+            c"security.selinux",
+            &value,
+            rustix::fs::XattrFlags::empty(),
+        ) {
+            eprintln!("Warning: could not label {} as {ctx}: {e}", path.display());
+        }
+    }
+    println!(
+        "[firstboot] {} will add the target's system users and rebuild the library cache on first boot",
+        cross_family::FIRSTBOOT_UNIT
+    );
+    if relabel {
+        println!(
+            "[selinux] the target enforces SELinux and the host labelled nothing for it: \
+             {} will relabel /etc and /var on first boot",
+            cross_family::FIRSTBOOT_UNIT
+        );
+    }
+    Ok(())
+}
+
 /// libostree's record of a staged deployment awaiting finalization.
 const STAGED_DEPLOYMENT_MARKER: &str = "/run/ostree/staged-deployment";
 
@@ -421,6 +559,8 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
+        schedule_image_swap_firstboot()?;
+
         finalize_staged_now()?;
 
         println!(
@@ -559,6 +699,45 @@ impl OstreeDeployConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn booted_composefs_verity_table() {
+        assert_eq!(
+            booted_composefs_verity("root=UUID=1 composefs=abc12 rw"),
+            Some("abc12")
+        );
+        assert_eq!(
+            booted_composefs_verity("composefs=?abc12 quiet"),
+            Some("abc12")
+        );
+        assert_eq!(booted_composefs_verity("rd.composefs=1 root=UUID=1"), None);
+        assert_eq!(booted_composefs_verity("ostree=/ostree/boot.1/x/0"), None);
+        assert_eq!(booted_composefs_verity("composefs= quiet"), None);
+    }
+
+    #[test]
+    fn pick_staged_verity_table() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = |s| UNIX_EPOCH + Duration::from_secs(s);
+        let c = vec![("base".to_string(), t(10)), ("new".to_string(), t(20))];
+        // bootc's report wins.
+        assert_eq!(
+            pick_staged_verity(Some("x"), Some("base"), &c).as_deref(),
+            Some("x")
+        );
+        // Otherwise the newest non-booted deployment.
+        assert_eq!(
+            pick_staged_verity(None, Some("base"), &c).as_deref(),
+            Some("new")
+        );
+        // The booted one is never picked, even when newest.
+        let c2 = vec![("old".to_string(), t(5)), ("base".to_string(), t(30))];
+        assert_eq!(
+            pick_staged_verity(None, Some("base"), &c2).as_deref(),
+            Some("old")
+        );
+        assert_eq!(pick_staged_verity(Some(""), Some("base"), &c[..1]), None);
+    }
 
     #[test]
     fn finalized_state_table() {

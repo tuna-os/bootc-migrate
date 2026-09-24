@@ -185,6 +185,21 @@ jobs:
             mode: composefs-to-ostree
             disk_size: 40G
             allow_failure: true
+          # composefs -> composefs image swap across distributions: Dakota
+          # (GNOME OS-based, systemd-boot) to Utah (Bluefin on Fedora
+          # Hummingbird, composefs-enabled, GRUB via bootupd). Installs the
+          # base composefs-native, runs the ImageSwap route (the host's own
+          # `bootc switch`), and asserts the reboot lands in Utah with /etc,
+          # /var and /var/home carried and the Dakota deployment kept as
+          # rollback. utah publishes only :testing (pre-alpha), so this
+          # cell is non-gating.
+          - name: "dakota -> utah (composefs -> composefs, ImageSwap)"
+            base: ghcr.io/projectbluefin/dakota:stable
+            target: ghcr.io/projectbluefin/utah:testing
+            mode: image-swap
+            disk_size: 40G
+            expect_os_id: utah
+            allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
           # - name: fedora-bootc self-migration

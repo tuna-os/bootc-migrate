@@ -33,7 +33,7 @@ on:
         required: false
         default: composefs-migrate
         type: choice
-        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree]
+        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree, image-swap]
       cross_base:
         description: >-
           Pass --accept-cross-base and assert the cross-base remap report is
@@ -52,8 +52,9 @@ on:
         type: boolean
       expect_os_id:
         description: >-
-          os-release ID the migrated system must report (cross_family only,
-          e.g. opensuse-tumbleweed). Empty skips the identity assertion.
+          os-release ID the migrated system must report (cross_family and
+          image-swap, e.g. opensuse-tumbleweed or utah). Empty skips the
+          identity assertion.
         required: false
         default: ""
       runner:
