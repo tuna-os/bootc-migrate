@@ -82,7 +82,15 @@ if [ "$default_target" = graphical.target ]; then
     dm=$(systemctl show -p Id --value display-manager.service 2>/dev/null)
     echo "  display manager: ${dm:-<none>}"
     if [ -z "$dm" ] || [ "$dm" = display-manager.service ]; then
-        bad "graphical.target is the default but no display manager is enabled"
+        # Server images (fedora-bootc) default to graphical.target and ship
+        # no display manager. Only a cell that expects one fails here; a
+        # desktop that lost its display manager in the /etc merge is caught
+        # by E2E_EXPECT_DM.
+        if [ -n "${E2E_EXPECT_DM:-}" ]; then
+            bad "no display manager is enabled, expected ${E2E_EXPECT_DM%.service}.service"
+        else
+            echo "  no display manager is enabled (none expected)"
+        fi
     elif systemctl is-active --quiet display-manager.service; then
         ok "display manager $dm is active"
     else
@@ -105,11 +113,19 @@ for f in /usr/lib/sysusers.d/*.conf; do
     [ -f "$f" ] || continue
     # Only the local /etc override (same basename) replaces a vendor file.
     [ -f "/etc/sysusers.d/$(basename "$f")" ] && f="/etc/sysusers.d/$(basename "$f")"
-    while read -r type name _; do
+    while read -r type name id _; do
         case "$name" in *%*|"") continue ;; esac
         case "$type" in
-            u|u!) getent passwd "$name" >/dev/null || missing="$missing user:$name"
-                  getent group "$name" >/dev/null || missing="$missing group:$name" ;;
+            u|u!)
+                getent passwd "$name" >/dev/null || missing="$missing user:$name"
+                # sysusers.d(5): "uid:gid" or "-:group" names the primary
+                # group, and then no group of the user's name is created
+                # (`u sync 5:0` uses root's group). Otherwise it is.
+                case "$id" in
+                    *:*) primary="${id#*:}"
+                         getent group "$primary" >/dev/null || missing="$missing group:$primary" ;;
+                    *) getent group "$name" >/dev/null || missing="$missing group:$name" ;;
+                esac ;;
             g) getent group "$name" >/dev/null || missing="$missing group:$name" ;;
         esac
     done < <(grep -Ev '^\s*(#|$)' "$f")

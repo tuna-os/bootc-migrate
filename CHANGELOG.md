@@ -85,6 +85,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `bootc-rebase`'s composefs → OSTree route now fills the new stateroot's
+  `/var` with the target image's own `/var` skeleton after it copies the
+  live `/var`, without overwriting anything it carried. The stateroot of
+  an alongside install starts empty, so fedora-bootc booted without
+  `/var/lib/chrony`, and chronyd failed. The new post-reboot health check
+  found this.
 - `bootc-rebase`'s composefs image swap now prepares the new deployment's
   first boot when the target is another distribution. On composefs, `bootc
   switch` merges the running `/etc` at shutdown. From Dakota to Utah, this

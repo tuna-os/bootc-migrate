@@ -128,15 +128,18 @@ serial_failure_lines() {
 # checks that the migrated system works, not only that data survived: boot
 # completed, no unexpected failed unit, D-Bus and logind answer, the display
 # manager runs, the target's declared accounts exist, and SELinux labels are
-# correct. Exits the run on any failure.
+# correct. Exits the run on any failure, unless the second argument is
+# "report": then it only prints, for a baseline of an unmigrated image.
 assert_system_healthy() {
-    step "=== $1: system health after reboot ==="
+    step "=== $1: system health ==="
     local rc=0
     # pipefail: rc is the remote script's status, not sed's.
     ssh $SSH_OPTS root@localhost \
         "E2E_EXPECT_DM='$E2E_EXPECT_DM' E2E_ALLOWED_FAILED_UNITS='$E2E_ALLOWED_FAILED_UNITS' bash -s" \
         < "$(dirname "$0")/e2e-health.sh" 2>&1 | sed 's/^/[health] /' || rc=$?
-    if [ "$rc" != 0 ]; then
+    if [ "$rc" != 0 ] && [ "${2:-}" = "report" ]; then
+        echo "NOTE: baseline health findings above are reported, not asserted"
+    elif [ "$rc" != 0 ]; then
         echo "FAIL: the migrated system is not healthy (see the [health] lines above)"
         exit 1
     fi
@@ -935,6 +938,10 @@ step "=== Target image: ${VM_TARGET_IMAGE} (pulled directly by the migration) ==
 # Tracer mode (#63): verify bootc-rebase route resolution on a real
 # OSTree-booted system, then exit before any migration machinery runs.
 if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
+    # A freshly installed, unmigrated base: the reference for which health
+    # findings an image has on its own. Dispatch this mode with the target
+    # of a cell as its base to tell a migration bug from an image's own.
+    assert_system_healthy "ostree-rebase-plan: baseline of $BASE_IMAGE" report
     step "=== ostree-rebase-plan: copying bootc-rebase to VM ==="
     scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
     step "=== ostree-rebase-plan: resolving route on the VM ==="
