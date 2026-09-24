@@ -431,19 +431,22 @@ impl SystemInfo {
                 {
                     let device = format!("/dev/{}", parts[0]);
                     // Temporarily mount to check free space.
-                    let tmp_mount = "/var/tmp/esp-preflight";
-                    let _ = fs::create_dir_all(tmp_mount);
+                    let Ok(tmp_mount) =
+                        crate::migration::boot::private_mount_point("esp-preflight")
+                    else {
+                        continue;
+                    };
                     let mount_status = Command::new("mount")
-                        .args(["-t", "vfat", &device, tmp_mount])
+                        .args(["-t", "vfat", &device, &tmp_mount])
                         .status();
                     if let Ok(s) = mount_status
                         && s.success()
                     {
-                        if let Ok(free_space) = get_free_space(tmp_mount) {
+                        if let Ok(free_space) = get_free_space(&tmp_mount) {
                             esp_free_space_bytes = free_space;
                         }
                         esp_fs_type = Some("vfat".to_string());
-                        esp_path = Some(tmp_mount.to_string());
+                        esp_path = Some(tmp_mount);
                         esp_tmp_mounted = true;
                         break;
                     }

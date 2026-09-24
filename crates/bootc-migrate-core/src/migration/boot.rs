@@ -894,6 +894,36 @@ fn find_ostree_deployment() -> Result<(PathBuf, String)> {
 
 // ---- Helpers ----
 
+/// Root-owned, root-only directory for this tool's transient mount points.
+///
+/// `/run` is a tmpfs only root can write to. `/var/tmp`, where these mount
+/// points used to live, is world-writable: any local user could pre-create
+/// `/var/tmp/esp-migration` (or a symlink to it, where `fs.protected_symlinks`
+/// is off) before root ran the tool, and the ESP then sat world-readable at a
+/// path everyone knew for the rest of the migration.
+pub(crate) const PRIVATE_RUN_DIR: &str = "/run/bootc-migrate";
+
+/// A fresh mount point `<PRIVATE_RUN_DIR>/<name>`, mode 0700 all the way
+/// down. Returned as a `String` because the callers hand it to `mount(8)`
+/// and store it in the preflight report as text.
+pub(crate) fn private_mount_point(name: &str) -> Result<String> {
+    private_mount_point_in(Path::new(PRIVATE_RUN_DIR), name)
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The testable core of [`private_mount_point`]: the root directory is a
+/// parameter so a test can exercise it without being root.
+fn private_mount_point_in(root: &Path, name: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mount_point = root.join(name);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&mount_point)
+        .with_context(|| format!("failed to create mount point {}", mount_point.display()))?;
+    Ok(mount_point)
+}
+
 /// Ensure the ESP is mounted and return its mount path.
 /// On OSTree systems the ESP may not be auto-mounted; we mount it temporarily if needed.
 fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
@@ -923,10 +953,9 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 && parts[1] == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {
             let device = format!("/dev/{}", parts[0]);
-            let mount_point = "/var/tmp/esp-migration";
-            fs::create_dir_all(mount_point)?;
+            let mount_point = private_mount_point("esp-migration")?;
             let status = Command::new("mount")
-                .args([&device, mount_point])
+                .args([&device, &mount_point])
                 .status()
                 .context("failed to mount ESP")?;
             if status.success() {
@@ -936,7 +965,7 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
                 // E2E assertion, which json.load()ed this and got
                 // "Expecting value: line 1 column 1").
                 eprintln!("Auto-mounted ESP {} at {}", device, mount_point);
-                return Ok(mount_point.to_string());
+                return Ok(mount_point);
             }
         }
     }
@@ -1007,16 +1036,15 @@ pub fn find_esp_or_mount() -> Result<String> {
         }
         found.ok_or_else(|| anyhow!("No ESP device found by partition label or type GUID"))?
     };
-    let mount_point = "/var/tmp/esp-migration";
-    fs::create_dir_all(mount_point)?;
+    let mount_point = private_mount_point("esp-migration")?;
     let status = Command::new("mount")
-        .args([&device, mount_point])
+        .args([&device, &mount_point])
         .status()
         .with_context(|| format!("failed to mount ESP {} at {}", device, mount_point))?;
     if status.success() {
         // stderr for the same reason as the sibling call site above.
         eprintln!("Auto-mounted ESP {} at {}", device, mount_point);
-        return Ok(mount_point.to_string());
+        return Ok(mount_point);
     }
     anyhow::bail!("Cannot find or mount ESP. Use --bootloader=grub2 to use GRUB2 instead.")
 }
@@ -1562,4 +1590,21 @@ mod tests {
     }
 
     // ── Slice 1: origin file schema tests ──
+
+    #[test]
+    fn private_mount_point_is_created_root_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("run").join("bootc-migrate");
+
+        let mp = private_mount_point_in(&root, "esp-migration").unwrap();
+        assert_eq!(mp, root.join("esp-migration"));
+        for p in [&root, &mp] {
+            let mode = fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} must be private, got {mode:o}", p.display());
+        }
+
+        // Idempotent: a second call on an existing mount point is fine.
+        assert_eq!(private_mount_point_in(&root, "esp-migration").unwrap(), mp);
+    }
 }
