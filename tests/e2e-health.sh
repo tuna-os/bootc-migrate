@@ -49,10 +49,13 @@ failed_units=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/nu
 unexpected=0
 for unit in $failed_units; do
     permitted=0
+    # set -f: the patterns are for case, not for pathname expansion.
+    set -f
     for pattern in $allowed; do
         # shellcheck disable=SC2254 # patterns are globs on purpose
         case "$unit" in $pattern) permitted=1 ;; esac
     done
+    set +f
     if [ "$permitted" = 1 ]; then
         echo "  failed unit on the allowlist: $unit"
     else
@@ -174,10 +177,14 @@ if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enfo
         allowed_count=0
         while IFS= read -r path; do
             permitted=0
+            # set -f: /var/home/* must stay a case pattern, not expand to
+            # the home directories that exist.
+            set -f
             for pattern in $E2E_ALLOWED_MISLABELED; do
                 # shellcheck disable=SC2254 # patterns are globs on purpose
                 case "$path" in $pattern) permitted=1 ;; esac
             done
+            set +f
             if [ "$permitted" = 1 ]; then
                 allowed_count=$((allowed_count + 1))
             else
