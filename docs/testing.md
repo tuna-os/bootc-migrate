@@ -163,11 +163,19 @@ display manager.
 
 ### tunaOS desktop ring
 
-Four non-gating cells re-base between the Yellowfin desktop tags in a ring:
+Four non-gating cells re-base between the Albacore (AlmaLinux 10) desktop
+tags in a ring:
 GNOME → Niri → COSMIC → XFCE → GNOME. Each desktop is a source once and a
 target once. Each change of display manager runs once, because the tags use
 different ones: GDM for GNOME, greetd with the DMS greeter for Niri,
 cosmic-greeter for COSMIC, and greetd with gtkgreet for XFCE.
+
+The ring does not use Yellowfin. On its rolling Kitten 10 base, a fresh
+install cannot start D-Bus: SELinux denies dbus-broker its
+`dbus_contexts` file (tunaOS#2485). Every Yellowfin base therefore fails
+before the migration starts. The XFCE cell forwards the journal to the
+serial console, so an EL10 base with this problem shows the reason in
+`qemu.log`.
 
 Each cell sets `de_from` to the base desktop. The harness seeds one config
 file of that desktop and asserts that `--de-migrate` stashes it. After the

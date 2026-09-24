@@ -207,52 +207,56 @@ jobs:
           # /var and /var/home carried and the Dakota deployment kept as
           # rollback. utah publishes only :testing (pre-alpha), so this
           # cell is non-gating.
-          # tunaOS desktop ring (Yellowfin, AlmaLinux Kitten 10): every
+          # tunaOS desktop ring (Albacore, AlmaLinux 10): every
           # desktop is both a source and a target once, and every
           # display-manager hand-off runs (gdm -> greetd/DMS -> cosmic-greeter
           # -> greetd/gtkgreet -> gdm). OstreeDeploy with --de-migrate: the
           # outgoing desktop's config is seeded, stashed and restored, and
           # tests/e2e-health.sh requires the target's display manager after
-          # the reboot. The images are about 1.7 GB, a fifth of Bluefin.
+          # the reboot. The images are about 2 GB, a fifth of Bluefin.
+          # Not Yellowfin: its rolling Kitten 10 base cannot start D-Bus
+          # after a fresh install (dbus_contexts is denied, tunaOS#2485),
+          # so every Yellowfin base fails before the migration starts.
           # Non-gating until each pair has passed once.
-          - name: "tunaOS yellowfin gnome -> niri (OstreeDeploy, --de-migrate)"
-            base: ghcr.io/tuna-os/yellowfin:gnome
-            target: ghcr.io/tuna-os/yellowfin:niri
+          - name: "tunaOS albacore gnome -> niri (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:gnome
+            target: ghcr.io/tuna-os/albacore:niri
             mode: ostree-rebase
             disk_size: 40G
             de_migrate: true
             de_from: gnome
             expect_dm: greetd
             allow_failure: true
-          - name: "tunaOS yellowfin niri -> cosmic (OstreeDeploy, --de-migrate)"
-            base: ghcr.io/tuna-os/yellowfin:niri
-            target: ghcr.io/tuna-os/yellowfin:cosmic
+          - name: "tunaOS albacore niri -> cosmic (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:niri
+            target: ghcr.io/tuna-os/albacore:cosmic
             mode: ostree-rebase
             disk_size: 40G
             de_migrate: true
             de_from: niri
             expect_dm: cosmic-greeter
             allow_failure: true
-          - name: "tunaOS yellowfin cosmic -> xfce (OstreeDeploy, --de-migrate)"
-            base: ghcr.io/tuna-os/yellowfin:cosmic
-            target: ghcr.io/tuna-os/yellowfin:xfce
+          - name: "tunaOS albacore cosmic -> xfce (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:cosmic
+            target: ghcr.io/tuna-os/albacore:xfce
             mode: ostree-rebase
             disk_size: 40G
             de_migrate: true
             de_from: cosmic
             expect_dm: greetd
             allow_failure: true
-          - name: "tunaOS yellowfin xfce -> gnome (OstreeDeploy, --de-migrate)"
-            base: ghcr.io/tuna-os/yellowfin:xfce
-            target: ghcr.io/tuna-os/yellowfin:gnome
+          - name: "tunaOS albacore xfce -> gnome (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/albacore:xfce
+            target: ghcr.io/tuna-os/albacore:gnome
             mode: ostree-rebase
             disk_size: 40G
             de_migrate: true
             de_from: xfce
             expect_dm: gdm
-            # The yellowfin:xfce base fails to start dbus-broker on its own
-            # first boot, before any migration (2026-09-24). Forward the
-            # journal to the serial console so qemu.log carries the error.
+            # Forward the journal to the serial console on one ring cell, so
+            # an EL10 base that cannot start D-Bus (and so never reaches
+            # SSH) leaves the reason in qemu.log. This is how tunaOS#2485
+            # showed up on Yellowfin.
             console_journal: true
             allow_failure: true
           - name: "dakota -> utah (composefs -> composefs, ImageSwap)"
