@@ -1022,6 +1022,13 @@ REBASEFIX
         echo "OK: target scanned cleanly and the pair IS cross-base; gate refused."
         echo "    The remap report above is #67's code executing for real."
         CROSS_BASE_EXECUTED=1
+    elif echo "$GATE_OUT" | grep -q "Cross-base check: host and target share an OS lineage"; then
+        # A same-base pair (tunaOS albacore:gnome -> albacore:niri): the gate
+        # scanned the target, found one lineage, and correctly let the
+        # re-base through. It staged the target, which the real run below
+        # stages again with its own flags.
+        echo "OK: target scanned cleanly and the pair shares a lineage; gate passed."
+        CROSS_BASE_EXECUTED=0
     elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
         echo "OK: target could not be scanned; gate refused on unknown status (#191)."
         echo "    NOTE: is_cross_base was never evaluated, so this run proves the"

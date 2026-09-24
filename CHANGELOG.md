@@ -85,6 +85,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `bootc-rebase`'s cross-base gate now says when it has checked a pair and
+  found one OS lineage. Before, that pass printed nothing, so it looked
+  the same as a gate that had stopped gating. The #80 missing-accounts
+  note now also reads `/usr/lib/passwd` and `/usr/lib/group`. EL10 bootc
+  images keep their system accounts there, and the note used to list
+  every one of them as missing on an AlmaLinux host.
 - `bootc-rebase`'s composefs → OSTree route now fills the new stateroot's
   `/var` with the target image's own `/var` skeleton after it copies the
   live `/var`, without overwriting anything it carried. The stateroot of
