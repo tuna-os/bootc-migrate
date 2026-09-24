@@ -26,6 +26,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
+  between the Yellowfin GNOME, Niri, COSMIC and XFCE tags, each with
+  `--de-migrate`. Every desktop is stashed, restored and required to start
+  its own display manager once. The harness now seeds, stashes and
+  restores a config of any source desktop (`E2E_DE_FROM`), not only GNOME.
 - E2E checks that a migrated system works, not only that its data survived.
   After every reboot into a migrated system, `tests/e2e-health.sh` requires
   a completed boot, no unexpected failed units, a working system bus and

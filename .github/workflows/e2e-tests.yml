@@ -207,6 +207,50 @@ jobs:
           # /var and /var/home carried and the Dakota deployment kept as
           # rollback. utah publishes only :testing (pre-alpha), so this
           # cell is non-gating.
+          # tunaOS desktop ring (Yellowfin, AlmaLinux Kitten 10): every
+          # desktop is both a source and a target once, and every
+          # display-manager hand-off runs (gdm -> greetd/DMS -> cosmic-greeter
+          # -> greetd/gtkgreet -> gdm). OstreeDeploy with --de-migrate: the
+          # outgoing desktop's config is seeded, stashed and restored, and
+          # tests/e2e-health.sh requires the target's display manager after
+          # the reboot. The images are about 1.7 GB, a fifth of Bluefin.
+          # Non-gating until each pair has passed once.
+          - name: "tunaOS yellowfin gnome -> niri (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/yellowfin:gnome
+            target: ghcr.io/tuna-os/yellowfin:niri
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: gnome
+            expect_dm: greetd
+            allow_failure: true
+          - name: "tunaOS yellowfin niri -> cosmic (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/yellowfin:niri
+            target: ghcr.io/tuna-os/yellowfin:cosmic
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: niri
+            expect_dm: cosmic-greeter
+            allow_failure: true
+          - name: "tunaOS yellowfin cosmic -> xfce (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/yellowfin:cosmic
+            target: ghcr.io/tuna-os/yellowfin:xfce
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: cosmic
+            expect_dm: greetd
+            allow_failure: true
+          - name: "tunaOS yellowfin xfce -> gnome (OstreeDeploy, --de-migrate)"
+            base: ghcr.io/tuna-os/yellowfin:xfce
+            target: ghcr.io/tuna-os/yellowfin:gnome
+            mode: ostree-rebase
+            disk_size: 40G
+            de_migrate: true
+            de_from: xfce
+            expect_dm: gdm
+            allow_failure: true
           - name: "dakota -> utah (composefs -> composefs, ImageSwap)"
             base: ghcr.io/projectbluefin/dakota:stable
             target: ghcr.io/projectbluefin/utah:testing
@@ -317,6 +361,7 @@ jobs:
             echo "E2E_CROSS_FAMILY=${{ matrix.scenario.cross_family && '1' || '0' }}"
             echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
             echo "E2E_EXPECT_DM=${{ matrix.scenario.expect_dm || '' }}"
+            echo "E2E_DE_FROM=${{ matrix.scenario.de_from || 'gnome' }}"
             echo "E2E_ALLOWED_FAILED_UNITS=${{ matrix.scenario.allowed_failed_units || '' }}"
           } >> "$GITHUB_ENV"
 

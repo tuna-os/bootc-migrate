@@ -72,6 +72,20 @@ E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
 # accepts any when the default target is graphical. Checked by
 # tests/e2e-health.sh after every reboot into a migrated system.
 E2E_EXPECT_DM="${E2E_EXPECT_DM:-}"
+# Desktop the base image runs, for E2E_DE_MIGRATE cells: the harness seeds
+# one config file of this desktop, asserts that the re-base stashes it, and
+# restores it after the reboot. DE_SEED_REL is that file, relative to $HOME,
+# and must be inside one of the desktop's stash paths (de_migrate.rs).
+E2E_DE_FROM="${E2E_DE_FROM:-gnome}"
+case "$E2E_DE_FROM" in
+    gnome) DE_SEED_REL=".config/dconf/user" ;;
+    kde) DE_SEED_REL=".config/kdeglobals" ;;
+    cosmic) DE_SEED_REL=".config/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark" ;;
+    niri) DE_SEED_REL=".config/niri/config.kdl" ;;
+    xfce) DE_SEED_REL=".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" ;;
+    *) echo "ERROR: unknown E2E_DE_FROM '$E2E_DE_FROM' (gnome, kde, cosmic, niri, xfce)"; exit 1 ;;
+esac
+DE_MARKER="e2e-${E2E_DE_FROM}-marker"
 # Glob patterns of units allowed to be failed after the reboot. Every entry
 # needs a reason next to where it is set (the matrix cell).
 E2E_ALLOWED_FAILED_UNITS="${E2E_ALLOWED_FAILED_UNITS:-}"
@@ -1021,7 +1035,7 @@ REBASEFIX
     # exercising the re-base route while proving nothing about #68.
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         REBASE_FLAGS="$REBASE_FLAGS --de-migrate"
-        step "=== ostree-rebase: seeding a GNOME config to stash (#188) ==="
+        step "=== ostree-rebase: seeding a $E2E_DE_FROM config to stash (#188) ==="
         # The ostree VM is installed straight from the base image, which ships
         # no human account at all. Without one the controller correctly takes
         # its "no human accounts to stash" branch and #68's stash never runs,
@@ -1036,14 +1050,14 @@ REBASEFIX
             fi
             h=$(getent passwd "$u" | cut -d: -f6)
             [ -n "$h" ] || { echo "NO_HOME for $u"; exit 1; }
-            mkdir -p "$h/.config/dconf" "$h/.local/share/gnome-shell"
-            echo "e2e-gnome-marker" > "$h/.config/dconf/user"
+            mkdir -p "$(dirname "$h/'"$DE_SEED_REL"'")"
+            echo "'"$DE_MARKER"'" > "$h/'"$DE_SEED_REL"'"
             chown -R "$u" "$h/.config" "$h/.local" 2>/dev/null || true
             echo "SEEDED user=$u home=$h"
         ' > /tmp/de-seed.log 2>&1 || true
         sed "s/^/[de-seed] /" /tmp/de-seed.log
         if ! grep -q "^SEEDED " /tmp/de-seed.log; then
-            echo "FAIL: could not seed a GNOME config for a human user. The DE"
+            echo "FAIL: could not seed a $E2E_DE_FROM config for a human user. The DE"
             echo "      assertions below would pass or fail for reasons that have"
             echo "      nothing to do with #68."
             exit 1
@@ -1133,21 +1147,21 @@ REBASEFIX
                 # The seeded marker must be under the stash, and gone from the
                 # place it was seeded: a copy is not a stash, and an empty
                 # stash directory would satisfy a bare test -d.
-                grep -q e2e-gnome-marker "$h/.local/share/de-migrate/gnome/.config/dconf/user" \
-                    && ! test -e "$h/.config/dconf/user"
+                grep -q "'"$DE_MARKER"'" "$h/.local/share/de-migrate/'"$E2E_DE_FROM/$DE_SEED_REL"'" \
+                    && ! test -e "$h/'"$DE_SEED_REL"'"
             '; then
-                echo "FAIL: DE migration reported a plan, but the seeded GNOME"
+                echo "FAIL: DE migration reported a plan, but the seeded $E2E_DE_FROM"
                 echo "      config was not moved into ~/.local/share/de-migrate."
                 echo "      The plan ran and the move did not — that is #68's"
                 echo "      unshipped half."
                 ssh $SSH_OPTS root@localhost '
                     u=$(awk -F: "\$3>=1000 && \$3<65534 && \$7 !~ /nologin|false/ {print \$1; exit}" /etc/passwd)
                     h=$(getent passwd "$u" | cut -d: -f6)
-                    echo "home=$h"; ls -la "$h/.config/dconf" "$h/.local/share/de-migrate" 2>&1
+                    echo "home=$h"; ls -laR "$h/.local/share/de-migrate" 2>&1 | head -40
                 ' 2>&1 | sed "s/^/[de-stash] /" || true
                 exit 1
             fi
-            echo "OK: the seeded GNOME config was moved into the stash."
+            echo "OK: the seeded $E2E_DE_FROM config was moved into the stash."
         elif grep -q "skipped (--de-migrate not passed)" /tmp/rebase-out.log; then
             echo "FAIL: --de-migrate was in REBASE_FLAGS but the controller still"
             echo "      reported it as not passed — the flag is not reaching the"
@@ -1552,21 +1566,22 @@ REBASECHECK
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         # #68's other half: the stash is only useful if switching back
         # brings the config home. Emulate the return trip on the booted
-        # target: restore the stashed GNOME config and assert the seeded
-        # marker is back in place and gone from the stash.
+        # target: restore the stashed config and assert the seeded marker
+        # is back in place and gone from the stash.
         step "=== ostree-rebase: DE restore round trip (#68) ==="
-        ssh $SSH_OPTS root@localhost bash <<'DERESTORE' 2>&1 | sed 's/^/[de-restore] /'
+        ssh $SSH_OPTS root@localhost \
+            "DE_FROM='$E2E_DE_FROM' SEED='$DE_SEED_REL' MARKER='$DE_MARKER' bash -s" <<'DERESTORE' 2>&1 | sed 's/^/[de-restore] /'
 set -e
 u=$(awk -F: '$3>=1000 && $3<65534 && $7 !~ /nologin|false/ {print $1; exit}' /etc/passwd)
 h=$(getent passwd "$u" | cut -d: -f6)
 [ -n "$h" ] || { echo "FAIL: no human account found after the reboot"; exit 1; }
-test -e "$h/.config/dconf/user" && { echo "FAIL: the GNOME config is back in \$HOME before any restore"; exit 1; }
-/var/tmp/bootc-rebase de-migrate restore --to-de gnome --home "$h" --stash-dir "$h/.local/share/de-migrate"
-grep -q e2e-gnome-marker "$h/.config/dconf/user" \
-    || { echo "FAIL: restore did not bring the stashed GNOME config back into \$HOME"; exit 1; }
-test -e "$h/.local/share/de-migrate/gnome/.config/dconf/user" \
+test -e "$h/$SEED" && { echo "FAIL: the $DE_FROM config is back in \$HOME before any restore"; exit 1; }
+/var/tmp/bootc-rebase de-migrate restore --to-de "$DE_FROM" --home "$h" --stash-dir "$h/.local/share/de-migrate"
+grep -q "$MARKER" "$h/$SEED" \
+    || { echo "FAIL: restore did not bring the stashed $DE_FROM config back into \$HOME"; exit 1; }
+test -e "$h/.local/share/de-migrate/$DE_FROM/$SEED" \
     && { echo "FAIL: the restored config is still in the stash (copied, not moved)"; exit 1; }
-echo "OK: stash -> restore round trip returned the GNOME config to $h"
+echo "OK: stash -> restore round trip returned the $DE_FROM config to $h"
 DERESTORE
     fi
 
