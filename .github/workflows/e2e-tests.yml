@@ -250,6 +250,10 @@ jobs:
             de_migrate: true
             de_from: xfce
             expect_dm: gdm
+            # The yellowfin:xfce base fails to start dbus-broker on its own
+            # first boot, before any migration (2026-09-24). Forward the
+            # journal to the serial console so qemu.log carries the error.
+            console_journal: true
             allow_failure: true
           - name: "dakota -> utah (composefs -> composefs, ImageSwap)"
             base: ghcr.io/projectbluefin/dakota:stable
@@ -362,6 +366,7 @@ jobs:
             echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
             echo "E2E_EXPECT_DM=${{ matrix.scenario.expect_dm || '' }}"
             echo "E2E_DE_FROM=${{ matrix.scenario.de_from || 'gnome' }}"
+            echo "E2E_CONSOLE_JOURNAL=${{ matrix.scenario.console_journal && '1' || '0' }}"
           } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E

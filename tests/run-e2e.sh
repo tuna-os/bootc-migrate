@@ -77,6 +77,11 @@ E2E_EXPECT_DM="${E2E_EXPECT_DM:-}"
 # restores it after the reboot. DE_SEED_REL is that file, relative to $HOME,
 # and must be inside one of the desktop's stash paths (de_migrate.rs).
 E2E_DE_FROM="${E2E_DE_FROM:-gnome}"
+# 1: also forward the journal to the serial console on the base image's
+# boots, so a unit that fails before SSH comes up (the base image's own
+# D-Bus, for example) leaves its error in qemu.log. Off by default: the
+# extra serial output slows every boot.
+E2E_CONSOLE_JOURNAL="${E2E_CONSOLE_JOURNAL:-0}"
 case "$E2E_DE_FROM" in
     gnome) DE_SEED_REL=".config/dconf/user" ;;
     kde) DE_SEED_REL=".config/kdeglobals" ;;
@@ -743,7 +748,9 @@ for part in "${LOOP_DEV}p1" "${LOOP_DEV}p2" "${LOOP_DEV}p3" "${LOOP_DEV}p4"; do
             for conf in "$entries"/*.conf; do
                 [ -f "$conf" ] || continue
                 if ! grep -q 'console=ttyS0' "$conf"; then
-                    sudo sed -i 's|^\(options .*\)$|\1 console=ttyS0,115200n8 console=tty0 systemd.log_level=info|' "$conf" 2>/dev/null || true
+                    EXTRA_KARGS="console=ttyS0,115200n8 console=tty0 systemd.log_level=info"
+                    [ "$E2E_CONSOLE_JOURNAL" = "1" ] && EXTRA_KARGS="$EXTRA_KARGS systemd.journald.forward_to_console=1"
+                    sudo sed -i "s|^\(options .*\)\$|\1 $EXTRA_KARGS|" "$conf" 2>/dev/null || true
                     echo "  patched: $(basename "$conf")"
                     PATCHED=$((PATCHED + 1))
                 fi
