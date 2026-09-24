@@ -183,8 +183,8 @@ After every reboot into a migrated system, `tests/e2e-health.sh` runs inside
 the VM and fails the cell when any of these is not true:
 
 - The boot completed. The system state is "running" or "degraded".
-- No unit failed, other than the cell's `allowed_failed_units` globs. Each
-  entry needs a reason next to it in the matrix.
+- No unit failed, other than the globs in `E2E_ALLOWED_FAILED_UNITS`. Each
+  entry needs a reason next to it.
 - The system bus and logind answer.
 - When the default target is graphical, `graphical.target` is active and the
   display manager runs. It must be the cell's `expect_dm` when set (`gdm`,

@@ -362,7 +362,6 @@ jobs:
             echo "E2E_EXPECT_OS_ID=${{ matrix.scenario.expect_os_id || '' }}"
             echo "E2E_EXPECT_DM=${{ matrix.scenario.expect_dm || '' }}"
             echo "E2E_DE_FROM=${{ matrix.scenario.de_from || 'gnome' }}"
-            echo "E2E_ALLOWED_FAILED_UNITS=${{ matrix.scenario.allowed_failed_units || '' }}"
           } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E
