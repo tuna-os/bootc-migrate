@@ -10,6 +10,7 @@
 //! Base- and direction-agnostic: operates on any OCI image reference.
 
 use anyhow::{Context, Result, anyhow};
+use sha2::Digest;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -614,6 +615,13 @@ impl RegistryEndpoint {
                 String::from_utf8_lossy(&out.stderr)
             ));
         }
+        // A digest reference (every index -> manifest hop, and any
+        // `image@sha256:...` ref) is content-addressed: check the body
+        // against it before trusting a single byte of the JSON.
+        if reference.contains(':') {
+            verify_sha256(reference, &sha256_hex(&out.stdout))
+                .with_context(|| format!("manifest {reference} failed integrity check"))?;
+        }
         serde_json::from_slice(&out.stdout).context("failed to parse manifest JSON")
     }
 
@@ -624,7 +632,14 @@ impl RegistryEndpoint {
         }
     }
 
+    /// Fetch one blob and verify it against `digest` before returning. The
+    /// digest is the only integrity the registry protocol offers (there is
+    /// no signature on a blob), and what comes back feeds kernels, initrds,
+    /// bootloaders and kernel modules that are installed as root, so a
+    /// mismatch is an error, never a warning.
     fn download_blob(&self, digest: &str, dst: &Path) -> Result<()> {
+        // Refuse up front rather than fetch something we cannot check.
+        sha256_digest_hex(digest)?;
         let url = format!("{}/v2/{}/blobs/{}", self.base_url, self.repo, digest);
         let mut args: Vec<String> = vec![
             "-sSL".into(),
@@ -643,6 +658,14 @@ impl RegistryEndpoint {
             .context("failed to invoke curl for blob fetch")?;
         if !status.success() {
             return Err(anyhow!("curl blob fetch failed for {}", digest));
+        }
+        let actual = sha256_hex_of_file(dst)
+            .with_context(|| format!("failed to hash downloaded blob {}", dst.display()))?;
+        if let Err(e) = verify_sha256(digest, &actual) {
+            // Never leave a blob that failed verification where a later
+            // step could pick it up.
+            let _ = fs::remove_file(dst);
+            return Err(e);
         }
         Ok(())
     }
@@ -677,6 +700,47 @@ impl RegistryEndpoint {
             .ok_or_else(|| anyhow!("manifest index entry has no digest"))?;
         self.fetch_manifest(digest)
     }
+}
+
+/// The hex part of an OCI `sha256:<64 lowercase hex>` digest.
+///
+/// Only sha256 is accepted: it is the one algorithm every registry uses and
+/// the only one this module can verify. A manifest naming any other
+/// algorithm (or a malformed digest) is refused rather than fetched
+/// unchecked — a digest the client does not verify is no integrity at all.
+fn sha256_digest_hex(digest: &str) -> Result<&str> {
+    let hex = digest.strip_prefix("sha256:").ok_or_else(|| {
+        anyhow!("unsupported digest {digest:?}: only sha256 digests can be verified")
+    })?;
+    if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(anyhow!("malformed sha256 digest {digest:?}"));
+    }
+    Ok(hex)
+}
+
+/// Compare the sha256 (lowercase hex) of some content against the OCI
+/// digest it was requested by; fails closed on any difference.
+fn verify_sha256(digest: &str, actual_hex: &str) -> Result<()> {
+    let expected = sha256_digest_hex(digest)?;
+    if expected != actual_hex {
+        return Err(anyhow!(
+            "digest mismatch: expected {digest}, got sha256:{actual_hex}"
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// sha256 of a file, streamed: layer blobs run to hundreds of MB and must
+/// not be read into memory whole.
+fn sha256_hex_of_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Hosts that should always use plain HTTP: bare IPv4 with a port, or `localhost`.
@@ -1189,5 +1253,60 @@ lrwxrwxrwx root/root         0 2026-09-01 00:00 etc/os-release -> ../usr/lib/os-
         // A non-index manifest must pass through untouched (no network).
         let out = ep.arch_layers_manifest(image.clone()).unwrap();
         assert_eq!(out, image);
+    }
+
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn sha256_digest_hex_accepts_only_well_formed_sha256() {
+        let good = format!("sha256:{EMPTY_SHA256}");
+        assert_eq!(sha256_digest_hex(&good).unwrap(), EMPTY_SHA256);
+
+        let bad = [
+            ("no algorithm", EMPTY_SHA256.to_string()),
+            (
+                "other algorithm",
+                format!("sha512:{EMPTY_SHA256}{EMPTY_SHA256}"),
+            ),
+            ("too short", format!("sha256:{}", &EMPTY_SHA256[..63])),
+            ("too long", format!("sha256:{EMPTY_SHA256}0")),
+            (
+                "uppercase hex",
+                format!("sha256:{}", EMPTY_SHA256.to_uppercase()),
+            ),
+            ("non-hex", format!("sha256:{}zz", &EMPTY_SHA256[..62])),
+            ("empty", String::new()),
+        ];
+        for (why, digest) in bad {
+            assert!(sha256_digest_hex(&digest).is_err(), "{why}: {digest:?}");
+        }
+    }
+
+    #[test]
+    fn verify_sha256_fails_closed_on_mismatch() {
+        let digest = format!("sha256:{ABC_SHA256}");
+        assert!(verify_sha256(&digest, ABC_SHA256).is_ok());
+
+        let err = verify_sha256(&digest, EMPTY_SHA256).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("digest mismatch"), "{msg}");
+        assert!(msg.contains(ABC_SHA256), "expected digest named: {msg}");
+        assert!(msg.contains(EMPTY_SHA256), "actual digest named: {msg}");
+
+        // A digest we cannot check is a failure, not a pass.
+        assert!(verify_sha256("sha512:abc", ABC_SHA256).is_err());
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vectors_in_memory_and_on_disk() {
+        assert_eq!(sha256_hex(b""), EMPTY_SHA256);
+        assert_eq!(sha256_hex(b"abc"), ABC_SHA256);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        fs::write(&path, b"abc").unwrap();
+        assert_eq!(sha256_hex_of_file(&path).unwrap(), ABC_SHA256);
+        assert!(sha256_hex_of_file(&dir.path().join("missing")).is_err());
     }
 }
