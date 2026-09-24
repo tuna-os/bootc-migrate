@@ -26,6 +26,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Dakota → Utah E2E coverage for the composefs `ImageSwap` route. A new
+  harness mode (`E2E_MODE=image-swap`, `just e2e-image-swap`) installs the
+  base composefs-native, runs `bootc-rebase --target-backend composefs`
+  to Utah (Bluefin on Fedora Hummingbird, `ghcr.io/projectbluefin/utah:testing`),
+  reboots, and asserts that Utah boots with `/etc`, `/var` and `/var/home`
+  carried over and that the Dakota deployment stays as rollback. The cell
+  is non-gating while Utah is pre-alpha.
 - Cross-family migration on the composefs route (#256). `bootc-migrate`
   and `bootc-rebase`'s `CoreMigration`/`ImageSwap` routes now read the
   target's `os-release` and package manager and refuse a target whose

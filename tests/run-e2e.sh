@@ -36,6 +36,11 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # builds an OSTree deployment beside the composefs root (`bootc install
 # to-existing-root`), /etc and /var are carried over, the composefs entry
 # is kept as rollback, and the reboot must land in the OSTree deployment.
+# "image-swap" installs the BASE image composefs-native and runs bootc-rebase
+# --target-backend composefs against a different composefs-capable image:
+# the ImageSwap route stages the target with the host's own `bootc switch`
+# and the reboot must land in the target's deployment with the base kept
+# as rollback. The matrix pair is dakota -> utah (Fedora Hummingbird).
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
@@ -554,7 +559,7 @@ else
     # the general case the route exists for. The base image's own bootc
     # must support the flag (dakota's does).
     COMPOSEFS_INSTALL_FLAGS=""
-    if [ "$E2E_MODE" = "composefs-to-ostree" ]; then
+    if [ "$E2E_MODE" = "composefs-to-ostree" ] || [ "$E2E_MODE" = "image-swap" ]; then
         echo "Installing base composefs-native bootc system to disk image..."
         COMPOSEFS_INSTALL_FLAGS="--composefs-backend"
     else
@@ -627,7 +632,7 @@ sleep 1
 
 # The stateroot's /var: OSTree keeps it under ostree/deploy/<stateroot>/var,
 # a composefs-native install under state/os/<stateroot>/var.
-if [ "$E2E_MODE" = "composefs-to-ostree" ] || [ -d "$MNT_DIR/state/os/default" ]; then
+if [ "$E2E_MODE" = "composefs-to-ostree" ] || [ "$E2E_MODE" = "image-swap" ] || [ -d "$MNT_DIR/state/os/default" ]; then
     STATEROOT_VAR="$MNT_DIR/state/os/default/var"
 else
     STATEROOT_VAR="$MNT_DIR/ostree/deploy/default/var"
@@ -1716,6 +1721,219 @@ ESPCHECK
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
     step "=== composefs-to-ostree PASSED ==="
+    exit 0
+fi
+
+if [ "$E2E_MODE" = "image-swap" ]; then
+    step "=== image-swap: asserting the base booted composefs-native ==="
+    BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+    echo "  cmdline: $BASE_CMDLINE"
+    BASE_VERITY=$(echo "$BASE_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    [ -n "$BASE_VERITY" ] || {
+        echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
+        echo "      composefs-native install (bootc install to-disk --composefs-backend)."
+        exit 1; }
+    echo "  base verity: $BASE_VERITY"
+    ssh $SSH_OPTS root@localhost "bootc status" || true
+
+    step "=== image-swap: copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+
+    step "=== image-swap: injecting /etc + /var fixtures ==="
+    ssh $SSH_OPTS root@localhost bash <<'SWAPFIX'
+set -e
+mkdir -p /etc/rebase-test
+echo "etc-rebase-value" > /etc/rebase-test/marker.conf
+echo "# e2e rebase marker" >> /etc/hostname
+mkdir -p /var/rebase-test
+echo "var-rebase-value" > /var/rebase-test/marker.txt
+useradd -m -U realuser 2>/dev/null || true
+echo "real-home-data" > "$(getent passwd realuser | cut -d: -f6)/home-marker.txt"
+echo "--- pre-swap deployments ---"
+ls -la /sysroot/state/deploy/ 2>&1
+echo "--- pre-swap ESP ---"
+find /boot /efi /boot/efi -maxdepth 3 \( -path '*/EFI/*' -o -path '*/loader/*' \) 2>/dev/null | sort -u | head -40
+SWAPFIX
+
+    step "=== image-swap: --plan resolves the ImageSwap route ==="
+    PLAN_OUT=$(ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs --plan" 2>&1) || {
+        echo "FAIL: bootc-rebase --plan exited nonzero"; echo "$PLAN_OUT"; exit 1; }
+    echo "$PLAN_OUT" | sed 's/^/[plan] /'
+    echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
+        echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
+
+    step "=== image-swap: running bootc-rebase --target-backend composefs ==="
+    # Streamed, not buffered: the target pull inside `bootc switch` is the
+    # long step of this mode, and a job that times out inside it must leave
+    # the progress in the log.
+    ssh $SSH_OPTS root@localhost \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" 2>&1 \
+        | tee /tmp/rebase-out.log \
+        | awk '{ print "[rebase] " $0; fflush() }'
+    REBASE_RC=${PIPESTATUS[0]}
+    if [ "$REBASE_RC" != "0" ]; then
+        echo "FAIL: bootc-rebase exited nonzero ($REBASE_RC)"
+        exit 1
+    fi
+    grep -q "Image swap staged" /tmp/rebase-out.log || {
+        echo "FAIL: bootc-rebase did not report a staged image swap"; exit 1; }
+
+    step "=== image-swap: verifying the staged deployment before reboot ==="
+    ssh $SSH_OPTS root@localhost bash <<SWAPDIAG
+set +e
+echo '--- bootc status ---'
+bootc status 2>&1
+bootc status --json 2>/dev/null | jq '.status | {booted: .booted.image.image.image, staged: .staged.image.image.image, rollback: .rollback.image.image.image}' 2>&1
+echo '--- /sysroot/state/deploy ---'
+ls -la /sysroot/state/deploy/ 2>&1
+for d in /sysroot/state/deploy/*/; do
+    v=\$(basename "\$d")
+    [ "\$v" = "$BASE_VERITY" ] && continue
+    echo ">>> staged deployment \$v"
+    ls -la "\$d" 2>&1
+    cat "\$d/\$v.origin" 2>&1
+    echo '--- merged /etc spot checks ---'
+    grep -H "e2e rebase marker" "\$d/etc/hostname" 2>&1
+    ls -la "\$d/etc/rebase-test/" 2>&1
+    grep -H '^realuser:' "\$d/etc/passwd" 2>&1
+    ls -la "\$d/etc/ssh" 2>&1
+    grep -H . "\$d/etc/selinux/config" 2>&1
+done
+echo '--- /run/composefs ---'
+ls -laR /run/composefs 2>&1 | head -40
+echo '--- ESP after staging ---'
+for esp in /boot/efi /boot /efi; do
+    [ -d "\$esp/EFI" ] || continue
+    echo ">>> \$esp"; find "\$esp" -maxdepth 3 2>/dev/null | sort | head -80
+    for f in "\$esp"/loader/entries/*.conf; do [ -f "\$f" ] && { echo ">>> \$f"; cat "\$f"; }; done
+done
+echo '--- efibootmgr ---'
+efibootmgr -v 2>&1
+SWAPDIAG
+
+    # e2e-sshd.socket was baked into the base image, so the source factory
+    # and the live /etc agree and the target lacks it: the 3-way merge drops
+    # it (same semantics as every other mode). Recreate it in the staged
+    # deployment's /etc, post-merge, pre-reboot, and mask firewalld (the
+    # base image build disabled it; the target's preset may enable it).
+    step "=== image-swap: re-injecting e2e-sshd into the staged deployment ==="
+    ssh $SSH_OPTS root@localhost bash <<SWAPSSH
+set -e
+STAGED=""
+for d in /sysroot/state/deploy/*/; do
+    v=\$(basename "\$d")
+    [ "\$v" = "$BASE_VERITY" ] && continue
+    [ -f "\$d/\$v.origin" ] && STAGED="\${d%/}"
+done
+[ -n "\$STAGED" ] || { echo "FAIL: no staged deployment beside $BASE_VERITY under /sysroot/state/deploy"; exit 1; }
+DEPLOY_ETC="\$STAGED/etc"
+[ -d "\$DEPLOY_ETC" ] || { echo "FAIL: \$DEPLOY_ETC not found"; exit 1; }
+mkdir -p "\$DEPLOY_ETC/systemd/system/sockets.target.wants"
+printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'ListenStream=22' 'Accept=yes' '[Install]' 'WantedBy=sockets.target' \
+    > "\$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
+    > "\$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "\$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+rm -f "\$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+ln -sf /dev/null "\$DEPLOY_ETC/systemd/system/firewalld.service"
+mkdir -p "\$DEPLOY_ETC/ssh/sshd_config.d"
+echo "PermitRootLogin yes" > "\$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
+# The target may boot with SELinux enforcing while the composefs host has
+# no policy of its own to label these files with. Write the two contexts
+# the target's policy gives them directly (unit files and an sshd drop-in);
+# the merged /etc's selinux/config says whether that is needed at all.
+if grep -qE '^SELINUX=(enforcing|permissive)' "\$DEPLOY_ETC/selinux/config" 2>/dev/null; then
+    label() {
+        ctx="\$1"; shift
+        if command -v setfattr >/dev/null; then
+            setfattr -h -n security.selinux -v "\$ctx" "\$@"
+        else
+            python3 -c 'import os,sys; [os.setxattr(p, "security.selinux", sys.argv[1].encode()+b"\0", follow_symlinks=False) for p in sys.argv[2:]]' "\$ctx" "\$@"
+        fi
+    }
+    U=system_u:object_r:systemd_unit_file_t:s0
+    label "\$U" "\$DEPLOY_ETC/systemd/system/e2e-sshd.socket" "\$DEPLOY_ETC/systemd/system/e2e-sshd@.service" \
+        "\$DEPLOY_ETC/systemd/system/sockets.target.wants" "\$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket" \
+        "\$DEPLOY_ETC/systemd/system/firewalld.service"
+    label system_u:object_r:etc_t:s0 "\$DEPLOY_ETC/ssh/sshd_config.d" "\$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf" \
+        || { echo "FAIL: could not label the injected sshd files"; exit 1; }
+    echo "labelled the injected units for the target's SELinux policy"
+else
+    echo "target does not enable SELinux; injected units left unlabelled"
+fi
+ls -laZ "\$DEPLOY_ETC/systemd/system/" 2>&1 | head -20
+SWAPSSH
+
+    step "=== image-swap: rebooting into the staged deployment ==="
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    vm_tail vm-post &
+    TAIL_PID=$!
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>&1; then
+            step "VM accessible via SSH after image-swap reboot ($((SECONDS - WAIT_START))s)."
+            kill "$TAIL_PID" 2>/dev/null || true
+            TAIL_PID=""
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for post-swap SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "ERROR: VM did not boot back after the image swap."
+        serial_failure_lines | tail -40 || true
+        tail -120 qemu.log
+        exit 1
+    fi
+
+    step "=== image-swap: post-reboot assertions ==="
+    POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
+    echo "  cmdline: $POST_CMDLINE"
+    POST_VERITY=$(echo "$POST_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    [ -n "$POST_VERITY" ] || {
+        echo "FAIL: post-reboot cmdline has no composefs= — a composefs deployment was not booted"; exit 1; }
+    [ "$POST_VERITY" != "$BASE_VERITY" ] || {
+        echo "FAIL: rebooted into the base deployment ($BASE_VERITY), not the staged one"; exit 1; }
+    ssh $SSH_OPTS root@localhost "bootc status" || true
+    BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.booted.image.image.image // empty')
+    echo "  booted image: ${BOOTED_IMG:-<none>}"
+    if ! echo "$BOOTED_IMG" | grep -qF "$TARGET_REPO_TAG"; then
+        echo "FAIL: booted image is '$BOOTED_IMG', expected $VM_TARGET_IMAGE"; exit 1
+    fi
+    BOOTED_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    echo "  os-release ID: $BOOTED_ID"
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"; exit 1
+    fi
+    ssh $SSH_OPTS root@localhost "getenforce 2>/dev/null || echo 'getenforce: n/a'; systemctl --failed --no-legend 2>/dev/null | head -20" || true
+    ETC_MARKER=$(ssh $SSH_OPTS root@localhost "cat /etc/rebase-test/marker.conf 2>/dev/null || echo MISSING")
+    [ "$ETC_MARKER" = "etc-rebase-value" ] || { echo "FAIL: /etc fixture not carried (got: $ETC_MARKER)"; exit 1; }
+    HOSTNAME_TAIL=$(ssh $SSH_OPTS root@localhost "tail -n1 /etc/hostname")
+    [ "$HOSTNAME_TAIL" = "# e2e rebase marker" ] || { echo "FAIL: /etc/hostname edit not carried (got: $HOSTNAME_TAIL)"; exit 1; }
+    VAR_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/rebase-test/marker.txt 2>/dev/null || echo MISSING")
+    [ "$VAR_MARKER" = "var-rebase-value" ] || { echo "FAIL: /var fixture not carried (got: $VAR_MARKER)"; exit 1; }
+    HOME_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/home/realuser/home-marker.txt 2>/dev/null || echo MISSING")
+    [ "$HOME_MARKER" = "real-home-data" ] || { echo "FAIL: /var/home data not carried (got: $HOME_MARKER)"; exit 1; }
+    REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
+    [ "$REALUSER" != "MISSING" ] || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
+    echo "OK: booted the $BOOTED_IMG deployment ($POST_VERITY) with /etc, /var and /var/home carried over."
+
+    # The base deployment must remain as rollback: bootc reports it, or at
+    # least its deployment directory is still on disk.
+    ROLLBACK_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.rollback.image.image.image // empty')
+    echo "  rollback image: ${ROLLBACK_IMG:-<none>}"
+    BASE_DIR_PRESENT=$(ssh $SSH_OPTS root@localhost "[ -d /sysroot/state/deploy/$BASE_VERITY ] && echo yes || echo no")
+    [ -n "$ROLLBACK_IMG" ] || [ "$BASE_DIR_PRESENT" = "yes" ] || {
+        echo "FAIL: the base deployment $BASE_VERITY is gone — no rollback left"; exit 1; }
+    echo "OK: base deployment kept as rollback."
+
+    step "=== image-swap PASSED ==="
     exit 0
 fi
 

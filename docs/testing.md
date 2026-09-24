@@ -42,6 +42,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
 | bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
 | dakota stable (composefs-native) → fedora-bootc 44 (`composefs-to-ostree` mode) | the reverse backend switch (#260): `--plan` resolves `OstreeInstall`, the target's `bootc install to-existing-root` runs alongside, `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in the OSTree deployment, and the composefs "Linux Boot Manager" entry and ESP kernel remain as rollback | active, non-gating |
+| dakota stable (composefs-native) → utah testing (`image-swap` mode) | a composefs image swap across distributions: `--plan` resolves `ImageSwap`, the host's `bootc switch` stages Utah (Bluefin on Fedora Hummingbird), `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in Utah and the Dakota deployment stays as rollback | active, non-gating |
 | bluefin stable → bootcrew/opensuse-bootc (`E2E_CROSS_FAMILY=1`) | the cross-family gate refuses without `--accept-cross-base`; with it, the cross-family `/etc` policy (#256): target defaults win, `.rebase-old` sidecars, carried machine state, target-first identity merge, first-boot unit | active, non-gating |
 
 ### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
@@ -170,7 +171,7 @@ implemented yet (issue #65)", so there is no flip to exercise.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
-- **M1**: dakota → dakota:other-tag (`ImageSwap`, `E2E_MODE=image-swap`)
+- **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`), active as the non-gating cell above
 - **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
   kernel update asserting ESP resync; `--undo` restores GRUB
 - **M3**: the cross-base cell above covers centos-family → fedora-family.

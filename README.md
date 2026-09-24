@@ -537,7 +537,7 @@ sudo ./tests/run-e2e.sh
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
 
-The CI matrix runs nine cells (see `.github/workflows/e2e-tests.yml`, which
+The CI matrix runs ten cells (see `.github/workflows/e2e-tests.yml`, which
 is authoritative):
 
 | Cell | Base → target | Filesystem | Disk |
@@ -550,7 +550,8 @@ is authoritative):
 | ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
 | TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
 | cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
-| composefs → ostree (non-gating) | dakota:stable → bluefin:stable | btrfs | 40G |
+| composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
+| composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place.
