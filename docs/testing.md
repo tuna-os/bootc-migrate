@@ -199,7 +199,11 @@ the VM and fails the cell when any of these is not true:
   `sddm`).
 - Every user and group in the target's `sysusers.d` resolves.
 - On an enforcing SELinux target: no denial against an `unlabeled_t` file,
-  and `restorecon -n` finds nothing to relabel under `/etc` or `/var/home`.
+  and `restorecon -n` finds no new path to relabel under `/etc` or
+  `/var/home`. Just before the migration, the harness records the paths
+  that the base already has mislabeled. Those paths are reported but do
+  not fail the cell. For example, tunaOS labels `/var/home/linuxbrew`
+  `home_root_t` on a fresh install.
 
 The composefs migration mode also asserts the other direction of the
 fresh-image comparison. Every file that the target image ships in `/etc` must

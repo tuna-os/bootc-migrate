@@ -153,13 +153,23 @@ if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enfo
     else
         ok "no SELinux denials against unlabeled files"
     fi
-    # Files whose label differs from what the policy assigns. -n: report only.
-    mislabeled=$(restorecon -Rnv /etc /var/home 2>/dev/null | grep -c 'Would relabel')
-    if [ "${mislabeled:-0}" -gt 0 ]; then
-        bad "$mislabeled path(s) under /etc or /var/home are mislabeled for the target's policy"
-        restorecon -Rnv /etc /var/home 2>/dev/null | grep 'Would relabel' | head -20 | sed 's/^/    /'
+    # Files whose label differs from what the policy assigns. -n: report
+    # only. Paths the base already had mislabeled before the migration
+    # (recorded by capture_health_baseline) are reported, not failed.
+    baseline=/var/lib/e2e-health/label-baseline
+    mislabeled=$(restorecon -Rnv /etc /var/home 2>/dev/null \
+        | sed -n 's/^Would relabel \([^ ]*\) from.*/\1/p' | sort -u)
+    if [ -s "$baseline" ]; then
+        new_mislabeled=$(comm -23 <(printf '%s\n' "$mislabeled" | sed '/^$/d') "$baseline")
+        echo "  $(comm -12 <(printf '%s\n' "$mislabeled" | sed '/^$/d') "$baseline" | wc -l) mislabeled path(s) were already mislabeled on the base (not counted)"
     else
-        ok "/etc and /var/home carry the labels the target's policy assigns"
+        new_mislabeled=$(printf '%s\n' "$mislabeled" | sed '/^$/d')
+    fi
+    if [ -n "$new_mislabeled" ]; then
+        bad "$(echo "$new_mislabeled" | wc -l) path(s) under /etc or /var/home are mislabeled for the target's policy and were not on the base"
+        restorecon -Rnv /etc /var/home 2>/dev/null | grep -F -f <(echo "$new_mislabeled" | head -20 | sed 's/$/ from/') | head -20 | sed 's/^/    /'
+    else
+        ok "the migration left no path under /etc or /var/home mislabeled"
     fi
 else
     echo "  SELinux: not enforcing; label checks skipped"

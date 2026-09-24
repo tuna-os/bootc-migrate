@@ -145,6 +145,24 @@ assert_system_healthy() {
     fi
 }
 
+# capture_health_baseline: just before a migration, record which paths under
+# /etc and /var/home the base itself already has mislabeled, so the
+# post-reboot health check fails only on mislabels the migration introduced
+# (tunaOS labels /var/home/linuxbrew home_root_t on a fresh install, for
+# example). /var carries over on every route, so the list survives the
+# reboot. A base without SELinux records nothing, and every mislabel after
+# the migration then counts.
+capture_health_baseline() {
+    ssh $SSH_OPTS root@localhost 'mkdir -p /var/lib/e2e-health
+        : > /var/lib/e2e-health/label-baseline
+        if command -v restorecon >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]; then
+            restorecon -Rnv /etc /var/home 2>/dev/null \
+                | sed -n "s/^Would relabel \([^ ]*\) from.*/\1/p" | sort -u > /var/lib/e2e-health/label-baseline
+        fi
+        echo "health baseline: $(wc -l < /var/lib/e2e-health/label-baseline) path(s) already mislabeled on the base"' \
+        2>&1 | sed 's/^/[health-baseline] /' || true
+}
+
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
 # (Ns elapsed)" line every $2 seconds so CI doesn't think the job is hung.
 heartbeat() {
@@ -1088,6 +1106,7 @@ REBASEFIX
         fi
     fi
 
+    capture_health_baseline
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree $REBASE_FLAGS" \
@@ -1654,6 +1673,7 @@ REVFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> ostree via OstreeInstall (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
 
+    capture_health_baseline
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
     # steps of this mode, and a job that times out inside them must leave
@@ -1852,6 +1872,7 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    capture_health_baseline
     step "=== image-swap: running bootc-rebase --target-backend composefs ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
     # long step of this mode, and a job that times out inside it must leave
@@ -2164,6 +2185,7 @@ echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' 
 CROSSFIX
 fi
 
+capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
 ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
