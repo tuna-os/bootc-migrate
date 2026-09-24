@@ -1827,6 +1827,26 @@ ESPCHECK
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
+    # What backs /var on the OSTree deployment. On a clean fedora-bootc
+    # install chronyd and gssproxy start; after this route both fail on
+    # missing /var/lib state even though the target's tmpfiles.d creates it
+    # at boot, which points at a /var mount carried over from the composefs
+    # source and mounted over the stateroot /var after tmpfiles ran.
+    step "=== composefs-to-ostree: /var mount diagnostics ==="
+    ssh $SSH_OPTS root@localhost bash <<'VARDIAG' 2>&1 | sed 's/^/[var-diag] /' || true
+set +e
+echo '--- findmnt /var'; findmnt /var
+echo '--- /etc/fstab'; grep -v '^#' /etc/fstab | sed '/^$/d'
+echo '--- /var mount units'; systemctl list-units --all --no-legend '*var*.mount'
+for u in $(systemctl list-units --all --no-legend --plain '*var*.mount' | awk '{print $1}'); do
+    echo ">>> $u"; systemctl cat "$u" 2>&1 | head -20
+done
+echo '--- /etc/systemd/system mounts'; ls -la /etc/systemd/system/*.mount /etc/systemd/system/*/*.mount 2>&1
+echo '--- chrony dirs'; ls -ld /var/lib/chrony /sysroot/ostree/deploy/default/var/lib/chrony 2>&1
+echo '--- tmpfiles-setup'; systemctl status --no-pager --lines 5 systemd-tmpfiles-setup.service 2>&1 | head -12
+echo '--- gssproxy dirs'; ls -ld /var/lib/gssproxy /var/lib/gssproxy/* 2>&1 | head
+VARDIAG
+
     assert_system_healthy "composefs-to-ostree"
 
     step "=== composefs-to-ostree PASSED ==="
