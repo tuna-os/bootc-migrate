@@ -1780,7 +1780,7 @@ SWAPFIX
         echo "FAIL: bootc-rebase did not report a staged image swap"; exit 1; }
 
     step "=== image-swap: verifying the staged deployment before reboot ==="
-    ssh $SSH_OPTS root@localhost bash <<SWAPDIAG
+    ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' bash -s" <<'SWAPDIAG'
 set +e
 echo '--- bootc status ---'
 bootc status 2>&1
@@ -1788,25 +1788,25 @@ bootc status --json 2>/dev/null | jq '.status | {booted: .booted.image.image.ima
 echo '--- /sysroot/state/deploy ---'
 ls -la /sysroot/state/deploy/ 2>&1
 for d in /sysroot/state/deploy/*/; do
-    v=\$(basename "\$d")
-    [ "\$v" = "$BASE_VERITY" ] && continue
-    echo ">>> staged deployment \$v"
-    ls -la "\$d" 2>&1
-    cat "\$d/\$v.origin" 2>&1
+    v=$(basename "$d")
+    [ "$v" = "$BASE_VERITY" ] && continue
+    echo ">>> staged deployment $v"
+    ls -la "$d" 2>&1
+    cat "$d/$v.origin" 2>&1
     echo '--- merged /etc spot checks ---'
-    grep -H "e2e rebase marker" "\$d/etc/hostname" 2>&1
-    ls -la "\$d/etc/rebase-test/" 2>&1
-    grep -H '^realuser:' "\$d/etc/passwd" 2>&1
-    ls -la "\$d/etc/ssh" 2>&1
-    grep -H . "\$d/etc/selinux/config" 2>&1
+    grep -H "e2e rebase marker" "$d/etc/hostname" 2>&1
+    ls -la "$d/etc/rebase-test/" 2>&1
+    grep -H '^realuser:' "$d/etc/passwd" 2>&1
+    ls -la "$d/etc/ssh" 2>&1
+    grep -H . "$d/etc/selinux/config" 2>&1
 done
 echo '--- /run/composefs ---'
 ls -laR /run/composefs 2>&1 | head -40
 echo '--- ESP after staging ---'
 for esp in /boot/efi /boot /efi; do
-    [ -d "\$esp/EFI" ] || continue
-    echo ">>> \$esp"; find "\$esp" -maxdepth 3 2>/dev/null | sort | head -80
-    for f in "\$esp"/loader/entries/*.conf; do [ -f "\$f" ] && { echo ">>> \$f"; cat "\$f"; }; done
+    [ -d "$esp/EFI" ] || continue
+    echo ">>> $esp"; find "$esp" -maxdepth 3 2>/dev/null | sort | head -80
+    for f in "$esp"/loader/entries/*.conf; do [ -f "$f" ] && { echo ">>> $f"; cat "$f"; }; done
 done
 echo '--- efibootmgr ---'
 efibootmgr -v 2>&1
@@ -1818,51 +1818,51 @@ SWAPDIAG
     # deployment's /etc, post-merge, pre-reboot, and mask firewalld (the
     # base image build disabled it; the target's preset may enable it).
     step "=== image-swap: re-injecting e2e-sshd into the staged deployment ==="
-    ssh $SSH_OPTS root@localhost bash <<SWAPSSH
+    ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' bash -s" <<'SWAPSSH'
 set -e
 STAGED=""
 for d in /sysroot/state/deploy/*/; do
-    v=\$(basename "\$d")
-    [ "\$v" = "$BASE_VERITY" ] && continue
-    [ -f "\$d/\$v.origin" ] && STAGED="\${d%/}"
+    v=$(basename "$d")
+    [ "$v" = "$BASE_VERITY" ] && continue
+    [ -f "$d/$v.origin" ] && STAGED="${d%/}"
 done
-[ -n "\$STAGED" ] || { echo "FAIL: no staged deployment beside $BASE_VERITY under /sysroot/state/deploy"; exit 1; }
-DEPLOY_ETC="\$STAGED/etc"
-[ -d "\$DEPLOY_ETC" ] || { echo "FAIL: \$DEPLOY_ETC not found"; exit 1; }
-mkdir -p "\$DEPLOY_ETC/systemd/system/sockets.target.wants"
+[ -n "$STAGED" ] || { echo "FAIL: no staged deployment beside $BASE_VERITY under /sysroot/state/deploy"; exit 1; }
+DEPLOY_ETC="$STAGED/etc"
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: $DEPLOY_ETC not found"; exit 1; }
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
 printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'ListenStream=22' 'Accept=yes' '[Install]' 'WantedBy=sockets.target' \
-    > "\$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
 printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
-    > "\$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
-ln -sf ../e2e-sshd.socket "\$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
-rm -f "\$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
-ln -sf /dev/null "\$DEPLOY_ETC/systemd/system/firewalld.service"
-mkdir -p "\$DEPLOY_ETC/ssh/sshd_config.d"
-echo "PermitRootLogin yes" > "\$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
+    > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
+ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+ln -sf /dev/null "$DEPLOY_ETC/systemd/system/firewalld.service"
+mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
+echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
 # The target may boot with SELinux enforcing while the composefs host has
 # no policy of its own to label these files with. Write the two contexts
 # the target's policy gives them directly (unit files and an sshd drop-in);
 # the merged /etc's selinux/config says whether that is needed at all.
-if grep -qE '^SELINUX=(enforcing|permissive)' "\$DEPLOY_ETC/selinux/config" 2>/dev/null; then
+if grep -qE '^SELINUX=(enforcing|permissive)' "$DEPLOY_ETC/selinux/config" 2>/dev/null; then
     label() {
-        ctx="\$1"; shift
+        ctx="$1"; shift
         if command -v setfattr >/dev/null; then
-            setfattr -h -n security.selinux -v "\$ctx" "\$@"
+            setfattr -h -n security.selinux -v "$ctx" "$@"
         else
-            python3 -c 'import os,sys; [os.setxattr(p, "security.selinux", sys.argv[1].encode()+b"\0", follow_symlinks=False) for p in sys.argv[2:]]' "\$ctx" "\$@"
+            python3 -c 'import os,sys; [os.setxattr(p, "security.selinux", sys.argv[1].encode()+b"\0", follow_symlinks=False) for p in sys.argv[2:]]' "$ctx" "$@"
         fi
     }
     U=system_u:object_r:systemd_unit_file_t:s0
-    label "\$U" "\$DEPLOY_ETC/systemd/system/e2e-sshd.socket" "\$DEPLOY_ETC/systemd/system/e2e-sshd@.service" \
-        "\$DEPLOY_ETC/systemd/system/sockets.target.wants" "\$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket" \
-        "\$DEPLOY_ETC/systemd/system/firewalld.service"
-    label system_u:object_r:etc_t:s0 "\$DEPLOY_ETC/ssh/sshd_config.d" "\$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf" \
+    label "$U" "$DEPLOY_ETC/systemd/system/e2e-sshd.socket" "$DEPLOY_ETC/systemd/system/e2e-sshd@.service" \
+        "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket" \
+        "$DEPLOY_ETC/systemd/system/firewalld.service"
+    label system_u:object_r:etc_t:s0 "$DEPLOY_ETC/ssh/sshd_config.d" "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf" \
         || { echo "FAIL: could not label the injected sshd files"; exit 1; }
     echo "labelled the injected units for the target's SELinux policy"
 else
     echo "target does not enable SELinux; injected units left unlabelled"
 fi
-ls -laZ "\$DEPLOY_ETC/systemd/system/" 2>&1 | head -20
+ls -laZ "$DEPLOY_ETC/systemd/system/" 2>&1 | head -20
 SWAPSSH
 
     step "=== image-swap: rebooting into the staged deployment ==="
