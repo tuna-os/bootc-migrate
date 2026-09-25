@@ -462,6 +462,14 @@ fn main() {
     };
 
     preflight::readiness::print_report(&report);
+    // Best-effort JSON snapshot alongside the human-readable report
+    // (bootc-migrate#229) — never blocks the migration on a write failure.
+    preflight::write_snapshot(
+        "bootc-migrate",
+        version,
+        &std::env::args().collect::<Vec<_>>(),
+        &report,
+    );
     preflight::readiness::print_readiness(&report);
 
     match preflight::readiness::gate(&report, args.force, args.skip_preflight) {
