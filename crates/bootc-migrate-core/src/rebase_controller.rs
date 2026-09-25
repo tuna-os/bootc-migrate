@@ -567,8 +567,8 @@ impl ImageSwapConfig<'_> {
                 "[selinux] target does not enable SELinux; no pre-boot relabel needed"
             ),
             Err(e) if self.force => eprintln!(
-                "Warning: pre-boot target-policy relabel failed ({e:#}); --force given, "
-                    "the deployment may not boot enforcing."
+                "Warning: pre-boot target-policy relabel failed ({e:#}); --force given, \
+                 the deployment may not boot enforcing."
             ),
             Err(e) => return Err(e).context("failed to label the staged image-swap deployment"),
         }
