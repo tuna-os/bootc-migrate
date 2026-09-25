@@ -473,11 +473,15 @@ jobs:
             if [ -f e2e-run.log ]; then
               echo '### Last phase reached'
               echo '```'
-              grep -aE '^=== |\[e2e [0-9:]+\] ===' e2e-run.log | tail -5
+              # step() wraps the timestamp in ANSI colour, so the reset lands
+              # between "]" and " ===" and an unescaped pattern never matches.
+              sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' e2e-run.log \
+                | grep -aE '^=== |\[e2e [0-9:]+\] ===' | tail -5
               echo '```'
               echo '### Assertions and errors'
               echo '```'
-              grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' e2e-run.log | tail -20
+              sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' e2e-run.log \
+                | grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' | tail -20
               echo '```'
               echo '### Log tail'
               echo '```'
