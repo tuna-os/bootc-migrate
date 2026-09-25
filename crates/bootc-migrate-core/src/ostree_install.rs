@@ -685,6 +685,50 @@ fn relabel_with_target_policy(
     Ok(Some(done))
 }
 
+/// Relabel a staged ComposeFS deployment before its first boot.
+///
+/// The image-swap route cannot rely on a first-boot `restorecon`: PID 1 and
+/// journald read the merged `/etc` before `sysinit.target` units run. Use the
+/// target image's own policy while the deployment is still writable so those
+/// early userspace paths already have valid labels. The first-boot unit still
+/// handles files created later and any persistent `/var` content.
+pub fn relabel_composefs_deployment(
+    target_image: &str,
+    deploy_root: &Path,
+) -> Result<Option<usize>> {
+    if !deployment_enables_selinux(deploy_root) {
+        return Ok(None);
+    }
+    let policy_type = fs::read_to_string(deploy_root.join("usr/etc/selinux/config"))
+        .ok()
+        .and_then(|c| crate::selinux::parse_selinux_config(&c).selinux_type)
+        .unwrap_or_else(|| "targeted".to_string());
+    let etc = deploy_root.join("etc");
+    let var_root = Path::new("/sysroot/state/os/default");
+    let var = var_root.join("var");
+    let mut jobs: Vec<(&Path, &Path)> = vec![(deploy_root, etc.as_path())];
+    if var.is_dir() {
+        jobs.push((var_root, var.as_path()));
+    }
+
+    let mut done = 0;
+    for mut argv in relabel_command(target_image, &jobs) {
+        if let Some(fc) = argv
+            .iter_mut()
+            .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
+        {
+            *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
+        }
+        println!("[selinux] {}", argv.join(" "));
+        run_checked(
+            Command::new(&argv[0]).args(&argv[1..]),
+            "setfiles in the target image",
+        )?;
+        done += 1;
+    }
+    Ok(Some(done))
+}
+
 fn which(tool: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
