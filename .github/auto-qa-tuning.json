@@ -1,0 +1,54 @@
+{
+  "quality_gates": [
+    {
+      "check": "cargo-deny",
+      "enabled": true,
+      "advisory_threshold": "deny",
+      "description": "Security advisory checks for Rust dependencies"
+    },
+    {
+      "check": "cargo-fmt",
+      "enabled": true,
+      "description": "Rust code formatting enforcement"
+    },
+    {
+      "check": "cargo-clippy",
+      "enabled": true,
+      "description": "Rust linting via clippy"
+    },
+    {
+      "check": "unit-tests",
+      "enabled": true,
+      "coverage_target": 70,
+      "description": "Rust unit tests coverage threshold"
+    },
+    {
+      "check": "e2e-tests",
+      "enabled": true,
+      "description": "End-to-end migration and rebase tests"
+    },
+    {
+      "check": "python-lint",
+      "enabled": true,
+      "tool": "ruff",
+      "target_version": "py39",
+      "description": "Python E2E driver linting"
+    }
+  ],
+  "self_tuning": {
+    "enabled": true,
+    "adjustment_interval": "weekly",
+    "metrics": [
+      "test_pass_rate",
+      "coverage_trend",
+      "dependency_vulnerability_count",
+      "ci_duration"
+    ],
+    "description": "Automatic adjustment of quality thresholds based on observed outcomes"
+  },
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2026-09-25",
+    "maintainer": "bootc-migrate team"
+  }
+}
