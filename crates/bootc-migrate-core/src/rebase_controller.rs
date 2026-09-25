@@ -11,6 +11,7 @@ use crate::cross_base;
 use crate::cross_family;
 use crate::de_controller::DesktopMigrationController;
 use crate::migration;
+use crate::ostree_install;
 use crate::preflight::{self, readiness};
 use crate::selinux;
 
@@ -557,6 +558,19 @@ impl ImageSwapConfig<'_> {
 
         if let Some(plan) = &de_plan {
             de.run_post_switch(plan, false)?;
+        }
+
+        let deploy = staged_composefs_deployment()?;
+        match ostree_install::relabel_composefs_deployment(self.target_image, &deploy) {
+            Ok(Some(n)) => println!("[selinux] labelled {n} staged tree(s) before reboot"),
+            Ok(None) => {
+                println!("[selinux] target does not enable SELinux; no pre-boot relabel needed");
+            }
+            Err(e) if self.force => eprintln!(
+                "Warning: pre-boot target-policy relabel failed ({e:#}); --force given, \
+                 the deployment may not boot enforcing."
+            ),
+            Err(e) => return Err(e).context("failed to label the staged image-swap deployment"),
         }
 
         schedule_image_swap_firstboot()?;
