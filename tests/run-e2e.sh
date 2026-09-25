@@ -772,7 +772,14 @@ for part in "${LOOP_DEV}p1" "${LOOP_DEV}p2" "${LOOP_DEV}p3" "${LOOP_DEV}p4"; do
             for conf in "$entries"/*.conf; do
                 [ -f "$conf" ] || continue
                 if ! grep -q 'console=ttyS0' "$conf"; then
-                    EXTRA_KARGS="console=ttyS0,115200n8 console=tty0 systemd.log_level=info"
+                    # #231: console=ttyS0 alone only buys visibility through
+                    # GRUB/initrd — plymouth takes the console at switch-root
+                    # and everything after that goes dark on serial. Disable
+                    # plymouth and make systemd narrate unit startup so a
+                    # stalled boot names the stalling unit instead of just
+                    # going silent (which looks identical to a healthy,
+                    # merely-slow boot in qemu.log).
+                    EXTRA_KARGS="console=ttyS0,115200n8 console=tty0 systemd.log_level=info plymouth.enable=0 systemd.show_status=1"
                     [ "$E2E_CONSOLE_JOURNAL" = "1" ] && EXTRA_KARGS="$EXTRA_KARGS systemd.journald.forward_to_console=1"
                     sudo sed -i "s|^\(options .*\)\$|\1 $EXTRA_KARGS|" "$conf" 2>/dev/null || true
                     echo "  patched: $(basename "$conf")"
@@ -1542,7 +1549,7 @@ PREDIAG
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after the ostree re-base."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the ostree re-base reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
         serial_failure_lines | tail -40 || true
         exit 1
     fi
@@ -1773,7 +1780,7 @@ REVSSH
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after the composefs -> ostree re-base."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the composefs -> ostree re-base reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
@@ -2029,7 +2036,7 @@ SWAPSSH
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after the image swap."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the image-swap reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
@@ -2512,7 +2519,7 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
 done
 
 if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-    echo "ERROR: VM did not boot back after migration."
+    echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the migration reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
     step "=== Post-reboot failure diagnostics ==="
     echo "--- All FAILED/DEPEND lines ---"
     serial_failure_lines | tail -80 || true
@@ -2982,7 +2989,7 @@ ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $FEDORA_BOOTNUM,$SDBOOT_BOO
 
 sleep 3
 wait_for_ssh_with_msg "OSTree rollback boot SSH" 120 || {
-    echo "FAIL: VM did not come back after OSTree rollback boot"
+    echo "FAIL: SSH did not answer after the OSTree rollback boot"
     tail -100 qemu.log
     exit 1
 }
@@ -3011,7 +3018,7 @@ step "rollback: restoring BootOrder to $ORIG_BOOTORDER and returning to composef
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $ORIG_BOOTORDER >/dev/null && systemctl reboot" || true
 sleep 3
 wait_for_ssh_with_msg "Return-to-composefs SSH" 60 || {
-    echo "FAIL: VM did not come back to composefs after rollback"
+    echo "FAIL: SSH did not answer after the return-to-composefs reboot"
     tail -100 qemu.log
     exit 1
 }
