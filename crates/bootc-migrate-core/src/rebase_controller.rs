@@ -92,6 +92,15 @@ impl CoreMigrationConfig<'_> {
 
         let report = preflight::run_preflight_checks()?;
         readiness::print_report(&report);
+        // Best-effort JSON snapshot alongside the human-readable report
+        // (bootc-migrate#229) — never blocks the migration on a write
+        // failure.
+        preflight::write_snapshot(
+            "bootc-rebase",
+            env!("CARGO_PKG_VERSION"),
+            &std::env::args().collect::<Vec<_>>(),
+            &report,
+        );
         readiness::print_readiness(&report);
         gate_decision(readiness::gate(&report, self.force, self.skip_preflight))?;
 

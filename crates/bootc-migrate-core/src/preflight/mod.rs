@@ -2,9 +2,11 @@
 //! per-direction validators ([`validate`]).
 
 pub mod readiness;
+pub mod snapshot;
 pub mod system_info;
 pub mod validate;
 
+pub use snapshot::{SNAPSHOT_DIR, write_snapshot};
 pub use system_info::{
     BootcStatus, BootedStatus, HostStatus, PendingTransactionStatus, SystemInfo,
     check_pending_ostree_transaction, check_reflink_support, count_composefs_files, get_free_space,
@@ -12,8 +14,9 @@ pub use system_info::{
 };
 
 use anyhow::Result;
+use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct PreflightReport {
     /// The backend the running deployment boots from, or `None` if this is not
     /// a bootc deployment at all — the only state that is a hard blocker.
