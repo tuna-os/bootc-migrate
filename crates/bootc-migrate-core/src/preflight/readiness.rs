@@ -163,7 +163,7 @@ pub fn readiness_issues(report: &PreflightReport) -> Vec<String> {
     if report.is_uefi && !report.systemd_boot_binaries_present {
         issues.push("systemd-boot binaries missing in source OS — migration will extract them from the target image instead.".to_string());
     }
-    if !report.grub_tools_available {
+    if report.booted_backend != Some(Backend::Composefs) && !report.grub_tools_available {
         issues.push(
             "No GRUB tools (grub2-reboot, grub2-editenv) — one-shot boot selection may fail."
                 .to_string(),
@@ -213,6 +213,11 @@ pub fn print_readiness(report: &PreflightReport) {
         for issue in &issues {
             println!("  ⚠ {}", issue);
         }
+    }
+
+    if report.booted_backend == Some(Backend::Composefs) {
+        println!("\nBootloader: Existing bootloader stays in place for this image swap.");
+        return;
     }
 
     // We migrate to systemd-boot by lifting the loader binary out of the target image,

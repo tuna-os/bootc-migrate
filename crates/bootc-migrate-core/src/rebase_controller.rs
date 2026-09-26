@@ -146,10 +146,15 @@ impl CoreMigrationConfig<'_> {
 /// leaves the previous deployment as the rollback entry.
 pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
     println!("Staging deployment of {target_image} via `bootc switch`...");
-    let status = std::process::Command::new("bootc")
+    let mut child = std::process::Command::new("bootc")
         .args(["switch", target_image])
-        .status()
+        .spawn()
         .map_err(|e| anyhow::anyhow!("failed to execute bootc switch: {e}"))?;
+    let status = wait_with_stage_progress(
+        &mut child,
+        std::time::Duration::from_secs(15),
+        &mut std::io::stdout(),
+    )?;
     if !status.success() {
         bail!("bootc switch {target_image} failed (exit {status})");
     }
@@ -442,6 +447,44 @@ fn finalized_state(status_stdout: &str) -> FinalizedState {
     }
 }
 
+/// `bootc switch` suppresses its interactive progress display when its output
+/// is piped into the TUI. Report elapsed time until it exits so a long pull
+/// does not look stalled; this is activity, not a download percentage.
+fn wait_with_stage_progress(
+    child: &mut std::process::Child,
+    interval: std::time::Duration,
+    output: &mut impl std::io::Write,
+) -> Result<std::process::ExitStatus> {
+    let started = std::time::Instant::now();
+    let mut next_report = interval;
+    let mut progress_output_available = true;
+    loop {
+        if let Some(status) = child.try_wait().context("waiting for bootc switch")? {
+            return Ok(status);
+        }
+        let elapsed = started.elapsed();
+        if progress_output_available && elapsed >= next_report {
+            let write_result = writeln!(
+                output,
+                "bootc switch is still pulling and staging ({}s elapsed)...",
+                elapsed.as_secs()
+            )
+            .and_then(|()| output.flush());
+            if let Err(error) = write_result {
+                // A closed TUI log pipe must not abandon a switch that bootc
+                // is already staging. Other output failures still surface.
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    progress_output_available = false;
+                } else {
+                    return Err(error).context("writing bootc switch progress");
+                }
+            }
+            next_report += interval;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1).min(interval));
+    }
+}
+
 /// The staged deployment's image spec from `bootc status --json`, if any.
 /// (Schema: `.status.staged.image.image.image` — ImageStatus → ImageReference
 /// → image spec string; stable across bootc 1.x.)
@@ -699,6 +742,59 @@ impl OstreeDeployConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_wait_reports_long_running_child_and_preserves_exit_status() {
+        for (script, expected_code, expect_report) in
+            [("sleep 0.2; exit 0", 0, true), ("exit 7", 7, false)]
+        {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            let mut output = Vec::new();
+            let status = wait_with_stage_progress(
+                &mut child,
+                std::time::Duration::from_millis(50),
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(status.code(), Some(expected_code), "{script}");
+            assert_eq!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .contains("still pulling and staging"),
+                expect_report,
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_progress_pipe_does_not_abandon_the_switch() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.2; exit 0"])
+            .spawn()
+            .unwrap();
+        let status = wait_with_stage_progress(
+            &mut child,
+            std::time::Duration::from_millis(50),
+            &mut ClosedPipe,
+        )
+        .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn booted_composefs_verity_table() {

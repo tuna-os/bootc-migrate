@@ -33,6 +33,7 @@ curl -fsSL -o bmc.tar.gz \
   https://github.com/tuna-os/bootc-migrate/releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz
 tar xzf bmc.tar.gz
 sudo install -m755 bootc-migrate /usr/local/bin/bootc-migrate
+sudo install -m755 bootc-rebase /usr/local/bin/bootc-rebase
 ```
 
 <details><summary>…or pull the container image</summary>
@@ -117,9 +118,19 @@ sudo bootc-migrate tui
 
 ![bootc-migrate TUI wizard](docs/images/tui-review.png)
 
-The wizard defaults to `--dry-run` and only builds the equivalent CLI
-invocation shown on the Review screen — it doesn't need root just to browse;
-root is required once you press Enter to actually run a migration.
+The image picker fetches the latest CI-published catalog, then falls back to a
+cached or bundled JSON snapshot if offline. It lists published Bluefin,
+Universal Blue, TunaOS, and Zirconium images; Utah appears as coming soon until
+its registry tag is published. The selected image reference and backend are
+shown before you continue. OSTree targets use `bootc-rebase` (which must be
+installed alongside `bootc-migrate`); ComposeFS targets use the normal migrate
+path. Returning from ComposeFS to OSTree is not yet supported.
+
+The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
+to choose an image, and press Space on the options page to change a setting.
+For a live run, turn off dry-run there. The final review requires typing
+`CONFIRM` and Enter before anything changes. Root is needed to run a migration,
+though you can browse the catalog without it.
 
 ## Architecture
 
