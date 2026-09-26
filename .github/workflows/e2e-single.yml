@@ -33,7 +33,7 @@ on:
         required: false
         default: composefs-migrate
         type: choice
-        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree]
+        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree, image-swap]
       cross_base:
         description: >-
           Pass --accept-cross-base and assert the cross-base remap report is
@@ -52,8 +52,32 @@ on:
         type: boolean
       expect_os_id:
         description: >-
-          os-release ID the migrated system must report (cross_family only,
-          e.g. opensuse-tumbleweed). Empty skips the identity assertion.
+          os-release ID the migrated system must report (cross_family and
+          image-swap, e.g. opensuse-tumbleweed or utah). Empty skips the
+          identity assertion.
+        required: false
+        default: ""
+      de_migrate:
+        description: >-
+          Pass --de-migrate (ostree-rebase mode): seed a config of de_from,
+          assert the re-base stashes it, and restore it after the reboot.
+        required: false
+        default: false
+        type: boolean
+      de_from:
+        description: Desktop the base image runs (gnome, kde, cosmic, niri, xfce)
+        required: false
+        default: gnome
+      expect_dm:
+        description: >-
+          Display manager the migrated system must run (gdm, sddm). Empty
+          accepts any when the default target is graphical.
+        required: false
+        default: ""
+      allowed_failed_units:
+        description: >-
+          Space-separated glob patterns of units allowed to be failed after
+          the reboot (tests/e2e-health.sh).
         required: false
         default: ""
       runner:
@@ -177,6 +201,10 @@ jobs:
             E2E_CROSS_BASE="${{ inputs.cross_base && '1' || '0' }}" \
             E2E_CROSS_FAMILY="${{ inputs.cross_family && '1' || '0' }}" \
             E2E_EXPECT_OS_ID="${{ inputs.expect_os_id }}" \
+            E2E_EXPECT_DM="${{ inputs.expect_dm }}" \
+            E2E_DE_MIGRATE="${{ inputs.de_migrate && '1' || '0' }}" \
+            E2E_DE_FROM="${{ inputs.de_from }}" \
+            E2E_ALLOWED_FAILED_UNITS="${{ inputs.allowed_failed_units }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       # tui-migrate runs record both interactive flows as asciicast v2

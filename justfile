@@ -94,6 +94,20 @@ e2e-cross-base: build test
       E2E_CROSS_BASE="1" \
       ./tests/run-e2e.sh
 
+# Composefs image swap across distributions: dakota (composefs-native)
+# -> utah (Bluefin on Fedora Hummingbird) through bootc-rebase's ImageSwap
+# route. Asserts the reboot lands in utah with the base kept as rollback.
+e2e-image-swap: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/utah:testing" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_MODE="image-swap" \
+      E2E_EXPECT_OS_ID="utah" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-image-swap.log
+
 e2e-debug: build
     @echo "=== Running E2E with composefs systemd debug logging ==="
     sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \

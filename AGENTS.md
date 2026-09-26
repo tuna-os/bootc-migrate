@@ -71,6 +71,8 @@ Also available via just: `just watch log="e2e-luks.log"`
 | TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 40G |
 | Cross-family migration (`E2E_CROSS_FAMILY=1`, non-gating) | bluefin:stable | bootcrew/opensuse-bootc:latest | btrfs | 40G |
 | composefs → ostree (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | quay.io/fedora/fedora-bootc:44 | btrfs | 40G |
+| composefs image swap (`E2E_MODE=image-swap`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
+| tunaOS desktop ring (`ostree-rebase`, `--de-migrate`, 4 cells, non-gating) | albacore:gnome, :niri, :cosmic, :xfce | the next desktop in the ring | btrfs | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place. A bug in the loopback path shows
