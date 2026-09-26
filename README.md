@@ -246,6 +246,20 @@ ghcr.io/projectbluefin/dakota:stable     # default target
 If you're migrating a different OSTree-backed system (Aurora, Silverblue),
 point `--target-image` at the composefs-flavored equivalent.
 
+The target must share a base lineage with the source: its `ID_LIKE` must
+overlap yours, or both images must ship the same package manager. Bluefin,
+Silverblue and CentOS-based images are all one dnf family. The tool
+refuses a target from another family, for example Fedora → openSUSE,
+because the standard `/etc` merge would carry your Fedora configuration
+onto openSUSE. Pass `--accept-cross-base` to migrate with the cross-family
+`/etc` policy instead. See "Cross-family targets" below.
+
+To migrate to an image you built yourself instead of a published one, see
+[docs/local-images.md](docs/local-images.md). Serve it from a registry the
+machine can reach. An image that exists only in podman storage is not
+enough. The capability scan and the Phase 4/5 fallbacks read the target
+over the registry API.
+
 ### 2. Check readiness with a dry-run
 
 ```bash
@@ -295,7 +309,7 @@ phase headers (0–5) print as it goes:
 | **1 — OSTree import** *(optional)* | Reflinks existing OSTree file objects into the composefs object store so Phase 2 mostly dedups | tens of seconds to a few minutes; skip with `--skip-import` |
 | **2 — OCI pull** | `bootc internals cfs oci pull` of the target image | minutes (network-bound) |
 | **3 — EROFS image** | Builds + fs-verity-signs the composefs metadata image | seconds |
-| **4 — Stage deploy** | 3-way `/etc` merge (from sealed mount), dangling-symlink prune, identity-DB line-union, `/var` copy or dedicated-subvolume preservation, `.origin` file written | ~1 minute |
+| **4 — Stage deploy** | 3-way `/etc` merge (from sealed mount) or, across families, the cross-family policy; dangling-symlink prune, identity-DB line-union, `/var` copy or dedicated-subvolume preservation, `.origin` file written | ~1 minute |
 | **5 — Bootloader** | Copies systemd-boot from mounted image, writes BLS entries, registers NVRAM | ~30s |
 
 When it ends with `=== MIGRATION COMPLETED ===` the on-disk state is
@@ -347,6 +361,43 @@ the sole default with timeout 0.
 | `--bootloader grub2`  | Stay on GRUB2 instead of installing systemd-boot                   |
 | `--skip-preflight`    | Bypass preflight checks (don't, unless you know exactly why)       |
 | `--force`             | Proceed past non-fatal warnings                                    |
+| `--accept-cross-base` | Migrate to a target from another OS family with the cross-family `/etc` policy (see below). `--force` does not imply it |
+
+### Cross-family targets
+
+`bootc-migrate` reads the target image's `os-release` and looks for its
+package manager before it stages anything. Two images are one family when
+their `ID`/`ID_LIKE` sets overlap or when both ship the same package
+manager (dnf, zypper, apt, pacman or apk). When the sets share nothing and
+the package managers differ (Fedora → openSUSE, Fedora → Debian), it
+refuses. When one image ships no known package manager (Dakota is GNOME
+OS-based), it warns and keeps the standard merge. The standard 3-way `/etc` merge keeps every file you
+changed on the source. Across families, that carries one family's
+package-manager, PAM, service and policy defaults onto the other.
+
+With `--accept-cross-base`, Phase 4 applies the cross-family policy
+instead:
+
+- Every path the target ships takes the target's copy.
+- The tool drops every path that only the source's vendor shipped.
+- The tool keeps machine state verbatim: `fstab`, `crypttab`,
+  `mdadm.conf`, `hostname`, `hosts`, `localtime`, `locale.conf`,
+  `vconsole.conf`, `adjtime`, SSH host keys and `sshd_config.d/`, saved
+  NetworkManager connections, and `sudoers.d/`. It also keeps every path
+  you added yourself.
+- Identity databases take the target's numeric ids first, and the tool
+  appends your accounts. Password entries stay yours. The tool then
+  changes the owner of each file under `/var` to match.
+- Every displaced file you had changed stays beside its replacement as
+  `<path>.rebase-old`. The tool deletes nothing.
+- When the target enforces an SELinux policy that the source did not, a
+  one-shot unit relabels `/etc` and `/var` on first boot.
+
+The tool prints the report and writes it to
+`/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
+This route is exploratory: one non-gating E2E cell exercises it. See
+[ROADMAP.md](ROADMAP.md) and
+[#256](https://github.com/tuna-os/bootc-migrate/issues/256).
 
 ### Move system Steam into Flatpak Steam
 
@@ -456,6 +507,9 @@ What's intentionally *not* carried forward:
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
 | Phase 5 refuses because the target kernel has no module alias for a wireless device | The image omits the driver for Wi-Fi hardware present on the source system | Fix or update the target image. Use `--force` only when alternate networking is available and losing Wi-Fi is acceptable |
+| Refused with "Cross-family re-base detected" | The target's `ID_LIKE` shares nothing with the host's and its package manager differs | Re-run with `--accept-cross-base` to use the cross-family `/etc` policy, or pick a target from the same family |
+| The new image boots, but `/etc` still looks like the old distribution | A cross-family migration ran with a build that predates #256 | Update the tool, boot the OSTree entry, and migrate again with `--accept-cross-base` |
+| Phase 2 fails with "podman could not refresh" on your own image | The machine cannot pull the image, or podman rejects a plain-HTTP registry | Mark the registry insecure and confirm with a manual `podman pull` — see [docs/local-images.md](docs/local-images.md) |
 | Migration went wrong and you want to undo it | Something failed mid-migration | Run `sudo bootc-migrate undo` (removes composefs boot artifacts, keeps object store) or `sudo bootc-migrate undo --full` (full cleanup including object store); then reboot into OSTree |
 
 ## Requirements
@@ -468,7 +522,9 @@ What's intentionally *not* carried forward:
 - ≥ `1.1 × ostree_repo_size` free on `/sysroot/composefs` (no reflink: 1.5×)
 - Outbound registry access for `bootc internals cfs oci pull`
   (Phase 2 fetches the target image; Phases 4–5 read artifacts from the sealed
-  mount, so no runtime registry access is needed after Phase 2)
+  mount, so no runtime registry access is needed after Phase 2). A registry on
+  your own network works too — see
+  [docs/local-images.md](docs/local-images.md)
 
 ## Building
 
@@ -492,7 +548,7 @@ sudo ./tests/run-e2e.sh
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
 
-The CI matrix runs seven cells (see `.github/workflows/e2e-tests.yml`, which
+The CI matrix runs fourteen cells (see `.github/workflows/e2e-tests.yml`, which
 is authoritative):
 
 | Cell | Base → target | Filesystem | Disk |
@@ -504,6 +560,10 @@ is authoritative):
 | ostree re-base | bluefin:stable → dakota:stable | btrfs | 40G |
 | ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
 | TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
+| composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
+| composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
+| tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place.
@@ -542,7 +602,7 @@ cargo build --release -p bootc-rebase
 | Subcommand | What it does | Status |
 |---|---|---|
 | `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. `--json` for machine output. | Done |
-| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), and ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report) |
+| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). On the composefs routes `--accept-cross-base` also accepts a cross-*family* target and, on the conversion route, selects the cross-family `/etc` policy (#256) |
 | `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
 | `boot-entries [--json] [--interactive] [--rename-branding] [--apply] [--undo]` | Enumerate and classify UEFI boot entries: dead (loader path missing), generic-label, duplicate, firmware-managed, plus which are protected and why. **Dry-run by default** — a bare invocation is the read-only audit. `--interactive` opens a checklist (protected entries are unselectable), `--rename-branding` proposes renaming the booted entry to `PRETTY_NAME`, `--apply` writes the result to NVRAM after a typed confirmation and a restorable snapshot, and `--undo` replays that snapshot. | Audit and the cleanup **planner** are unit-tested (protections, the last-bootable-entry guard, and the "every entry looks dead ⇒ the ESP is wrong" refusal). The gating OSTree re-base E2E cell also renames a live OVMF NVRAM entry, applies the plan, undoes it, and asserts byte-identical `efibootmgr -v` output. This covers the executor and snapshot restore; it does **not** cover the separate, unimplemented GRUB2→systemd-boot flip ([#31](https://github.com/tuna-os/bootc-migrate/issues/31), [#189](https://github.com/tuna-os/bootc-migrate/issues/189)) |
 | `de-migrate stash\|restore` | Move a user's desktop-environment config (GNOME dconf/gnome-shell, KDE kdeglobals/plasma, COSMIC, niri, XFCE) into or out of a stash directory around a cross-DE re-base — union of paths per issue [#68](https://github.com/tuna-os/bootc-migrate/issues/68), never deletes. `--run-hooks` executes `pre-switch.d`/`post-switch.d` scripts with `REBASE_FROM_DE`/`REBASE_TO_DE`/`REBASE_STASH_DIR`/`REBASE_HOME` set. `--dry-run` previews without touching anything. | Done. Also runs automatically inside `rebase --de-migrate`; this subcommand remains the manual escape hatch for images shipping several desktops (which detection refuses to guess between) |
@@ -555,7 +615,7 @@ source of truth the CLI consults before touching anything):
 | From ↓ \ To → | ostree | composefs |
 |---|---|---|
 | **ostree** | `OstreeDeploy` (native `bootc switch`) | `CoreMigration` (this repo's proven phase 0–5 pipeline) |
-| **composefs** | planned, not implemented | `ImageSwap` |
+| **composefs** | `OstreeInstall` (the target's own `bootc install to-existing-root`, alongside; composefs entry kept as rollback — #260, exploratory) | `ImageSwap` |
 
 ## Roadmap
 

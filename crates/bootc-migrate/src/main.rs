@@ -28,6 +28,15 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
+    /// Proceed onto a target image from another OS family (no shared
+    /// ID_LIKE lineage with this host, e.g. Fedora -> openSUSE) using the
+    /// cross-family /etc policy: the target's defaults win, machine state
+    /// and your own additions are carried over, and every displaced file
+    /// you had changed is kept as a `.rebase-old` sidecar (#256). Without
+    /// this, such a target is refused. Not implied by --force.
+    #[arg(long)]
+    accept_cross_base: bool,
+
     /// Bootloader to use: "systemd-boot" (default, when UEFI), "grub2", or "auto"
     #[arg(long, default_value = "systemd-boot")]
     bootloader: String,
@@ -474,6 +483,7 @@ fn main() {
                 // bootc-rebase option. Keep the swap to what this binary
                 // already promises and leave the desktop alone.
                 de_migrate: false,
+                accept_cross_base: args.accept_cross_base,
             }
             .run();
             match result {
@@ -505,6 +515,16 @@ fn main() {
                 exit_flushed!(0);
             }
         }
+    }
+
+    // ---- Cross-family gate (#256) ----
+    // Still read-only: scans the target's identity and refuses a target from
+    // another OS family unless --accept-cross-base was given. Phase 4 decides
+    // again from the pulled image itself, so an unscannable target only
+    // warns here.
+    if let Err(e) = bootc_migrate_core::cross_family::gate(&target_image, args.accept_cross_base) {
+        eprintln!("Error: {e:#}");
+        exit_flushed!(1);
     }
 
     // ---- Phase 0.5: Config Drift Review (issue #15) ----
@@ -557,7 +577,10 @@ fn main() {
         args.skip_import,
         &args.bootloader,
         args.force,
-        etc_overrides.as_ref(),
+        migration::EtcPolicy {
+            overrides: etc_overrides.as_ref(),
+            accept_cross_base: args.accept_cross_base,
+        },
     ) {
         eprintln!("\nMigration Failed: {:#}", e);
         exit_flushed!(1);

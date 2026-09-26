@@ -1,5 +1,6 @@
 //! Configure Options screen — the toggle grid for dry-run, skip-import,
-//! bootloader, skip-preflight, and force flags with cursor navigation.
+//! bootloader, skip-preflight, force, and accept-cross-base flags with
+//! cursor navigation.
 //!
 //! Extracted from `tui.rs` (bootc-migrate#133): a pure renderer over `App`
 //! state via `super`.
@@ -65,6 +66,15 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 "[ ]".to_owned()
             },
             app.opt_force,
+        ),
+        (
+            "Accept a cross-family target (⚠ target /etc wins)",
+            if app.opt_accept_cross_base {
+                "[x]".to_owned()
+            } else {
+                "[ ]".to_owned()
+            },
+            app.opt_accept_cross_base,
         ),
     ];
 

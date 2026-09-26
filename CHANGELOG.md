@@ -24,8 +24,106 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ## [Unreleased]
 
-Nothing yet. Work lands here until a version bump in `Cargo.toml`
-merges to `main`, which is what cuts the release — see RELEASING.md.
+### Added
+
+- tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
+  between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
+  `--de-migrate`. Every desktop is stashed, restored and required to start
+  its own display manager once. The harness now seeds, stashes and
+  restores a config of any source desktop (`E2E_DE_FROM`), not only GNOME.
+- E2E checks that a migrated system works, not only that its data survived.
+  After every reboot into a migrated system, `tests/e2e-health.sh` requires
+  a completed boot, no unexpected failed units, a working system bus and
+  logind, the expected display manager, every account the target declares,
+  and correct SELinux labels. The composefs migration mode now fails when a
+  file that the target image ships in `/etc` is missing afterwards. The
+  GNOME → KDE cell also runs the desktop restore on the booted target and
+  asserts that the stashed config comes back.
+- Dakota → Utah E2E coverage for the composefs `ImageSwap` route. A new
+  harness mode (`E2E_MODE=image-swap`, `just e2e-image-swap`) installs the
+  base composefs-native, runs `bootc-rebase --target-backend composefs`
+  to Utah (Bluefin on Fedora Hummingbird, `ghcr.io/projectbluefin/utah:testing`),
+  reboots, and asserts that Utah boots with `/etc`, `/var` and `/var/home`
+  carried over and that the Dakota deployment stays as rollback. The cell
+  is non-gating while Utah is pre-alpha.
+- Cross-family migration on the composefs route (#256). `bootc-migrate`
+  and `bootc-rebase`'s `CoreMigration`/`ImageSwap` routes now read the
+  target's `os-release` and package manager and refuse a target whose
+  `ID`/`ID_LIKE` share nothing with the host's and whose package manager
+  differs (Fedora → openSUSE). Two images with the same package manager
+  are one family whatever their `ID_LIKE` says (Bluefin LTS is `centos`);
+  a pair with no evidence either way (Dakota ships no package manager)
+  warns and keeps the standard merge. `--accept-cross-base` (new
+  on `bootc-migrate` and in the TUI's options) proceeds with a
+  cross-family `/etc` policy in Phase 4: the target's defaults win,
+  source-vendor-only files are dropped, machine state and user-added paths
+  are carried, identity databases merge target-first with the source's
+  accounts appended, `/var` ownership is renumbered to the target's ids,
+  displaced edits are kept as `.rebase-old` sidecars, and a first-boot
+  unit relabels for SELinux (or defers the `/var` remap) when needed. A
+  JSON report is written beside the deployment. Non-gating E2E cell:
+  bluefin → `ghcr.io/bootcrew/opensuse-bootc`.
+
+- composefs → ostree route (#260): `bootc-rebase --target-backend ostree`
+  on a composefs host now runs the target image's own `bootc install
+  to-existing-root` in a privileged container against the physical root,
+  snapshots the composefs ESP artifacts before bootc empties the ESP and
+  restores them beside the new shim/GRUB, 3-way merges `/etc` (cross-family
+  policy included), copies `/var` into the new stateroot, and puts the
+  GRUB firmware entry first with "Linux Boot Manager" kept as rollback.
+  The target must ship bootupd, which bootc's ostree backend uses to
+  install its bootloader; the route's preflight refuses a target without
+  it (Dakota ships none) and `bootc-rebase scan` reports it. Exploratory;
+  one non-gating E2E cell.
+
+### Changed
+
+- `mergetc` grew a merge policy (identity-DB precedence and per-path
+  states); the default behaviour is unchanged.
+- `bootc-rebase`'s routing table marks every backend pair implemented;
+  `--plan` for composefs → ostree prints `OstreeInstall`.
+
+### Fixed
+
+- `bootc-rebase`'s cross-base gate now says when it has checked a pair and
+  found one OS lineage. Before, that pass printed nothing, so it looked
+  the same as a gate that had stopped gating. The #80 missing-accounts
+  note now also reads `/usr/lib/passwd` and `/usr/lib/group`. EL10 bootc
+  images keep their system accounts there, and the note used to list
+  every one of them as missing on an AlmaLinux host.
+- `bootc-rebase`'s composefs → OSTree route now fills the new stateroot's
+  `/var` with the target image's own `/var` skeleton after it copies the
+  live `/var`, without overwriting anything it carried. The stateroot of
+  an alongside install starts empty, so fedora-bootc booted without
+  `/var/lib/chrony`, and chronyd failed. The new post-reboot health check
+  found this.
+- `bootc-rebase`'s composefs image swap now prepares the new deployment's
+  first boot when the target is another distribution. On composefs, `bootc
+  switch` merges the running `/etc` at shutdown. From Dakota to Utah, this
+  merge has two results:
+  - Dakota creates its accounts at runtime, so its `/etc/passwd` replaces
+    Utah's, and Utah's `dbus` user is missing.
+  - Dakota has no SELinux policy, so the merged files have no labels, and
+    Utah boots enforcing.
+  In both cases D-Bus does not start and the boot never completes. The
+  route now installs a first-boot unit that runs the target's
+  `systemd-sysusers` and `ldconfig` before `sysinit.target`. When the
+  target enforces a policy that the host did not label for, the unit
+  also runs the target's `restorecon` over `/etc` and `/var`.
+- `bootc-rebase` finalizes the deployment `bootc switch` staged before it
+  returns, instead of leaving it to shutdown (#262). On a `bootc install
+  to-disk` layout with no separate /boot partition, libostree's shutdown-time
+  finalization fails to remount /boot (ostreedev/ostree#3365). The next boot
+  then lands in the previous deployment, and the console does not say why.
+  The bootloader entries are now written at once, and a failure is an error
+  the user sees.
+
+- Phase 4's dangling-symlink prune resolved a relative target such as
+  `/etc/os-release -> ../usr/lib/os-release` against the staged
+  deployment directory, which holds `etc` alone, and removed the link.
+  It now resolves the path the link names on the booted system against
+  the target image. openSUSE lost `os-release`, `localtime` and `termcap`
+  that way.
 
 ---
 

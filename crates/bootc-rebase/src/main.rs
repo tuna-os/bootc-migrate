@@ -237,7 +237,10 @@ struct Args {
     /// Acknowledge a cross-base re-base (host and target disagree on
     /// ID/ID_LIKE) and proceed with its UID/GID remap (#67). Without this,
     /// a detected cross-base re-base is refused after printing the remap
-    /// report so the blast radius is visible first.
+    /// report so the blast radius is visible first. On the composefs
+    /// routes this accepts a cross-*family* target (no shared ID_LIKE
+    /// lineage, e.g. Fedora -> openSUSE) and, on the conversion route,
+    /// selects the cross-family /etc policy (#256).
     #[arg(long)]
     accept_cross_base: bool,
 
@@ -308,6 +311,7 @@ fn run_core_migration(args: &Args) -> Result<()> {
         skip_preflight: args.skip_preflight,
         force: args.force,
         de_migrate: args.de_migrate,
+        accept_cross_base: args.accept_cross_base,
     }
     .run()
 }
@@ -378,6 +382,7 @@ fn execute_rebase(args: &Args) -> Result<()> {
         Strategy::CoreMigration => run_core_migration(args),
         Strategy::OstreeDeploy => run_ostree_deploy(args),
         Strategy::ImageSwap => run_image_swap(args),
+        Strategy::OstreeInstall => run_ostree_install(args),
     }
 }
 
@@ -423,6 +428,23 @@ fn run_image_swap(args: &Args) -> Result<()> {
         dry_run: args.dry_run,
         force: args.force,
         de_migrate: args.de_migrate,
+        accept_cross_base: args.accept_cross_base,
+    }
+    .run()
+}
+
+/// composefs → ostree (issue #260): a fresh OSTree deployment built beside
+/// the composefs root by the target's own bootc. The route lives in
+/// `bootc_migrate_core::ostree_install`; this only checks privilege and
+/// translates flags.
+fn run_ostree_install(args: &Args) -> Result<()> {
+    check_root_privilege()?;
+    bootc_migrate_core::ostree_install::OstreeInstallConfig {
+        target_image: &args.target_image,
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_preflight: args.skip_preflight,
+        accept_cross_base: args.accept_cross_base,
     }
     .run()
 }

@@ -156,11 +156,13 @@ mod tests {
             id: "fedora".into(),
             id_like: None,
             version_id: Some("44".into()),
+            pkg_family: None,
         };
         let target = BaseInfo {
             id: "fedora".into(),
             id_like: None,
             version_id: Some("44".into()),
+            pkg_family: None,
         };
         let readiness = cross_base(&host, &target);
         assert!(!readiness.is_cross_base);
@@ -174,11 +176,13 @@ mod tests {
             id: "fedora".into(),
             id_like: None,
             version_id: Some("44".into()),
+            pkg_family: None,
         };
         let target = BaseInfo {
             id: "centos".into(),
             id_like: Some("rhel".into()),
             version_id: Some("10".into()),
+            pkg_family: None,
         };
         let readiness = cross_base(&host, &target);
         assert!(readiness.is_cross_base);
@@ -196,11 +200,13 @@ mod tests {
             id: "bluefin".into(),
             id_like: Some("fedora".into()),
             version_id: None,
+            pkg_family: None,
         };
         let target = BaseInfo {
             id: "fedora".into(),
             id_like: None,
             version_id: None,
+            pkg_family: None,
         };
         let readiness = cross_base(&host, &target);
         assert!(!readiness.is_cross_base);
