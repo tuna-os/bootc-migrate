@@ -14,8 +14,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
+use crate::cross_family::{self, CrossFamilyEtcOutcome, CrossFamilyPlan};
+use crate::mergetc::{IdentityMergePolicy, MergePolicy};
 use crate::migration::{image_access, target_compat};
 use crate::registry::{extract_files_via_registry, extract_subtree_via_registry};
+use crate::selinux;
 use crate::xattr;
 
 /// Typed inputs for the `/etc` transition.
@@ -24,10 +27,15 @@ pub(crate) struct EtcTransition<'a> {
     pub sealed_config: &'a str,
     pub etc_dir: &'a Path,
     pub overrides: Option<&'a crate::mergetc::EtcDriftManifest>,
+    /// `--accept-cross-base` (bootc-migrate#256). The merge reads the
+    /// mounted target's identity and, across families, refuses without
+    /// this or applies [`cross_family::plan_etc`]'s policy with it — and
+    /// then must not fall back to a flat copy.
+    pub accept_cross_base: bool,
 }
 
 /// What the transition actually did, for the caller to report on.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct EtcTransitionReport {
     /// The three-way merge failed and a flat copy of the live `/etc` was used.
     /// The post-merge cleanup passes are skipped in that case, as they always
@@ -35,6 +43,9 @@ pub(crate) struct EtcTransitionReport {
     pub fell_back_to_flat_copy: bool,
     /// Host `/` and `/var` mounts dropped from the target's fstab.
     pub removed_host_mounts: usize,
+    /// What the cross-family policy did, and the target-side inputs the
+    /// post-merge steps need once the mount is gone.
+    pub cross_family: Option<CrossFamilyEtcOutcome>,
 }
 
 impl<'a> EtcTransition<'a> {
@@ -43,19 +54,37 @@ impl<'a> EtcTransition<'a> {
     /// The merge is best-effort: on failure the live `/etc` is copied flat and
     /// the run continues, matching the long-standing behavior of the inline
     /// pipeline this replaces. fstab sanitization runs either way.
+    ///
+    /// Except across families: a flat copy of the source's `/etc` is the
+    /// exact outcome the cross-family policy exists to prevent, so there a
+    /// failed merge fails the migration.
     pub(crate) fn run(&self) -> Result<EtcTransitionReport> {
         let mut report = EtcTransitionReport::default();
 
-        if let Err(e) = perform_etc_merge(
+        match perform_etc_merge(
             self.target_image,
             self.sealed_config,
             self.etc_dir,
             self.overrides,
+            self.accept_cross_base,
         ) {
-            eprintln!("3-way /etc merge failed ({e}), falling back to flat /etc copy.");
-            xattr::copy_dir_all_with_xattrs("/etc", self.etc_dir)
-                .context("failed to copy /etc (fallback)")?;
-            report.fell_back_to_flat_copy = true;
+            Ok(outcome) => report.cross_family = outcome,
+            // A cross-family refusal, or a failure after the policy was
+            // selected: a flat copy of the source's /etc is the exact
+            // outcome the policy exists to prevent, so neither may fall
+            // through to it.
+            Err(e) if e.is::<CrossFamilyMergeError>() => {
+                return Err(e).context(
+                    "3-way /etc merge failed; a flat copy of the source's /etc is not \
+                     acceptable for a cross-family re-base (bootc-migrate#256)",
+                );
+            }
+            Err(e) => {
+                eprintln!("3-way /etc merge failed ({e}), falling back to flat /etc copy.");
+                xattr::copy_dir_all_with_xattrs("/etc", self.etc_dir)
+                    .context("failed to copy /etc (fallback)")?;
+                report.fell_back_to_flat_copy = true;
+            }
         }
 
         report.removed_host_mounts = sanitize_composefs_fstab(self.etc_dir)?;
@@ -140,13 +169,32 @@ fn resolve_device_uuid(device: &str) -> Option<String> {
     None
 }
 
+/// Marker for merge errors that must not degrade to the flat-copy
+/// fallback: the cross-family refusal, and any failure after the
+/// cross-family policy was selected.
+#[derive(Debug)]
+struct CrossFamilyMergeError(anyhow::Error);
+
+impl std::fmt::Display for CrossFamilyMergeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for CrossFamilyMergeError {}
+
 /// Perform 3-way /etc merge: old OSTree default, current live /etc, new ComposeFS default.
+///
+/// Returns the cross-family outcome when the mounted target turns out to
+/// be from another family (and `accept_cross_base` allowed it), `None`
+/// otherwise.
 fn perform_etc_merge(
     target_image: &str,
     sealed_config: &str,
     etc_dir: &Path,
     etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
-) -> Result<()> {
+    accept_cross_base: bool,
+) -> Result<Option<CrossFamilyEtcOutcome>> {
     let temp_mount =
         TempDir::new_in("/var/tmp").context("failed to create temp mount directory")?;
     let mut mount_path = temp_mount.path().to_path_buf();
@@ -165,6 +213,15 @@ fn perform_etc_merge(
     let target =
         image_access::open_target(target_image, sealed_config, &mount_path, "etc", "phase4")?;
     mount_path = target.path().to_path_buf();
+
+    // #256: the authoritative lineage decision, from the mounted image's
+    // own os-release — the early registry scan may have been unable to see.
+    let cross_family = cross_family::decide(
+        crate::scan::read_host_base_info(),
+        crate::scan::read_base_info_from_root(&mount_path),
+        accept_cross_base,
+    )
+    .map_err(|e| anyhow::Error::from(CrossFamilyMergeError(e)))?;
 
     let old_default_etc = find_ostree_etc_default()?;
     let current_etc = Path::new("/etc");
@@ -191,14 +248,48 @@ fn perform_etc_merge(
         registry_etc
     };
 
-    crate::mergetc::merge_etc_files_with_overrides(
+    // Across families the policy is planned over the three trees first and
+    // handed to the merge as forced decisions (target default wins, sidecar
+    // for a displaced user edit); the user's own drift-review decisions,
+    // where given, still override the policy's for that path.
+    let cross_family_outcome = match &cross_family {
+        Some(plan) => Some(
+            plan_cross_family_etc(plan, &old_default_etc, current_etc, &new_default_etc)
+                .map_err(|e| anyhow::Error::from(CrossFamilyMergeError(e)))?,
+        ),
+        None => None,
+    };
+    let mut policy_manifest = cross_family_outcome
+        .as_ref()
+        .map(|o| o.etc_plan.overrides());
+    if let (Some(policy), Some(user)) = (policy_manifest.as_mut(), etc_overrides) {
+        policy
+            .decisions
+            .extend(user.decisions.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+    let policy = MergePolicy {
+        overrides: policy_manifest.as_ref().or(etc_overrides),
+        identity: if cross_family.is_some() {
+            IdentityMergePolicy::TargetFirst
+        } else {
+            IdentityMergePolicy::SourceFirst
+        },
+    };
+    crate::mergetc::merge_etc_files_with_policy(
         &old_default_etc,
         current_etc,
         &new_default_etc,
         etc_dir,
-        etc_overrides,
+        &policy,
     )
-    .context("3-way /etc merge failed")?;
+    .context("3-way /etc merge failed")
+    .map_err(|e| {
+        if cross_family.is_some() {
+            anyhow::Error::from(CrossFamilyMergeError(e))
+        } else {
+            e
+        }
+    })?;
 
     match target_compat::apply_target_gbm_backend_compat(target_image, &mount_path, etc_dir) {
         Ok(true) => println!(
@@ -237,7 +328,57 @@ fn perform_etc_merge(
     // system state on Dakota.
     drop_ostree_era_etc_artifacts(etc_dir);
 
-    Ok(())
+    Ok(cross_family_outcome)
+}
+
+/// Plan the cross-family `/etc` policy over the three trees and capture,
+/// while the target is still mounted, the target-side inputs the post-merge
+/// steps need: its identity databases (for the remap) and its SELinux
+/// configuration (for the relabel decision).
+fn plan_cross_family_etc(
+    plan: &CrossFamilyPlan,
+    old_default_etc: &Path,
+    current_etc: &Path,
+    new_default_etc: &Path,
+) -> Result<CrossFamilyEtcOutcome> {
+    let states = crate::mergetc::etc_path_states(old_default_etc, current_etc, new_default_etc)
+        .context("failed to read the three /etc trees for the cross-family policy")?;
+    let etc_plan = cross_family::plan_etc(&states);
+    println!(
+        "[phase4] cross-family /etc policy ({} -> {}): {} target default(s), {} dropped, {} carried, {} sidecar(s)",
+        plan.host.id,
+        plan.target.id,
+        etc_plan.take_target.len(),
+        etc_plan.dropped.len(),
+        etc_plan.carried.len(),
+        etc_plan.sidecars.len()
+    );
+    // A target with no passwd/group ships no accounts to renumber to; the
+    // remap planner then sees only source-only names and plans nothing.
+    let read_or_empty = |name: &str| -> String {
+        match fs::read_to_string(new_default_etc.join(name)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[phase4] warning: target image ships no readable /etc/{name} ({e}); \
+                     no UID/GID remap will be planned for it"
+                );
+                String::new()
+            }
+        }
+    };
+    let target_passwd = read_or_empty("passwd");
+    let target_group = read_or_empty("group");
+    let target_selinux = fs::read_to_string(new_default_etc.join("selinux/config"))
+        .ok()
+        .map(|c| selinux::parse_selinux_config(&c));
+    Ok(CrossFamilyEtcOutcome {
+        plan: plan.clone(),
+        etc_plan,
+        target_passwd,
+        target_group,
+        target_selinux,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

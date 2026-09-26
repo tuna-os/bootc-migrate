@@ -37,7 +37,7 @@ pub fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
         let fg = match ll.kind {
             LogKind::Error => DANGER,
             LogKind::Header => TEAL,
-            _ => SUBTLE,
+            _ => MUTED,
         };
         text_lines.push(Line::from(Span::styled(
             format!("  {}", ll.text),
@@ -57,12 +57,12 @@ pub fn render_failed(f: &mut ratatui::Frame, app: &App, area: Rect) {
     text_lines.push(Line::raw(""));
     text_lines.push(Line::from(Span::styled(
         "  Check the log at /var/log/bootc-migrate.log for details.",
-        Style::default().fg(SUBTLE),
+        Style::default().fg(MUTED),
     )));
     text_lines.push(Line::raw(""));
     text_lines.push(Line::from(Span::styled(
         "  Press [q] or [Enter] to exit.",
-        Style::default().fg(SUBTLE),
+        Style::default().fg(MUTED),
     )));
 
     let para = Paragraph::new(Text::from(text_lines))

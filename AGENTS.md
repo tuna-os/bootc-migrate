@@ -37,6 +37,15 @@ Key project-specific points (see REVIEW.md for the full list):
   table-driven tests.
 - Run `just check` (clippy, rustfmt, unit tests, shellcheck) before opening a PR.
 
+## Definition of Done & validation discipline
+
+AI agents must strictly follow the project's **Definition of Done** (see [REVIEW.md](REVIEW.md)):
+
+- **Do not leave undischarged validation caveats in PR descriptions.** If an execution environment lacks a compiler, toolchain, or dependencies needed to run tests locally, you must NOT write "compilation deferred to CI" or "test could not link" and consider the task complete. A PR is not ready for review or merge until validation has been executed and verified passing.
+- **Verify description claims against the diff.** Do not state that a property, invariant, or security behavior (e.g. fail-closed HTTPS) is implemented unless the diff actually implements it and tests verify it. Review the PR title, body, and comments against the final diff.
+- **"Deferred to CI" is only valid if CI actually reports green on the head commit.** Silence, un-triggered workflows, or missing checks are not passes.
+- **Do not close milestone/tracking issues without validation.** If live validation is deferred to a future phase, document the unvalidated path in [ROADMAP.md](ROADMAP.md) and link to an open validation tracking issue.
+
 ## Monitoring E2E runs
 
 Use `watcher.sh` instead of polling loops. It tails the e2e log, exits on fatal
@@ -60,6 +69,10 @@ Also available via just: `just watch log="e2e-luks.log"`
 | ostree re-base (`E2E_MODE=ostree-rebase`) | bluefin:stable | dakota:stable | btrfs | 40G |
 | ostree re-base GNOME -> KDE (non-gating) | bluefin:stable | aurora:stable | btrfs | 40G |
 | TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 40G |
+| Cross-family migration (`E2E_CROSS_FAMILY=1`, non-gating) | bluefin:stable | bootcrew/opensuse-bootc:latest | btrfs | 40G |
+| composefs → ostree (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | quay.io/fedora/fedora-bootc:44 | btrfs | 40G |
+| composefs image swap (`E2E_MODE=image-swap`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
+| tunaOS desktop ring (`ostree-rebase`, `--de-migrate`, 4 cells, non-gating) | albacore:gnome, :niri, :cosmic, :xfce | the next desktop in the ring | btrfs | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place. A bug in the loopback path shows

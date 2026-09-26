@@ -81,7 +81,8 @@ pub fn ostree_to_composefs(sys: SystemInfo) -> PreflightReport {
     let esp_ready_for_systemd_boot =
         sys.esp_detected && sys.esp_free_space_bytes >= 150 * 1024 * 1024;
     PreflightReport {
-        is_bootc_ostree: sys.is_bootc_ostree,
+        booted_backend: sys.booted_backend,
+        booted_image: sys.booted_image,
         pending_transaction: sys.pending_transaction,
         is_uefi: sys.is_uefi,
         nvram_writable: sys.nvram_writable,
@@ -111,7 +112,8 @@ mod tests {
 
     fn sys_with_esp(detected: bool, free: u64) -> SystemInfo {
         SystemInfo {
-            is_bootc_ostree: true,
+            booted_backend: Some(crate::rebase_plan::Backend::Ostree),
+            booted_image: None,
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
             nvram_writable: true,
@@ -154,11 +156,13 @@ mod tests {
             id: "fedora".into(),
             id_like: None,
             version_id: Some("44".into()),
+            pkg_family: None,
         };
         let target = BaseInfo {
             id: "fedora".into(),
             id_like: None,
             version_id: Some("44".into()),
+            pkg_family: None,
         };
         let readiness = cross_base(&host, &target);
         assert!(!readiness.is_cross_base);
@@ -172,11 +176,13 @@ mod tests {
             id: "fedora".into(),
             id_like: None,
             version_id: Some("44".into()),
+            pkg_family: None,
         };
         let target = BaseInfo {
             id: "centos".into(),
             id_like: Some("rhel".into()),
             version_id: Some("10".into()),
+            pkg_family: None,
         };
         let readiness = cross_base(&host, &target);
         assert!(readiness.is_cross_base);
@@ -194,11 +200,13 @@ mod tests {
             id: "bluefin".into(),
             id_like: Some("fedora".into()),
             version_id: None,
+            pkg_family: None,
         };
         let target = BaseInfo {
             id: "fedora".into(),
             id_like: None,
             version_id: None,
+            pkg_family: None,
         };
         let readiness = cross_base(&host, &target);
         assert!(!readiness.is_cross_base);

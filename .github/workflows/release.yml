@@ -1,16 +1,36 @@
-# Publish release binaries when a v* tag is pushed.
+# Releasing is automatic: the workspace version in Cargo.toml is the release
+# decision, and merging it to main is what cuts the release.
 #
-#   git tag -a v0.1.2 -m 'Release 0.1.2' && git push origin v0.1.2
+#   1. A change bumps `version` under [workspace.package].
+#   2. It merges to main.
+#   3. This workflow sees no tag for that version, builds, and creates the
+#      GitHub Release (which creates the tag) plus the container image.
 #
-# Builds an optimized binary per target on a NATIVE runner (no cross), then a
-# single release job attaches all binaries (plus SHA-256 checksums) to the
-# GitHub Release in one atomic `gh release create` — required because this
-# account enforces immutable releases (assets must be present at creation;
-# you cannot upload to a release after it is published).
+# A push to main whose version already has a tag does nothing but the cheap
+# `resolve` job, so ordinary merges cost seconds.
+#
+# Pushing a v* tag by hand still works and is the escape hatch for releasing
+# outside this flow.
+#
+# WHY THE TAG IS NOT PUSHED SEPARATELY
+#
+# Two constraints shape this file, and both are easy to reintroduce:
+#
+#   - A tag pushed with GITHUB_TOKEN does NOT start a workflow run. So a
+#     "tag on main, let the tag trigger the release" design silently produces
+#     tags with no binaries and no image — which is exactly how v0.5.0 ended
+#     up documented in the README but never released (issue #240). Everything
+#     therefore happens inside the run that made the decision.
+#   - This account enforces immutable releases: assets must be present when
+#     the release is created, and cannot be uploaded afterwards. So the single
+#     `gh release create` below carries every artifact at once, and it runs
+#     only after the builds have succeeded — `gh release create` creates the
+#     tag itself, so a failed build leaves no tag behind to clean up.
 name: Release
 
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch: {}
 
@@ -18,13 +38,75 @@ permissions:
   contents: write
   packages: write
 
+# Serialised, never cancelled: two merges landing together must not both
+# decide to release the same version, and a half-finished release is worse
+# than a slow one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   IMAGE: ghcr.io/${{ github.repository_owner }}/bootc-migrate
 
 jobs:
+  resolve:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      build: ${{ steps.r.outputs.build }}
+      publish: ${{ steps.r.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are needed to answer "has this version been released?".
+          fetch-depth: 0
+      - id: r
+        run: |
+          set -euo pipefail
+
+          # A hand-pushed tag releases exactly what it names.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            printf 'tag=%s\nbuild=true\npublish=true\n' "${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "::notice::tag push — releasing ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+
+          # Manual dispatch builds without releasing, so the Containerfile and
+          # both cross-arch builds stay validated between releases.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            printf 'tag=\nbuild=true\npublish=false\n' >> "$GITHUB_OUTPUT"
+            echo "::notice::dispatch — building without releasing"
+            exit 0
+          fi
+
+          # Push to main: read the one version every crate inherits.
+          version="$(awk -F'"' '
+            /^\[workspace\.package\]/ { s = 1; next }
+            /^\[/                     { s = 0 }
+            s && /^version[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)"
+
+          if [[ -z "$version" ]]; then
+            echo "::error file=Cargo.toml::could not read version from [workspace.package]"
+            exit 1
+          fi
+
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            printf 'tag=%s\nbuild=false\npublish=false\n' "$tag" >> "$GITHUB_OUTPUT"
+            echo "::notice::${tag} is already released — nothing to do"
+            exit 0
+          fi
+
+          printf 'tag=%s\nbuild=true\npublish=true\n' "$tag" >> "$GITHUB_OUTPUT"
+          echo "::notice::version ${version} has no ${tag} tag — releasing it"
+
   build:
     name: Build (${{ matrix.target }})
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -61,10 +143,9 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    # Only publish on a tag push; workflow_dispatch builds without releasing.
-    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -74,20 +155,23 @@ jobs:
       - name: Create release with all assets (atomic — immutable-safe)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           ls -la dist/
-          gh release create "${GITHUB_REF_NAME}" dist/* \
+          # --target pins the tag gh creates to the commit that was built.
+          # It is ignored when the tag already exists (the hand-pushed path).
+          gh release create "$TAG" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
+            --title "$TAG" \
+            --target "${GITHUB_SHA}" \
             --generate-notes
 
   container:
     name: Publish container image
-    needs: build
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
-    # Builds (but doesn't push) on workflow_dispatch so the Containerfile
-    # stays validated between releases; only pushes on an actual tag.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -104,7 +188,7 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Log in to ghcr
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: needs.resolve.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -116,7 +200,7 @@ jobs:
           context: ctx
           file: Containerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          push: ${{ needs.resolve.outputs.publish == 'true' }}
           tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:${{ needs.resolve.outputs.tag || 'dev' }}
             ${{ env.IMAGE }}:latest

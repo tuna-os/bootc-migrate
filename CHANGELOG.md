@@ -10,24 +10,131 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 > ever tagged; the `v0.1.0`, `v0.3.0` and `v0.4.0` sections describe work that
 > landed on `main` but was never released, and their links pointed at tags
 > that return 404. They are kept as the record of what changed and marked
-> accordingly. `v0.5.0` is numbered above both the highest tag (`v0.2.0`) and
-> the highest documented section (`v0.4.0`), so no reader of either sees a
-> version go backwards.
+> accordingly.
+>
+> `v0.5.0` was the next number chosen, above both the highest tag (`v0.2.0`)
+> and the highest documented section (`v0.4.0`) — but it was never cut either,
+> which is the bug #240 reported: documented, `curl`-able in the README, and
+> 404 in practice. Rather than leave a fifth phantom heading, its content is
+> folded into `v0.6.0` below, which is the release that actually ships it. One
+> section, one tag, and from now on the tag is created by the release run
+> itself so the two cannot drift again (see RELEASING.md).
 
 ---
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
+  between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
+  `--de-migrate`. Every desktop is stashed, restored and required to start
+  its own display manager once. The harness now seeds, stashes and
+  restores a config of any source desktop (`E2E_DE_FROM`), not only GNOME.
+- E2E checks that a migrated system works, not only that its data survived.
+  After every reboot into a migrated system, `tests/e2e-health.sh` requires
+  a completed boot, no unexpected failed units, a working system bus and
+  logind, the expected display manager, every account the target declares,
+  and correct SELinux labels. The composefs migration mode now fails when a
+  file that the target image ships in `/etc` is missing afterwards. The
+  GNOME → KDE cell also runs the desktop restore on the booted target and
+  asserts that the stashed config comes back.
+- Dakota → Utah E2E coverage for the composefs `ImageSwap` route. A new
+  harness mode (`E2E_MODE=image-swap`, `just e2e-image-swap`) installs the
+  base composefs-native, runs `bootc-rebase --target-backend composefs`
+  to Utah (Bluefin on Fedora Hummingbird, `ghcr.io/projectbluefin/utah:testing`),
+  reboots, and asserts that Utah boots with `/etc`, `/var` and `/var/home`
+  carried over and that the Dakota deployment stays as rollback. The cell
+  is non-gating while Utah is pre-alpha.
+- Cross-family migration on the composefs route (#256). `bootc-migrate`
+  and `bootc-rebase`'s `CoreMigration`/`ImageSwap` routes now read the
+  target's `os-release` and package manager and refuse a target whose
+  `ID`/`ID_LIKE` share nothing with the host's and whose package manager
+  differs (Fedora → openSUSE). Two images with the same package manager
+  are one family whatever their `ID_LIKE` says (Bluefin LTS is `centos`);
+  a pair with no evidence either way (Dakota ships no package manager)
+  warns and keeps the standard merge. `--accept-cross-base` (new
+  on `bootc-migrate` and in the TUI's options) proceeds with a
+  cross-family `/etc` policy in Phase 4: the target's defaults win,
+  source-vendor-only files are dropped, machine state and user-added paths
+  are carried, identity databases merge target-first with the source's
+  accounts appended, `/var` ownership is renumbered to the target's ids,
+  displaced edits are kept as `.rebase-old` sidecars, and a first-boot
+  unit relabels for SELinux (or defers the `/var` remap) when needed. A
+  JSON report is written beside the deployment. Non-gating E2E cell:
+  bluefin → `ghcr.io/bootcrew/opensuse-bootc`.
+
+- composefs → ostree route (#260): `bootc-rebase --target-backend ostree`
+  on a composefs host now runs the target image's own `bootc install
+  to-existing-root` in a privileged container against the physical root,
+  snapshots the composefs ESP artifacts before bootc empties the ESP and
+  restores them beside the new shim/GRUB, 3-way merges `/etc` (cross-family
+  policy included), copies `/var` into the new stateroot, and puts the
+  GRUB firmware entry first with "Linux Boot Manager" kept as rollback.
+  The target must ship bootupd, which bootc's ostree backend uses to
+  install its bootloader; the route's preflight refuses a target without
+  it (Dakota ships none) and `bootc-rebase scan` reports it. Exploratory;
+  one non-gating E2E cell.
+
+### Changed
+
+- `mergetc` grew a merge policy (identity-DB precedence and per-path
+  states); the default behaviour is unchanged.
+- `bootc-rebase`'s routing table marks every backend pair implemented;
+  `--plan` for composefs → ostree prints `OstreeInstall`.
+
+### Fixed
+
+- `bootc-rebase`'s cross-base gate now says when it has checked a pair and
+  found one OS lineage. Before, that pass printed nothing, so it looked
+  the same as a gate that had stopped gating. The #80 missing-accounts
+  note now also reads `/usr/lib/passwd` and `/usr/lib/group`. EL10 bootc
+  images keep their system accounts there, and the note used to list
+  every one of them as missing on an AlmaLinux host.
+- `bootc-rebase`'s composefs → OSTree route now fills the new stateroot's
+  `/var` with the target image's own `/var` skeleton after it copies the
+  live `/var`, without overwriting anything it carried. The stateroot of
+  an alongside install starts empty, so fedora-bootc booted without
+  `/var/lib/chrony`, and chronyd failed. The new post-reboot health check
+  found this.
+- `bootc-rebase`'s composefs image swap now prepares the new deployment's
+  first boot when the target is another distribution. On composefs, `bootc
+  switch` merges the running `/etc` at shutdown. From Dakota to Utah, this
+  merge has two results:
+  - Dakota creates its accounts at runtime, so its `/etc/passwd` replaces
+    Utah's, and Utah's `dbus` user is missing.
+  - Dakota has no SELinux policy, so the merged files have no labels, and
+    Utah boots enforcing.
+  In both cases D-Bus does not start and the boot never completes. The
+  route now installs a first-boot unit that runs the target's
+  `systemd-sysusers` and `ldconfig` before `sysinit.target`. When the
+  target enforces a policy that the host did not label for, the unit
+  also runs the target's `restorecon` over `/etc` and `/var`.
+- `bootc-rebase` finalizes the deployment `bootc switch` staged before it
+  returns, instead of leaving it to shutdown (#262). On a `bootc install
+  to-disk` layout with no separate /boot partition, libostree's shutdown-time
+  finalization fails to remount /boot (ostreedev/ostree#3365). The next boot
+  then lands in the previous deployment, and the console does not say why.
+  The bootloader entries are now written at once, and a failure is an error
+  the user sees.
+
+- Phase 4's dangling-symlink prune resolved a relative target such as
+  `/etc/os-release -> ../usr/lib/os-release` against the staged
+  deployment directory, which holds `etc` alone, and removed the link.
+  It now resolves the path the link names on the booted system against
+  the target image. openSUSE lost `os-release`, `localtime` and `termcap`
+  that way.
 
 ---
 
-## [v0.5.0] — 2026-08
+## [v0.6.0] — 2026-09-04
 
 First release since the repository was renamed from `bootc-migrate-composefs`,
 and the first whose E2E matrix runs on every push (seven cells, hosted
-runners). Ships the `bootc-migrate` binary only; `bootc-rebase` remains
-**experimental and unreleased** — see "Scope" below.
+runners). Carries everything that was documented under the never-released
+`v0.5.0` heading, plus the boot-entry fixes that landed after it. Ships the
+`bootc-migrate` binary only; `bootc-rebase` remains **experimental and
+unreleased** — see "Scope" below.
 
 ### Scope
 
@@ -101,6 +208,35 @@ runners). Ships the `bootc-migrate` binary only; `bootc-rebase` remains
   ROADMAP.md for what's deliberately not implemented yet.
 
 ### Fixed
+- **UEFI boot-entry audit no longer offers to delete the firmware's own
+  setup and shell entries** (#31). EDK2/OVMF labels these "UiApp" and
+  "EFI Internal Shell" and gives both a `File(...)` device path into the
+  firmware volume. That path never resolves on the ESP, and the
+  firmware-label marker list only matched the narrower string `"efi shell"`
+  — so both were classified as merely dead, which made them
+  `safe_to_preselect()` and therefore candidates for `boot-entries --apply`.
+  The markers now cover `"shell"` and `"uiapp"`. Found by the new live NVRAM
+  round-trip coverage in the e2e suite.
+- **The boot-entry audit now parses loader paths on every `efibootmgr`**
+  (#31). The device-path parser only understood the classic
+  `HD(...)/File(\EFI\fedora\shimx64.efi)` rendering. Newer `efibootmgr`
+  prints the path as a bare trailing component —
+  `HD(...)/\EFI\fedora\shimx64.efi` — with no `File()` wrapper. On such a
+  host *every* entry parsed with no loader path, so nothing could ever be
+  flagged dead and `boot-entries` had nothing to propose: the cleanup this
+  issue exists for was silently inert. Both renderings are now handled. Every
+  unit fixture used the classic form, which is why only live e2e coverage
+  caught it.
+- **`boot-entries --json` stdout is machine-readable again** (#31/#189).
+  `find_esp_or_mount` printed "Found ESP already mounted at ..." to stdout,
+  which lands ahead of the JSON document and breaks every consumer that pipes
+  it. Two sibling call sites in the same function were moved to stderr
+  earlier; this third one was missed.
+- **`FvFile(...)` is no longer read as a loader path** (#31). The same parser
+  looked for `File(` anywhere in the node list, which also matches the tail of
+  a firmware volume's `FvFile(`. A firmware entry's volume GUID was therefore
+  treated as an ESP-relative loader path, never resolved, and the entry was
+  reported dead. The match must now start a node.
 - Remove debug kernel arguments (`systemd.log_level=debug`,
   `systemd.log_target=console`, `systemd.journald.forward_to_console=1`) that
   were accidentally left in production `kernel_options.rs`. These caused every
@@ -207,8 +343,8 @@ _(Section previously dated 2026-04; the tag was created 2026-07-04. #171.)_
 - E2E CI: btrfs scenario on every push to `main`.
 - `justfile` with build, test, E2E, lint, and cleanup recipes.
 
-[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/v0.5.0...main
-[v0.5.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.5.0
+[Unreleased]: https://github.com/tuna-os/bootc-migrate/compare/v0.6.0...main
+[v0.6.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.6.0
 [v0.2.0]: https://github.com/tuna-os/bootc-migrate/releases/tag/v0.2.0
 <!-- v0.1.0, v0.3.0 and v0.4.0 were never tagged; linking them to
      releases/tag/... returned 404. Left unlinked deliberately (#171). -->

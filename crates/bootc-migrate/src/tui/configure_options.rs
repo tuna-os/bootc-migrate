@@ -1,5 +1,6 @@
 //! Configure Options screen — the toggle grid for dry-run, skip-import,
-//! bootloader, skip-preflight, and force flags with cursor navigation.
+//! bootloader, skip-preflight, force, and accept-cross-base flags with
+//! cursor navigation.
 //!
 //! Extracted from `tui.rs` (bootc-migrate#133): a pure renderer over `App`
 //! state via `super`.
@@ -66,21 +67,30 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
             },
             app.opt_force,
         ),
+        (
+            "Accept a cross-family target (⚠ target /etc wins)",
+            if app.opt_accept_cross_base {
+                "[x]".to_owned()
+            } else {
+                "[ ]".to_owned()
+            },
+            app.opt_accept_cross_base,
+        ),
     ];
 
     let mut lines: Vec<Line> = vec![Line::raw("")];
     for (i, (label, value, _active)) in options.iter().enumerate() {
         let selected = i == app.options_cursor;
         let prefix = if selected { "▶ " } else { "  " };
-        let fg = if selected { TEXT } else { SUBTLE };
-        let value_fg = if selected { TEAL } else { SUBTLE };
+        let fg = if selected { TEXT } else { MUTED };
+        let value_fg = if selected { TEAL } else { MUTED };
         let is_warning = label.contains('⚠');
         let label_fg = if is_warning { AMBER } else { fg };
 
         let line = Line::from(vec![
             Span::styled(
                 prefix,
-                Style::default().fg(if selected { TEAL } else { SUBTLE }),
+                Style::default().fg(if selected { TEAL } else { MUTED }),
             ),
             Span::styled(
                 format!("{:<48}", label),

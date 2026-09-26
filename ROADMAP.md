@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-08-27. Living document; the issue tracker is authoritative
+Status date: 2026-09-03. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 Caveat on that split, recorded because it has already misled readers: five
@@ -8,6 +8,13 @@ milestone issues are closed as completed while their exit criteria here are
 not met, because the implementation landed and the validation named in the
 issue's own scope did not. Where the two disagree, this file is currently the
 more accurate. See "Unvalidated paths" below and #186.
+
+The same caveat applies to the GitHub milestone view, more sharply. All six
+milestones are open with zero open issues and no due date, and none of the
+repository's open issues is attached to a milestone — including #187, which
+is M3's own missing exit criterion. Read on its own, that view says the
+project is finished; M2, M3, M4 and M5 below say otherwise, and they are
+right. Reconciling the two is tracked as #237.
 
 ## Vision
 
@@ -28,9 +35,10 @@ Three deliverables share the code:
 
 **M0 (MVP hardening) and M1 (same-backend re-base engine) are done.** Every
 issue under both milestones is closed. `bootc-rebase` truthfully routes all
-four backend pairs (implemented for three of them; `composefs→ostree` remains
-explicitly refused, not silently attempted) and the capability scan (#24)
-covers every proposed probe.
+four backend pairs (all four implemented since #260 landed the
+`composefs→ostree` route as `Strategy::OstreeInstall`, exploratory and
+covered by one non-gating cell) and the capability scan (#24) covers every
+proposed probe.
 
 **In progress, with an explicit boundary between what's landed and what's
 deliberately deferred** — each of M2, M3, and M5 shipped a pure/unit-testable
@@ -72,6 +80,21 @@ It allows the proven, renamed migrator to ship while making the newer engine's
 evidence level visible to adopters. After this release, cadence and the
 `bootc-rebase` graduation gate should be tracked separately.
 
+**Status of that gate, 2026-09-03: not started, and the cost is now
+user-visible.** The contract exists (RELEASING.md, #171) and no clause of it
+has been executed. `Cargo.toml`'s workspace version is `0.5.0`; the newest
+GitHub Release is `v0.2.0` from 2026-07-04, carrying only pre-rename
+`bootc-migrate-composefs-*` archives. So the README quick start's
+`releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz`
+returns 404, the same URL under the old asset name returns 200, and
+`ghcr.io/tuna-os/bootc-migrate:latest` refuses anonymous pulls while
+`ghcr.io/tuna-os/bootc-migrate-composefs` still serves them. Both documented
+install paths therefore fail for a new adopter, and the only artifact that
+does resolve is the pre-rename binary the README steers people away from.
+
+No release owner and no target date are recorded anywhere, which is the one
+gate clause that blocks all the others. Tracked as #236.
+
 ## Unvalidated paths (single list for release notes)
 
 Consumed by [RELEASING.md](RELEASING.md), which records the release contract
@@ -86,10 +109,13 @@ validation named in that issue's own scope never shipped.
 | Path | State | Validation gap | Tracking |
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
-| Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | the `efibootmgr` path has never executed; no cell mutates NVRAM | #31, #189 |
-| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | never executes; currently un-coverable in CI — the guest cannot scan the target, so the gate no-ops (#191) | #67, #187, #191 |
-| DE stash/restore (`--de-migrate`) | implemented, detection table-tested | no cell passes `--de-migrate`; stash never created on a real system | #68, #188 |
-| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory also silently no-ops in CI for the same scan failure (#191) | #80, #191 |
+| Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
+| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
+| DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
+| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
+| composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | one non-gating cell (dakota composefs-native → fedora-bootc 44) asserts the route, the fixtures and the preserved rollback entry; never executed on a real host before that cell | #260 |
+| composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) asserts the route, the fixtures, the booted identity and the kept rollback; it depends on a pre-alpha image and has not yet passed end to end | #66 |
+| Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | one non-gating cell (bluefin → bootcrew/opensuse-bootc) asserts the refusal, the staged `/etc` shape and the booted identity; it depends on a community image and has not yet passed end to end | #256 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -187,17 +213,29 @@ alone:
   wrong.)
 - Separately, the three `bluefin:lts` cells run
   `E2E_MODE=composefs-migrate` — the MVP binary, which merges via `mergetc`
-  and has no `is_cross_base` gate at all — and no cell passes
-  `--accept-cross-base`.
+  and has no `is_cross_base` gate at all.
 - And when a cell was actually built to exercise this (#187), it uncovered a
-  third blocker that outranks both: inside the E2E guest the target-image
-  scan cannot reach ghcr.io, so `gate_cross_base` degrades to a no-op with
-  only a warning and `is_cross_base` is never evaluated at all (#191).
+  third blocker that outranked both: inside the E2E guest the target-image
+  scan could not reach ghcr.io, so `gate_cross_base` degraded to a no-op with
+  only a warning and `is_cross_base` was never evaluated at all (#191).
 
-So the honest status is that the cross-base path is not merely uncovered but
-currently **un-coverable in CI**, and the first question is #191, not the
-cell. Whether any available image pair even qualifies as cross-base under the
-`ID_LIKE` rule is still open. Tracked as #187.
+That third blocker is now fixed, which moves the honest status but does not
+change the conclusion. #191 shipped on 2026-08-28: `build_cross_base_plan`
+returns a tri-state `CrossBaseVerdict`, and `Unknown` — the unreachable-scan
+case — is refused on the same terms as a known cross-base pair rather than
+waved through. The `ostree-rebase` cell asserts that refusal (either
+"Cross-base re-base detected" or "Cannot determine whether …" is accepted;
+proceeding unguarded fails the cell), and it then opts in with
+`--accept-cross-base` to continue, so the gate's wiring now has live
+coverage in CI.
+
+What still has none is the thing the gate protects: the remap walk and the
+`/etc` reconciliation pass. Every pair in the matrix is same-lineage Fedora,
+so `is_cross_base` returns false whenever the scan succeeds, and the opt-in
+is the operator's rather than a real cross-base crossing. So the path is
+**coverable now but still uncovered**, and the open question is the one #187
+was always about: which available image pair actually qualifies as cross-base
+under the `ID_LIKE` rule. Tracked as #187.
 
 Related: [#80](https://github.com/tuna-os/bootc-migrate/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)
@@ -227,16 +265,15 @@ generation, and retiring the pinned legacy builder, have not been picked up.
 bootc anywhere (host, target, builder); `BMC_CFS_BUILDER` becomes a no-op
 escape hatch.
 
-### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed; the interactive/live pieces exist but are unvalidated**
+### M5 — Desktop & UX (scenario E + human factors) — **computable cores landed; interactive/live coverage is partial**
 
-Three issues, same shape: the pure/reusable core shipped first and is
-unit-tested. The interactive checklists (#15, #31) and #31's live NVRAM
-mutation have since been built on top, but neither is exercisable by this
-project's build/clippy/test/fmt + E2E loop — a passing CI run cannot
-demonstrate that a checklist UI works, and no E2E cell mutates NVRAM. Both
-carry that caveat in their module docs and need manual/corral-VM
-validation; #31's `efibootmgr` path is the same class of risk as #65 and
-should not be trusted until it has been run on a real UEFI system.
+Three issues share the same shape: the pure/reusable core shipped first and
+is unit-tested. The interactive checklist in #15 is now driven through a
+full migration by the gating TUI cell. The gating OSTree re-base cell also
+executes #31's live NVRAM rename and snapshot restore against OVMF and asserts
+that `efibootmgr -v` is byte-identical afterwards. That evidence does not
+cover #65's unimplemented bootloader flip, and real-hardware validation is
+still advisable before treating firmware-specific behavior as universal.
 
 - [#68](https://github.com/tuna-os/bootc-migrate/issues/68) — DE
   config stash/restore (GNOME dconf/gnome-shell, KDE kdeglobals/plasma,
@@ -280,11 +317,11 @@ should not be trusted until it has been run on a real UEFI system.
   (`boot_cleanup::plan`), and the `efibootmgr` executor
   (`boot_cleanup::live`) only performs what the planner approved. Dry-run
   is the default; `--apply` requires a typed confirmation and writes a
-  restorable NVRAM snapshot first; `--undo` replays it. What has **not**
-  run is the `efibootmgr` path itself: no E2E cell mutates NVRAM, so entry
-  deletion, the create-before-delete rename, and `--undo` need a real UEFI
-  machine or a corral VM before they are trusted — as does the checklist's
-  terminal event loop, like this project's other interactive-only work.
+  restorable NVRAM snapshot first; `--undo` replays it. The gating OSTree
+  re-base cell now covers the create-before-delete rename and `--undo`
+  against live OVMF variables, including a byte-for-byte restoration check.
+  Entry deletion and the checklist's terminal event loop are not exercised
+  by that flow and still need targeted VM or real-hardware validation.
 
 **Exit criteria (not yet met)**: bluefin↔aurora-style switch preserves user
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
@@ -297,23 +334,36 @@ RFC](https://github.com/tuna-os/bootc-migrate/issues/30) but never
 got a milestone or an issue. Recorded here so they aren't lost, not because
 either is imminent:
 
-- **`composefs→ostree` (reverse backend switch)** — going back to an
-  OSTree-backed image from a composefs system that never had an OSTree
-  deployment. `bootc-rebase`'s routing table currently refuses this route
-  explicitly (see M1 above) rather than attempting it; `undo` only reverts a
-  migration this tool itself performed, which is a much narrower problem
-  (the prior OSTree deployment is already on disk). A general
-  `composefs→ostree` route needs to initialize an OSTree repo and bootstrap a
-  deployment from a pulled image with nothing to restore from — mechanically
-  the inverse of `Strategy::OstreeDeploy` (M1), not a variant of it.
-- **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch)** — M3's cross-base work
-  (#67) stays within the Fedora family, where `/etc` defaults, UID/GID
-  allocation, and the init/PAM stack share lineage. A cross-family route
-  would need to treat most of `/etc` as non-mergeable (drop rather than
-  3-way-merge family-specific package-manager and service config), carry
-  only universally meaningful state (`/var/home`, containers, flatpaks,
-  accounts), and regenerate target-family defaults from scratch — closer to
-  a "reinstall with data preservation" than an in-place migration.
+- **`composefs→ostree` (reverse backend switch)** — now implemented as
+  `Strategy::OstreeInstall` (#260, `crates/bootc-migrate-core/src/ostree_install.rs`):
+  the target image's own `bootc install to-existing-root` runs in a
+  privileged container against the physical root (`/sysroot`), building an
+  OSTree deployment beside the composefs one with nothing to restore from;
+  the composefs ESP artifacts are snapshotted before bootc's alongside mode
+  empties the ESP and restored beside the new shim/GRUB, `/etc` is 3-way
+  merged (cross-family policy included) and `/var` copied into the
+  stateroot, and the GRUB firmware entry goes first with "Linux Boot
+  Manager" kept as rollback. `undo` remains the narrow path for a migration
+  this tool itself performed. Exploratory: one non-gating cell (dakota →
+  bluefin) and no rollback subcommand for this direction yet.
+- **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch) via `bootc switch`** —
+  M3's cross-base work (#67) stays within the Fedora family, where `/etc`
+  defaults, UID/GID allocation, and the init/PAM stack share lineage. The
+  composefs *conversion* route now has a cross-family policy (#256,
+  `crates/bootc-migrate-core/src/cross_family.rs`): most of `/etc` is
+  non-mergeable (the target's defaults win, the source vendor's files are
+  dropped), an explicit allowlist of machine state and every user-added
+  path are carried, identity databases merge target-first with a `/var`
+  remap, and displaced edits survive as `.rebase-old` sidecars — the
+  "reinstall with data preservation" shape this entry described before it
+  existed. It is gated behind `--accept-cross-base`, exploratory, and
+  covered by one non-gating cell. The `bootc switch` routes (OstreeDeploy,
+  ImageSwap) refuse a cross-family target on the same gate but apply no
+  policy: their `/etc` is the native merge's, which is the same-lineage
+  rule. A cross-family policy over a `bootc switch`-staged deployment would
+  reuse `etc_conflict`'s post-merge seam; that is #259, one of the
+  any-base-to-any-base steps tracked in #258 (with #260 for
+  composefs → ostree and #261 for an E2E base-pair matrix).
 
 ### 1.0 — Universal migrator
 

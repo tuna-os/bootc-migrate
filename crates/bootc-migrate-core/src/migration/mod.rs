@@ -1,4 +1,5 @@
 pub mod boot;
+mod boot_deployments;
 pub mod bootloader;
 pub mod deploy;
 pub mod deploy_layout;
@@ -46,12 +47,23 @@ use tempfile::TempDir;
 
 // ---- Public API ----
 
+/// What steers Phase 4's `/etc` merge beyond the three trees, decided by the
+/// caller before anything is staged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EtcPolicy<'a> {
+    /// The interactive Config Drift Review's per-path decisions (issue
+    /// #15's "Phase 0.5"), if the caller ran that review; `None` falls back
+    /// to the default 3-way `/etc` merge behavior unconditionally.
+    pub overrides: Option<&'a crate::mergetc::EtcDriftManifest>,
+    /// `--accept-cross-base` (bootc-migrate#256): lets Phase 4 apply the
+    /// cross-family `/etc` policy when the mounted target turns out to be
+    /// from another OS family. Without it such a target is refused there
+    /// (the early [`crate::cross_family::gate`] refuses sooner when the
+    /// registry scan can see it).
+    pub accept_cross_base: bool,
+}
+
 /// Main migration entry point. Orchestrates all 5 phases.
-///
-/// `etc_overrides` carries the interactive Config Drift Review's per-path
-/// decisions (issue #15's "Phase 0.5"), if the caller ran that review; pass
-/// `None` to fall back to the default 3-way `/etc` merge behavior
-/// unconditionally.
 pub fn run_migration(
     report: &PreflightReport,
     target_image: &str,
@@ -59,7 +71,7 @@ pub fn run_migration(
     skip_import: bool,
     bootloader: &str,
     force: bool,
-    etc_overrides: Option<&crate::mergetc::EtcDriftManifest>,
+    etc_policy: EtcPolicy<'_>,
 ) -> Result<()> {
     // Hold the mutation guards for the whole run; a dry run holds none.
     let _lifecycle = MigrationLifecycle::acquire(dry_run)?;
@@ -111,7 +123,7 @@ pub fn run_migration(
         &sealed_config,
         dry_run,
         force,
-        etc_overrides,
+        etc_policy,
     )?;
 
     // ---- Phase 5: Setup bootloader ----

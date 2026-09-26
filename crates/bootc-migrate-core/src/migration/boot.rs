@@ -2,6 +2,7 @@
 //!
 //! Also home to the standalone `migrate-bootloader` subcommand (issue #65).
 
+use super::boot_deployments::{BootDeployment, enumerate_deployments};
 use super::*;
 use crate::preflight::SystemInfo;
 
@@ -749,7 +750,7 @@ fn install_systemd_boot_from_target(
 /// Idempotent — skips if an entry by that label already exists. Best-effort: warns
 /// on failure instead of erroring, since the removable-media loader at \EFI\BOOT\BOOTX64.EFI
 /// keeps the system bootable as a last resort.
-fn register_systemd_boot_nvram(esp_path: &str) {
+pub(crate) fn register_systemd_boot_nvram(esp_path: &str) {
     if let Ok(out) = Command::new("efibootmgr").arg("-v").output() {
         let txt = String::from_utf8_lossy(&out.stdout);
         if txt.lines().any(|l| l.contains("Linux Boot Manager")) {
@@ -929,7 +930,12 @@ fn ensure_esp_mounted(report: &PreflightReport) -> Result<String> {
                 .status()
                 .context("failed to mount ESP")?;
             if status.success() {
-                println!("Auto-mounted ESP {} at {}", device, mount_point);
+                // stderr, not stdout: `bootc-rebase boot-entries --json` is a
+                // machine-readable interface, and a human line ahead of the
+                // JSON breaks every consumer that pipes it (found by the #189
+                // E2E assertion, which json.load()ed this and got
+                // "Expecting value: line 1 column 1").
+                eprintln!("Auto-mounted ESP {} at {}", device, mount_point);
                 return Ok(mount_point.to_string());
             }
         }
@@ -971,7 +977,12 @@ pub fn find_esp_or_mount() -> Result<String> {
             && !parts[2].is_empty()
         {
             let mp = parts[2].to_string();
-            println!("Found ESP already mounted at {}", mp);
+            // stderr for the same reason as the mount call sites below: this
+            // function is on the path of `boot-entries --json`, so anything it
+            // writes to stdout lands ahead of the JSON document and breaks
+            // every consumer. This third call site was missed when the other
+            // two were moved to stderr.
+            eprintln!("Found ESP already mounted at {}", mp);
             return Ok(mp);
         }
     }
@@ -1003,7 +1014,8 @@ pub fn find_esp_or_mount() -> Result<String> {
         .status()
         .with_context(|| format!("failed to mount ESP {} at {}", device, mount_point))?;
     if status.success() {
-        println!("Auto-mounted ESP {} at {}", device, mount_point);
+        // stderr for the same reason as the sibling call site above.
+        eprintln!("Auto-mounted ESP {} at {}", device, mount_point);
         return Ok(mount_point.to_string());
     }
     anyhow::bail!("Cannot find or mount ESP. Use --bootloader=grub2 to use GRUB2 instead.")
@@ -1011,6 +1023,20 @@ pub fn find_esp_or_mount() -> Result<String> {
 
 /// Parse the ESP device and partition from findmnt output.
 /// Returns (disk, partition_number). Returns None if parsing fails.
+/// The block device behind an ESP mountpoint from `findmnt -n -o SOURCE
+/// -T <path>` output. The command prints one line per filesystem at the
+/// path, and a composefs host mounts its ESP on top of an autofs trigger
+/// (`systemd-1`), so the answer is the last `/dev/` line, never the whole
+/// output (the ninth E2E run of #263 handed efibootmgr the disk
+/// `systemd-1\n/dev/vda` and it exited 5).
+pub(crate) fn esp_source_device(findmnt_stdout: &str) -> Option<String> {
+    findmnt_stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| l.starts_with("/dev/"))
+        .map(str::to_string)
+}
+
 pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> {
     let output = Command::new("/usr/bin/findmnt")
         .args(["-n", "-o", "SOURCE", "-T", esp_path])
@@ -1019,10 +1045,7 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
     if !output.status.success() {
         return None;
     }
-    let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if source.is_empty() {
-        return None;
-    }
+    let source = esp_source_device(&String::from_utf8_lossy(&output.stdout))?;
 
     // Handle /dev/nvme0n1p1, /dev/loop0p1 patterns
     if source.contains("nvme") || source.contains("loop") {
@@ -1060,100 +1083,6 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
 }
 
 // ---- Standalone migrate-bootloader (issue #65) ----
-
-/// A deployment found on the running system — either OSTree or composefs.
-#[derive(Debug)]
-pub struct BootDeployment {
-    pub root: PathBuf,
-    pub checksum: String,
-    pub kver: String,
-    pub vmlinuz: PathBuf,
-    pub initrd: PathBuf,
-    pub is_composefs: bool,
-}
-
-/// Enumerate all bootable deployments (OSTree + composefs) on the running system.
-fn enumerate_deployments() -> Result<Vec<BootDeployment>> {
-    let mut deps = Vec::new();
-
-    // OSTree deployments
-    let deploy_base = Path::new("/sysroot/ostree/deploy/default/deploy");
-    if deploy_base.exists() {
-        for entry in fs::read_dir(deploy_base)? {
-            let entry = entry?;
-            let name_str = entry.file_name().to_string_lossy().into_owned();
-            if !name_str.ends_with(".0") || !entry.path().is_dir() {
-                continue;
-            }
-            let checksum = name_str.trim_end_matches(".0").to_string();
-            let modules_dir = entry.path().join("usr/lib/modules");
-            let kver = match find_kver_in_modules(&modules_dir) {
-                Some(k) => k,
-                None => continue,
-            };
-            let vmlinuz = modules_dir.join(&kver).join("vmlinuz");
-            let initrd = modules_dir.join(&kver).join("initramfs.img");
-            if vmlinuz.exists() {
-                deps.push(BootDeployment {
-                    root: entry.path(),
-                    checksum,
-                    kver: kver.clone(),
-                    vmlinuz,
-                    initrd,
-                    is_composefs: false,
-                });
-            }
-        }
-    }
-
-    // Composefs / bootc state deployments
-    let cfs_deploy_base = Path::new("/sysroot/state/os/default");
-    if cfs_deploy_base.exists() {
-        // Look for deployments under the composefs state dir.
-        // Typical layout: /sysroot/state/os/default/<digest>/
-        for entry in fs::read_dir(cfs_deploy_base)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // Skip the state symlink and non-digest dirs.
-            if name == "state" || name.len() < 12 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            // Only include if it has an origin file (marks a real deployment).
-            let origin = path.join(format!("{name}.origin"));
-            if !origin.exists() {
-                continue;
-            }
-            let modules_dir = path.join("usr/lib/modules");
-            let kver = match find_kver_in_modules(&modules_dir) {
-                Some(k) => k,
-                None => continue,
-            };
-            let vmlinuz = modules_dir.join(&kver).join("vmlinuz");
-            deps.push(BootDeployment {
-                root: path,
-                checksum: name,
-                kver: kver.clone(),
-                vmlinuz,
-                initrd: modules_dir.join(&kver).join("initramfs.img"),
-                is_composefs: true,
-            });
-        }
-    }
-
-    Ok(deps)
-}
-
-fn find_kver_in_modules(modules_dir: &Path) -> Option<String> {
-    fs::read_dir(modules_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-}
 
 /// Standalone `migrate-bootloader` — convert GRUB→systemd-boot or systemd-boot→GRUB2
 /// without touching the rootfs backend (issue #65).
@@ -1546,6 +1475,20 @@ fn migrate_to_grub2(_sys: &SystemInfo, deps: &[BootDeployment], dry_run: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn esp_source_device_skips_autofs_triggers() {
+        assert_eq!(
+            esp_source_device("systemd-1\n/dev/vda2\n"),
+            Some("/dev/vda2".to_string())
+        );
+        assert_eq!(
+            esp_source_device("/dev/nvme0n1p1\n"),
+            Some("/dev/nvme0n1p1".to_string())
+        );
+        assert_eq!(esp_source_device("systemd-1\n"), None);
+        assert_eq!(esp_source_device(""), None);
+    }
     use tempfile::tempdir;
 
     #[test]
