@@ -386,7 +386,21 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    // Persistent log, same mechanism as bootc-migrate: all output is tee'd
+    // here so a lost terminal (or a reboot question afterwards) loses nothing.
+    // The guard drains on plain returns via Drop; the error path below drops
+    // it explicitly before exiting, since process::exit skips destructors.
+    let tee_guard = bootc_migrate_core::tee_log::install("/var/log/bootc-rebase.log", "re-base");
+    if let Err(e) = run() {
+        // anyhow's own main-termination rendering, kept verbatim.
+        eprintln!("Error: {e:?}");
+        drop(tee_guard);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
