@@ -608,28 +608,44 @@ pub fn render_image_swap_firstboot_unit(relabel: bool) -> String {
 
 /// Write the unit into the staged `/etc`, enable it, and arm its marker.
 pub fn install_firstboot_unit(etc_dir: &Path, unit: &str) -> Result<()> {
+    install_firstboot_unit_as(
+        etc_dir,
+        FIRSTBOOT_UNIT,
+        FIRSTBOOT_MARKER,
+        b"armed by bootc-migrate; removed by the first-boot unit\n",
+        unit,
+    )
+}
+
+/// [`install_firstboot_unit`] for a unit with its own name, marker, and
+/// marker body (the L1 verify probe records the source machine-id in its
+/// marker instead of a static arming note).
+pub fn install_firstboot_unit_as(
+    etc_dir: &Path,
+    unit_name: &str,
+    marker_rel: &str,
+    marker_body: &[u8],
+    unit: &str,
+) -> Result<()> {
     let unit_dir = etc_dir.join("systemd/system");
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("failed to create {}", unit_dir.display()))?;
-    fs::write(unit_dir.join(FIRSTBOOT_UNIT), unit)
-        .with_context(|| format!("failed to write {FIRSTBOOT_UNIT}"))?;
+    fs::write(unit_dir.join(unit_name), unit)
+        .with_context(|| format!("failed to write {unit_name}"))?;
     let wants_dir = unit_dir.join("sysinit.target.wants");
     fs::create_dir_all(&wants_dir)?;
-    let link = wants_dir.join(FIRSTBOOT_UNIT);
+    let link = wants_dir.join(unit_name);
     if fs::symlink_metadata(&link).is_ok() {
         fs::remove_file(&link)?;
     }
-    std::os::unix::fs::symlink(format!("../{FIRSTBOOT_UNIT}"), &link)
-        .with_context(|| format!("failed to enable {FIRSTBOOT_UNIT}"))?;
-    let marker = etc_dir.join(FIRSTBOOT_MARKER);
+    std::os::unix::fs::symlink(format!("../{unit_name}"), &link)
+        .with_context(|| format!("failed to enable {unit_name}"))?;
+    let marker = etc_dir.join(marker_rel);
     if let Some(parent) = marker.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(
-        &marker,
-        b"armed by bootc-migrate; removed by the first-boot unit\n",
-    )
-    .with_context(|| format!("failed to write {}", marker.display()))?;
+    fs::write(&marker, marker_body)
+        .with_context(|| format!("failed to write {}", marker.display()))?;
     Ok(())
 }
 

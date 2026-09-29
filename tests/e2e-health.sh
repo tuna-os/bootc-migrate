@@ -257,4 +257,21 @@ else
     echo "  no ownership fixture was seeded; identity checks skipped"
 fi
 
+# ---- 8. First-boot verify probe (L1) ------------------------------------------
+# Every migrated deployment stages a probe that checks itself on first boot:
+# home ownership, the target's declared users, a duplicated machine-id. Its
+# one-line summary says OK or FINDINGS <n>; the JSON report has the details.
+verify_res=/var/lib/bootc-migrate/verify-result
+if [ -f "$verify_res" ]; then
+    r=$(cat "$verify_res")
+    if [ "$r" = OK ]; then
+        ok "first-boot verify probe reported no findings"
+    else
+        bad "first-boot verify probe reported: $r"
+        head -30 /var/lib/bootc-migrate/verify-report.json 2>/dev/null | sed 's/^/    /'
+    fi
+else
+    echo "  no first-boot verify result; the probe did not run (this route stages none)"
+fi
+
 exit "$fail"

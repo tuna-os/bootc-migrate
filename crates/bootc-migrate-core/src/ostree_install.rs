@@ -534,6 +534,16 @@ impl OstreeInstallConfig<'_> {
             })?;
         }
 
+        // ---- First-boot verify probe (L1) ----
+        // Installed before the relabel step so the target policy labels the
+        // probe's own files along with the merged /etc.
+        crate::firstboot_verify::install_verify_probe(&deploy_root.join("etc"))
+            .context("failed to stage the first-boot verify probe")?;
+        println!(
+            "[firstboot] verify probe staged; it reports to {} on first boot",
+            crate::firstboot_verify::VERIFY_REPORT
+        );
+
         // ---- SELinux labels ----
         // The merge and the /var copy wrote files with the labels the host
         // had, and a composefs host may run without an SELinux policy at

@@ -134,6 +134,15 @@ pub fn phase4_stage_deploy(
         .context("cross-family post-merge steps failed")?;
     }
 
+    // First-boot verify probe (L1): every migrated deployment proves
+    // itself on first boot.
+    crate::firstboot_verify::install_verify_probe(&layout.etc_dir)
+        .context("failed to stage the first-boot verify probe")?;
+    println!(
+        "[firstboot] verify probe staged; it reports to {} on first boot",
+        crate::firstboot_verify::VERIFY_REPORT
+    );
+
     layout.install_runtime_composefs_mount();
 
     Ok(layout.deploy_dir)
