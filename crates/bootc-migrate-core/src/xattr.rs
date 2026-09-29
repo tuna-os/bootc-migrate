@@ -54,6 +54,10 @@ fn copy_file_with_xattrs_using(
         plain_file_copy(src, dst)?;
     }
 
+    // Ownership first: chown clears setuid/setgid bits and file
+    // capabilities, so it must precede the xattr and mode copies below.
+    preserve_owner(src, dst)?;
+
     // Copy extended attributes from src to dst
     copy_xattrs(src, dst)?;
 
@@ -64,7 +68,56 @@ fn copy_file_with_xattrs_using(
     unix_fs::PermissionsExt::set_mode(&mut perms, mode);
     fs::set_permissions(dst, perms)?;
 
+    // Times last: nothing after this point mutates mtime.
+    preserve_times(src, dst)?;
+
     Ok(())
+}
+
+/// Copy ownership from `src` to `dst` without following symlinks (either
+/// side gets its own identity, never its target's). A no-op the kernel
+/// accepts when the ids already match, so unprivileged copies of one's own
+/// files keep working; production runs as root.
+fn preserve_owner(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta =
+        fs::symlink_metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
+    rustix::fs::chownat(
+        rustix::fs::CWD,
+        dst,
+        Some(rustix::fs::Uid::from_raw(meta.uid())),
+        Some(rustix::fs::Gid::from_raw(meta.gid())),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .with_context(|| format!("failed to set ownership on {}", dst.display()))?;
+    Ok(())
+}
+
+/// Copy atime+mtime from `src` to `dst` without following symlinks.
+/// Directories must call this AFTER populating: adding entries bumps mtime.
+fn preserve_times(src: &Path, dst: &Path) -> Result<()> {
+    let meta =
+        fs::symlink_metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
+    let times = rustix::fs::Timestamps {
+        last_access: timespec(meta.accessed()?),
+        last_modification: timespec(meta.modified()?),
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        dst,
+        &times,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .with_context(|| format!("failed to set times on {}", dst.display()))?;
+    Ok(())
+}
+
+fn timespec(t: std::time::SystemTime) -> rustix::fs::Timespec {
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    rustix::fs::Timespec {
+        tv_sec: d.as_secs() as i64,
+        tv_nsec: d.subsec_nanos() as i64,
+    }
 }
 
 /// Copy all extended attributes from `src` to `dst` (follows symlinks).
@@ -218,6 +271,8 @@ impl CopyCtx<'_> {
 
 fn copy_dir_all_inner(src: &Path, dst: &Path, ctx: &mut CopyCtx) -> Result<()> {
     fs::create_dir_all(dst)?;
+    // Ownership before mode: chown clears setuid/setgid bits.
+    preserve_owner(src, dst)?;
     // Preserve directory mode (umask would otherwise mask it to 755, which
     // breaks sshd StrictModes on dirs like /root/.ssh that must be 700).
     let src_meta = fs::metadata(src)?;
@@ -241,6 +296,11 @@ fn copy_dir_all_inner(src: &Path, dst: &Path, ctx: &mut CopyCtx) -> Result<()> {
             }
             let link_target = fs::read_link(&path)?;
             std::os::unix::fs::symlink(link_target, &dest_path)?;
+            // Unlike the /etc merge (which matches bootc-switch behavior),
+            // a general tree copy preserves symlink ownership too: user
+            // trees round-trip through backup/diff tooling that notices.
+            preserve_owner(&path, &dest_path)?;
+            preserve_times(&path, &dest_path)?;
             ctx.copied_file(0);
         } else if ty.is_file() {
             if dest_path.exists() || dest_path.is_symlink() {
@@ -271,6 +331,9 @@ fn copy_dir_all_inner(src: &Path, dst: &Path, ctx: &mut CopyCtx) -> Result<()> {
             }
         }
     }
+    // Directory times go last: populating entries bumps mtime, so setting
+    // them any earlier would not survive the loop above.
+    preserve_times(src, dst)?;
     Ok(())
 }
 
@@ -432,6 +495,81 @@ mod tests {
         for n in [1000, 2000, 1_000_000] {
             assert_eq!(special_notice(n), Tally, "n={n}");
         }
+    }
+
+    #[test]
+    fn copy_file_preserves_owner_and_mtime() {
+        use std::os::unix::fs::MetadataExt;
+        use std::time::{Duration, UNIX_EPOCH};
+        let fixed = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        fs::write(&src, b"identity").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(fixed)
+            .unwrap();
+
+        copy_file_with_xattrs(&src, &dst).unwrap();
+
+        // Unprivileged runs only prove the own-uid path (a no-op chown the
+        // kernel accepts); cross-uid preservation runs as root in
+        // production and is asserted by the E2E ownership fixture.
+        let (sm, dm) = (fs::metadata(&src).unwrap(), fs::metadata(&dst).unwrap());
+        assert_eq!((dm.uid(), dm.gid()), (sm.uid(), sm.gid()));
+        assert_eq!(dm.modified().unwrap(), fixed);
+    }
+
+    #[test]
+    fn copy_tree_preserves_dir_mtime_after_populating() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let fixed = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(src_dir.join("sub")).unwrap();
+        fs::write(src_dir.join("sub").join("f.txt"), b"x").unwrap();
+        // Age the source dirs AFTER populating, like a real tree.
+        for d in [&src_dir, &src_dir.join("sub")] {
+            fs::File::open(d).unwrap().set_modified(fixed).unwrap();
+        }
+        let dst_dir = dir.path().join("dst");
+
+        copy_dir_all_with_xattrs(&src_dir, &dst_dir).unwrap();
+
+        // Directory times must be applied after the copy loop: setting them
+        // earlier would not survive adding entries.
+        assert_eq!(fs::metadata(&dst_dir).unwrap().modified().unwrap(), fixed);
+        assert_eq!(
+            fs::metadata(dst_dir.join("sub"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            fixed
+        );
+    }
+
+    #[test]
+    fn copy_tree_preserves_symlink_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        let dst_dir = dir.path().join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("target.txt"), b"t").unwrap();
+        std::os::unix::fs::symlink("target.txt", src_dir.join("link")).unwrap();
+
+        copy_dir_all_with_xattrs(&src_dir, &dst_dir).unwrap();
+
+        let (sm, dm) = (
+            fs::symlink_metadata(src_dir.join("link")).unwrap(),
+            fs::symlink_metadata(dst_dir.join("link")).unwrap(),
+        );
+        assert_eq!((dm.uid(), dm.gid()), (sm.uid(), sm.gid()));
     }
 
     #[test]

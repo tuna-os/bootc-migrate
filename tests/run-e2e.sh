@@ -166,6 +166,40 @@ capture_health_baseline() {
         2>&1 | sed 's/^/[health-baseline] /' || true
 }
 
+# seed_ownership_fixture: plant a small tree in /var whose owner, group, and
+# mtime the post-reboot health check re-verifies (e2e-health.sh section 7).
+# The migration carries /var to the new deployment file by file; a copy that
+# drops identity (live Dakota -> Utah landed every file root-owned with
+# fresh mtimes and broke the desktop, #308) fails loudly here. Numeric
+# 4242:4242 needs no account, so the fixture is independent of passwd
+# carrying; expect.tsv is generated from the planted tree, so the assertion
+# is "the migration changed nothing".
+seed_ownership_fixture() {
+    step "=== Seeding /var ownership fixture ==="
+    ssh $SSH_OPTS root@localhost bash <<'OWNFIX'
+set -e
+rm -rf /var/lib/e2e-ownership
+mkdir -p /var/lib/e2e-ownership/tree/subdir
+cd /var/lib/e2e-ownership/tree
+echo "owned-by-4242" > owned-by-4242.txt
+echo "root-file" > root-file.txt
+echo "nested" > subdir/nested.txt
+ln -s owned-by-4242.txt link-to-owned
+chown 4242:4242 owned-by-4242.txt subdir/nested.txt subdir
+chmod 640 owned-by-4242.txt
+chmod 750 subdir
+touch -h -d '@1600000000' owned-by-4242.txt root-file.txt subdir subdir/nested.txt link-to-owned
+{
+    for f in owned-by-4242.txt root-file.txt subdir subdir/nested.txt; do
+        if [ -d "$f" ]; then kind=d; else kind=f; fi
+        printf '%s\t%s\t%s\t%s\n' "$f" "$(stat -c '%u:%g' "$f")" "$(stat -c '%Y' "$f")" "$kind"
+    done
+    printf '%s\t%s\t%s\t%s\t%s\n' link-to-owned "" "" l "$(readlink link-to-owned)"
+} > /var/lib/e2e-ownership/expect.tsv
+cat /var/lib/e2e-ownership/expect.tsv
+OWNFIX
+}
+
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
 # (Ns elapsed)" line every $2 seconds so CI doesn't think the job is hung.
 heartbeat() {
@@ -1676,6 +1710,7 @@ REVFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> ostree via OstreeInstall (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
 
+    seed_ownership_fixture
     capture_health_baseline
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
@@ -1905,6 +1940,7 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    seed_ownership_fixture
     capture_health_baseline
     step "=== image-swap: running bootc-rebase --target-backend composefs ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
@@ -2218,6 +2254,7 @@ echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' 
 CROSSFIX
 fi
 
+seed_ownership_fixture
 capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
