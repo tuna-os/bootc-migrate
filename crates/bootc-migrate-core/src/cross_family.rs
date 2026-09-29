@@ -114,7 +114,7 @@ impl CrossFamilyVerdict {
     }
 }
 
-fn describe(base: &BaseInfo) -> String {
+pub(crate) fn describe(base: &BaseInfo) -> String {
     let like = match &base.id_like {
         Some(like) if !like.trim().is_empty() => format!("ID_LIKE=\"{like}\""),
         _ => "no ID_LIKE".to_string(),
@@ -151,29 +151,40 @@ fn cross_family_refusal(plan: &CrossFamilyPlan) -> String {
 
 /// Establish the lineage relation between this host and `target_image`.
 pub fn build_verdict(target_image: &str) -> Result<CrossFamilyVerdict> {
-    let Some(host) = scan::read_host_base_info() else {
-        return Ok(CrossFamilyVerdict::Unknown(
+    let host = scan::read_host_base_info();
+    let caps = scan_target_capabilities_with_retries(target_image, "cross-family identity");
+    Ok(verdict_for_caps(host, caps.as_ref()))
+}
+
+/// The pure half of [`build_verdict`]: a verdict from already-read
+/// identities, for callers that scanned the target themselves so the
+/// registry is hit once, not twice.
+fn verdict_for_caps(
+    host: Option<BaseInfo>,
+    caps: Option<&scan::Capabilities>,
+) -> CrossFamilyVerdict {
+    let Some(host) = host else {
+        return CrossFamilyVerdict::Unknown(
             "this host's own /etc/os-release and /usr/lib/os-release are both unreadable",
-        ));
+        );
     };
-    let Some(caps) = scan_target_capabilities_with_retries(target_image, "cross-family identity")
-    else {
-        return Ok(CrossFamilyVerdict::Unknown(
+    let Some(caps) = caps else {
+        return CrossFamilyVerdict::Unknown(
             "the target image could not be scanned (see the registry warning above)",
-        ));
+        );
     };
-    let Some(target) = caps.base else {
-        return Ok(CrossFamilyVerdict::Unknown(
+    let Some(target) = caps.base.clone() else {
+        return CrossFamilyVerdict::Unknown(
             "the target image carries no readable os-release identity",
-        ));
+        );
     };
-    Ok(match scan::lineage(&host, &target) {
+    match scan::lineage(&host, &target) {
         Lineage::CrossFamily => {
             CrossFamilyVerdict::CrossFamily(Box::new(CrossFamilyPlan { host, target }))
         }
         Lineage::Unknown => CrossFamilyVerdict::Unknown(UNKNOWN_LINEAGE_REASON),
         same => CrossFamilyVerdict::SameFamily(same),
-    })
+    }
 }
 
 /// The [`CrossFamilyVerdict::Unknown`] reason for [`Lineage::Unknown`]:
@@ -197,7 +208,36 @@ const UNKNOWN_LINEAGE_REASON: &str = "the two os-release identities share no ID_
 /// same-family migration, which is the route's protected regression gate.
 pub fn gate(target_image: &str, accepted: bool) -> Result<()> {
     let verdict = build_verdict(target_image)?;
-    if let CrossFamilyVerdict::CrossFamily(_) = &verdict
+    enforce_and_print(&verdict, accepted, CONVERSION_DECIDE_NOTE)
+}
+
+/// The gate for callers that already scanned the target: same verdicts and
+/// refusals as [`gate`], but no second registry scan, and the Unknown
+/// warning names where *this* route re-decides instead of Phase 4.
+pub fn gate_with_caps(
+    accepted: bool,
+    caps: Option<&scan::Capabilities>,
+    decide_note: &str,
+) -> Result<()> {
+    let host = scan::read_host_base_info();
+    let verdict = verdict_for_caps(host, caps);
+    enforce_and_print(&verdict, accepted, decide_note)
+}
+
+/// The conversion route's second look, named in its Unknown warning. Kept
+/// verbatim: the migrator's printed output is frozen.
+const CONVERSION_DECIDE_NOTE: &str = "Phase 4 decides from the pulled image's own \
+     os-release; a cross-family target is refused there unless --accept-cross-base was given.";
+
+/// Refuse an unaccepted cross-family verdict, otherwise print what the
+/// verdict means. Every printed byte matches [`gate`]'s historical output
+/// for the same verdict; only the Unknown note varies by route.
+fn enforce_and_print(
+    verdict: &CrossFamilyVerdict,
+    accepted: bool,
+    decide_note: &str,
+) -> Result<()> {
+    if let CrossFamilyVerdict::CrossFamily(_) = verdict
         && let Some(message) = verdict.refusal(accepted)
     {
         bail!(message);
@@ -215,11 +255,9 @@ pub fn gate(target_image: &str, accepted: bool) -> Result<()> {
             };
             println!("Base lineage: host and target are {what}; the standard /etc merge applies.");
         }
-        CrossFamilyVerdict::Unknown(reason) => eprintln!(
-            "Warning: base lineage unknown before the pull — {reason}. Phase 4 decides \
-             from the pulled image's own os-release; a cross-family target is refused \
-             there unless --accept-cross-base was given."
-        ),
+        CrossFamilyVerdict::Unknown(reason) => {
+            eprintln!("Warning: base lineage unknown before the pull — {reason}. {decide_note}")
+        }
     }
     Ok(())
 }
@@ -1388,5 +1426,113 @@ mod tests {
             (remap_plan.remaps[0].old_id, remap_plan.remaps[0].new_id),
             (10, 997)
         );
+    }
+
+    fn caps_with_base(base: Option<BaseInfo>) -> scan::Capabilities {
+        scan::Capabilities {
+            composefs_capable: false,
+            ostree_capable: true,
+            systemd_boot_payload: false,
+            bootc_present: true,
+            bootupd_present: true,
+            desktops: vec![],
+            base,
+            sysusers: vec![],
+            fs_verity_required: false,
+            root_transient: false,
+            etc_transient: false,
+            initramfs_has_composefs_module: false,
+            filesystem_expectation: None,
+        }
+    }
+
+    fn base_with_pm(id: &str, like: Option<&str>, pm: Option<PkgFamily>) -> BaseInfo {
+        BaseInfo {
+            id: id.into(),
+            id_like: like.map(Into::into),
+            version_id: None,
+            pkg_family: pm,
+        }
+    }
+
+    /// `verdict_for_caps`: missing inputs warn with the reason that names
+    /// what is missing; present inputs follow `lineage` exactly.
+    #[test]
+    fn verdict_for_caps_maps_inputs_to_verdicts() {
+        let dakota = base("bluefin-dakota", Some("org.gnome.os"));
+
+        // No host identity: names the unreadable os-release files.
+        let v = verdict_for_caps(None, Some(&caps_with_base(Some(dakota.clone()))));
+        assert!(
+            matches!(v, CrossFamilyVerdict::Unknown(r) if r.contains("both unreadable")),
+            "{v:?}"
+        );
+
+        // Target never scanned: points at the registry warning above.
+        let v = verdict_for_caps(Some(dakota.clone()), None);
+        assert!(
+            matches!(v, CrossFamilyVerdict::Unknown(r) if r.contains("could not be scanned")),
+            "{v:?}"
+        );
+
+        // Scanned but no identity: says so.
+        let v = verdict_for_caps(Some(dakota.clone()), Some(&caps_with_base(None)));
+        assert!(
+            matches!(v, CrossFamilyVerdict::Unknown(r) if r.contains("no readable os-release identity")),
+            "{v:?}"
+        );
+
+        // Same ID: the same base.
+        let v = verdict_for_caps(
+            Some(dakota.clone()),
+            Some(&caps_with_base(Some(dakota.clone()))),
+        );
+        assert!(
+            matches!(v, CrossFamilyVerdict::SameFamily(Lineage::SameBase)),
+            "{v:?}"
+        );
+
+        // Disjoint IDs, same package manager: the same family.
+        let v = verdict_for_caps(
+            Some(base_with_pm("a", None, Some(PkgFamily::Dnf))),
+            Some(&caps_with_base(Some(base_with_pm(
+                "b",
+                None,
+                Some(PkgFamily::Dnf),
+            )))),
+        );
+        assert!(
+            matches!(v, CrossFamilyVerdict::SameFamily(Lineage::SameFamily)),
+            "{v:?}"
+        );
+
+        // Disjoint IDs, different managers: positively cross-family.
+        let v = verdict_for_caps(
+            Some(base_with_pm("a", None, Some(PkgFamily::Dnf))),
+            Some(&caps_with_base(Some(base_with_pm(
+                "b",
+                None,
+                Some(PkgFamily::Zypp),
+            )))),
+        );
+        assert!(matches!(v, CrossFamilyVerdict::CrossFamily(_)), "{v:?}");
+
+        // Disjoint IDs, no manager evidence: unknown, not a refusal.
+        let v = verdict_for_caps(
+            Some(dakota.clone()),
+            Some(&caps_with_base(Some(base("utah", None)))),
+        );
+        assert!(
+            matches!(v, CrossFamilyVerdict::Unknown(r) if r.contains("neither confirmed nor ruled out")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn conversion_decide_note_stays_verbatim() {
+        // The migrator's printed output is frozen: gate()'s Unknown warning
+        // must keep naming Phase 4. Route-specific notes live beside their
+        // routes (e.g. OSTREE_INSTALL_DECIDE_NOTE), never here.
+        assert!(CONVERSION_DECIDE_NOTE.contains("Phase 4 decides"));
     }
 }
