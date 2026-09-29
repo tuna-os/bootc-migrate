@@ -69,6 +69,43 @@ pub const OSTREE_STATEROOT_VAR: &str = "/sysroot/ostree/deploy/default/var";
 pub const STATE_DIR: &str = "/var/lib/bootc-rebase";
 /// The report's file name under [`STATE_DIR`].
 pub const REPORT_FILE: &str = "ostree-install-report.json";
+/// Numbered steps in [`OstreeInstallConfig::run`]: scan, pull, ESP
+/// snapshot, deploy, /etc merge, /var carry, SELinux relabel, bootloader.
+const TOTAL_STEPS: u8 = 8;
+/// Where this route re-decides an unknown lineage: the /etc merge reads the
+/// installed deployment's own os-release ([`merge_etc_into`] refuses a
+/// cross-family target there unless accepted). Named in the Unknown warning
+/// so the gate text stays true per route.
+const OSTREE_INSTALL_DECIDE_NOTE: &str = "The /etc merge below decides from the installed \
+     deployment's own os-release; a cross-family target is refused there unless \
+     --accept-cross-base was given.";
+
+/// A numbered step header: `=== Step 2/8 · Pull ===`.
+fn step(n: u8, total: u8, title: &str) -> String {
+    format!("=== Step {n}/{total} · {title} ===")
+}
+
+/// Capability summary value: `yes`/`no`.
+fn yes_no(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}
+
+/// Refusal when an OSTree deployment is already on disk. Names both ways
+/// out: the never-committed forward migration (rollback returns to it) and
+/// the leftover of a failed attempt (undeploy or delete, then re-run) —
+/// a failed `bootc install` leaves an unregistered directory that `undeploy`
+/// cannot see, so both removals are spelled out.
+fn existing_deploy_refusal(existing: &[String]) -> String {
+    format!(
+        "an OSTree deployment already exists under {OSTREE_DEPLOY_DIR} ({}). If this \
+         host was migrated by bootc-migrate and never committed, `bootc-migrate \
+         rollback` returns to it without reinstalling; if it is a leftover from a \
+         failed attempt, remove it (`ostree admin --sysroot=/sysroot undeploy \
+         <index>`, or delete the directory when `status` does not list it) and \
+         re-run. Pass --force to install a fresh deployment alongside it anyway.",
+        existing.join(", ")
+    )
+}
 
 /// Everything the composefs → ostree strategy needs, translated from CLI
 /// flags exactly once by the caller.
@@ -265,24 +302,49 @@ impl OstreeInstallConfig<'_> {
         if Path::new(OSTREE_DEPLOY_DIR).is_dir() && !self.force {
             let existing = list_deployments()?;
             if !existing.is_empty() {
-                bail!(
-                    "an OSTree deployment already exists under {OSTREE_DEPLOY_DIR} ({}). If this \
-                     host was migrated by bootc-migrate and never committed, `bootc-migrate \
-                     rollback` returns to it without reinstalling; pass --force to install a \
-                     fresh deployment alongside it anyway.",
-                    existing.join(", ")
-                );
+                bail!("{}", existing_deploy_refusal(&existing));
             }
+        }
+
+        // One registry scan serves the lineage gate and the capability
+        // checks below — previously each scanned the target again, which
+        // doubled the longest silent stretch of this route.
+        println!("{}", step(1, TOTAL_STEPS, "Scan target image"));
+        println!(
+            "[scan] streaming probe files for {} from the registry; \
+             the first run downloads layers and can take minutes.",
+            self.target_image
+        );
+        let caps = crate::cross_base::scan_target_capabilities_with_retries(
+            self.target_image,
+            "cross-family identity + capability check",
+        );
+        if let Some(caps) = &caps {
+            let base = caps
+                .base
+                .as_ref()
+                .map(cross_family::describe)
+                .unwrap_or_else(|| "no readable os-release identity".to_string());
+            println!(
+                "[scan] bootc: {}, bootupd: {}, ostree-capable: {}; base: {base}",
+                yes_no(caps.bootc_present),
+                yes_no(caps.bootupd_present),
+                yes_no(caps.ostree_capable),
+            );
         }
 
         // #256/#258: lineage gate. No /etc policy can be applied to what
         // `bootc install` writes — the merge below is ours, so the policy
         // applies there exactly as in Phase 4.
-        cross_family::gate(self.target_image, self.accept_cross_base)?;
+        cross_family::gate_with_caps(
+            self.accept_cross_base,
+            caps.as_ref(),
+            OSTREE_INSTALL_DECIDE_NOTE,
+        )?;
 
         if !self.skip_preflight {
-            match scan::scan_target_image(self.target_image) {
-                Ok(caps) => {
+            match &caps {
+                Some(caps) => {
                     if !caps.bootc_present && !self.force {
                         bail!(
                             "target image {} ships no bootc; `bootc install to-existing-root` \
@@ -314,8 +376,8 @@ impl OstreeInstallConfig<'_> {
                         );
                     }
                 }
-                Err(e) => eprintln!(
-                    "Warning: could not scan target image {} ({e:#}); proceeding without the \
+                None => eprintln!(
+                    "Warning: could not scan target image {}; proceeding without the \
                      capability check.",
                     self.target_image
                 ),
@@ -346,14 +408,18 @@ impl OstreeInstallConfig<'_> {
             crate::migration::SleepGuard::new("bootc composefs -> ostree re-base in progress");
 
         // ---- Pull ----
-        println!("=== Pull: {} ===", self.target_image);
+        println!(
+            "{}",
+            step(2, TOTAL_STEPS, &format!("Pull: {}", self.target_image))
+        );
+        println!("[pull] streaming `podman pull` progress below…");
         run_checked(
             Command::new("podman").args(["pull", "--policy", "always", self.target_image]),
             "podman pull",
         )?;
 
         // ---- ESP snapshot ----
-        println!("=== ESP snapshot: {esp} ===");
+        println!("{}", step(3, TOTAL_STEPS, &format!("ESP snapshot: {esp}")));
         fs::create_dir_all(STATE_DIR)?;
         let snapshot_dir = Path::new(STATE_DIR).join(format!(
             "esp-snapshot-{}",
@@ -378,11 +444,26 @@ impl OstreeInstallConfig<'_> {
             );
         }
 
+        // A previous failed attempt may have removed the stateroot /var while
+        // the repo layout survives; `bootc install` reuses extant layouts
+        // verbatim and fails opening it. The install expects it empty — the
+        // /var copy below fills it — so (re)create it, never wipe it.
+        fs::create_dir_all(OSTREE_STATEROOT_VAR)
+            .with_context(|| format!("creating the stateroot /var at {OSTREE_STATEROOT_VAR}"))?;
+
         // ---- Deploy: the target's bootc, alongside ----
         println!(
-            "=== Deploy: bootc install to-existing-root ({}) ===",
-            self.target_image
+            "{}",
+            step(
+                4,
+                TOTAL_STEPS,
+                &format!(
+                    "Deploy: bootc install to-existing-root ({})",
+                    self.target_image
+                )
+            )
         );
+        println!("[deploy] streaming `bootc install` output below (OSTree import takes minutes)…");
         let _ = Command::new("mount")
             .args(["-o", "remount,rw", PHYSICAL_ROOT])
             .status();
@@ -410,7 +491,10 @@ impl OstreeInstallConfig<'_> {
         println!("[deploy] new deployment: {}", deploy_root.display());
 
         // ---- /etc ----
-        println!("=== /etc: 3-way merge into the new deployment ===");
+        println!(
+            "{}",
+            step(5, TOTAL_STEPS, "/etc: 3-way merge into the new deployment")
+        );
         let (etc_merge, cross) = merge_etc_into(
             &deploy_root,
             booted_image.as_deref(),
@@ -419,7 +503,14 @@ impl OstreeInstallConfig<'_> {
         println!("[etc] {etc_merge}");
 
         // ---- /var ----
-        println!("=== /var: carrying the live tree into the stateroot ===");
+        println!(
+            "{}",
+            step(
+                6,
+                TOTAL_STEPS,
+                "/var: carrying the live tree into the stateroot"
+            )
+        );
         let var_copied = copy_var_into_stateroot()?;
         if var_copied {
             seed_var_from_target(self.target_image);
@@ -451,7 +542,14 @@ impl OstreeInstallConfig<'_> {
         // lookup were denied. bootc labelled what it wrote with the
         // target's policy; the same policy, run from the target image,
         // labels what we wrote.
-        println!("=== SELinux: labelling the merged /etc and the carried /var ===");
+        println!(
+            "{}",
+            step(
+                7,
+                TOTAL_STEPS,
+                "SELinux: labelling the merged /etc and the carried /var"
+            )
+        );
         match relabel_with_target_policy(self.target_image, &deploy_root, var_copied) {
             Ok(Some(n)) => println!("[selinux] labelled {n} tree(s) with the target's policy"),
             Ok(None) => println!("[selinux] target does not enable SELinux; nothing to label"),
@@ -463,7 +561,14 @@ impl OstreeInstallConfig<'_> {
         }
 
         // ---- ESP restore + NVRAM ----
-        println!("=== Bootloader: restoring the composefs rollback entry ===");
+        println!(
+            "{}",
+            step(
+                8,
+                TOTAL_STEPS,
+                "Bootloader: restoring the composefs rollback entry"
+            )
+        );
         let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
         println!("[esp] {} composefs artifact(s) restored", restored.len());
         // A composefs host installed to disk boots systemd-boot through the
@@ -1108,9 +1213,35 @@ fn copy_var_into_stateroot() -> Result<bool> {
     }
     let dst = Path::new(OSTREE_STATEROOT_VAR);
     fs::create_dir_all(dst)?;
-    xattr::copy_dir_all_with_xattrs("/var", dst)
+    // A live /var is gigabytes; heartbeat every few seconds so the copy
+    // reads as progress, podman-pull style, instead of a hang.
+    let started = std::time::Instant::now();
+    let mut last_tick = started;
+    let mut tick = |counts: xattr::CopyCounts| {
+        if last_tick.elapsed() >= std::time::Duration::from_secs(5) {
+            last_tick = std::time::Instant::now();
+            println!(
+                "[var] …{} files ({} MB) in {}s, still copying…",
+                counts.files,
+                counts.bytes / (1024 * 1024),
+                started.elapsed().as_secs(),
+            );
+        }
+    };
+    let counts = xattr::copy_dir_all_with_xattrs_progress("/var", dst, &mut tick)
         .context("copying /var into the OSTree stateroot")?;
-    println!("[var] live /var copied to {}", dst.display());
+    let skipped = if counts.specials_skipped > 0 {
+        format!(", {} special files skipped", counts.specials_skipped)
+    } else {
+        String::new()
+    };
+    println!(
+        "[var] live /var copied to {} ({} files, {} MB, {}s{skipped})",
+        dst.display(),
+        counts.files,
+        counts.bytes / (1024 * 1024),
+        started.elapsed().as_secs(),
+    );
     Ok(true)
 }
 
@@ -1448,5 +1579,46 @@ mod tests {
         assert_eq!(r("EFI/BOOT/BOOTX64.EFI"), "shim-fallback");
         assert_eq!(r("loader/loader.conf"), "written-by-something-else");
         assert_eq!(r("EFI/fedora/shimx64.efi"), "shim");
+    }
+
+    #[test]
+    fn step_header_numbers_the_run() {
+        assert_eq!(
+            step(1, 8, "Scan target image"),
+            "=== Step 1/8 · Scan target image ==="
+        );
+        assert_eq!(
+            step(2, 8, "Pull: ghcr.io/x/y:z"),
+            "=== Step 2/8 · Pull: ghcr.io/x/y:z ==="
+        );
+        assert_eq!(
+            step(8, 8, "Bootloader: restoring the composefs rollback entry"),
+            "=== Step 8/8 · Bootloader: restoring the composefs rollback entry ==="
+        );
+    }
+
+    #[test]
+    fn yes_no_renders_capabilities() {
+        assert_eq!(yes_no(true), "yes");
+        assert_eq!(yes_no(false), "no");
+    }
+
+    #[test]
+    fn existing_deploy_refusal_names_both_ways_out() {
+        let msg = existing_deploy_refusal(&["abc123.0".to_string()]);
+        assert!(msg.contains("abc123.0"), "{msg}");
+        // Never-committed forward migration: rollback returns to it.
+        assert!(msg.contains("bootc-migrate rollback"), "{msg}");
+        // Failed-attempt leftover: undeploy, or delete when unregistered.
+        assert!(msg.contains("undeploy"), "{msg}");
+        assert!(msg.contains("delete the directory"), "{msg}");
+    }
+
+    #[test]
+    fn ostree_decide_note_names_the_etc_merge_not_phase_4() {
+        // This route has no Phase 4; the Unknown warning must point at the
+        // /etc merge that actually re-decides the lineage.
+        assert!(OSTREE_INSTALL_DECIDE_NOTE.contains("installed deployment"));
+        assert!(!OSTREE_INSTALL_DECIDE_NOTE.contains("Phase 4"));
     }
 }
