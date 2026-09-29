@@ -148,6 +148,21 @@ assert_system_healthy() {
     fi
 }
 
+# assert_l2_present <label> <binary> <route>: post-reboot L2 assertions —
+# `status` runs and names the route, and the desktop cleanup prompt was
+# staged into what is now the live /etc.
+assert_l2_present() {
+    step "=== $1: L2 status + cleanup prompt ==="
+    STATUS_OUT=$(ssh $SSH_OPTS root@localhost "$2 status" 2>&1) || {
+        echo "FAIL: $2 status exited nonzero"; echo "$STATUS_OUT" | sed 's/^/  /'; exit 1; }
+    echo "$STATUS_OUT" | sed 's/^/  /'
+    echo "$STATUS_OUT" | grep -qF "$3" || { echo "FAIL: status does not name route '$3'"; exit 1; }
+    echo "$STATUS_OUT" | grep -q "First-boot verify:" || { echo "FAIL: status has no verify line"; exit 1; }
+    ssh $SSH_OPTS root@localhost "test -f /etc/xdg/autostart/bootc-migrate-cleanup.desktop" || {
+        echo "FAIL: the desktop cleanup prompt was not staged"; exit 1; }
+    echo "OK: status names the route and the cleanup prompt is staged."
+}
+
 # capture_health_baseline: just before a migration, record which paths under
 # /etc and /var/home the base itself already has mislabeled, so the
 # post-reboot health check fails only on mislabels the migration introduced
@@ -1865,6 +1880,8 @@ ESPCHECK
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
+    assert_l2_present "composefs-to-ostree" "/var/tmp/bootc-rebase" "composefs -> ostree via OstreeInstall"
+
     # What backs /var on the OSTree deployment. On a clean fedora-bootc
     # install chronyd and gssproxy start; after this route both fail on
     # missing /var/lib state even though the target's tmpfiles.d creates it
@@ -2111,6 +2128,8 @@ SWAPSSH
     [ "$FIRSTBOOT_LEFT" = "done" ] || { echo "FAIL: the image-swap first-boot unit did not run"; exit 1; }
     ssh $SSH_OPTS root@localhost "getent passwd dbus; ls -Z /etc/passwd /etc/ld.so.cache 2>/dev/null" || true
     echo "OK: image-swap first-boot unit ran."
+
+    assert_l2_present "image-swap" "/var/tmp/bootc-rebase" "composefs -> composefs via ImageSwap"
 
     # The base deployment must remain as rollback: bootc reports it, or at
     # least its deployment directory is still on disk.
@@ -2581,6 +2600,7 @@ fi
 echo "OK: Booted backend is ComposeFS."
 
 assert_system_healthy "post-migration"
+assert_l2_present "post-migration" "/var/tmp/bootc-migrate" "ostree -> composefs via CoreMigration"
 
 # #256: the whole point — the migrated system is the target's family.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then

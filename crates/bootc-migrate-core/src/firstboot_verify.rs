@@ -169,6 +169,129 @@ pub fn install_verify_probe(etc_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---- Desktop cleanup prompt (L2) -------------------------------------------
+// Autostarted once per desktop user after a migration. Offers `commit`
+// when one is pending, surfaces first-boot verify findings otherwise.
+// Silent unless there is something to say; stamps after showing so it
+// never nags twice.
+
+/// The autostart entry (relative to `/etc`).
+pub const PROMPT_DESKTOP_REL: &str = "xdg/autostart/bootc-migrate-cleanup.desktop";
+/// The prompt script (relative to `/etc`).
+pub const PROMPT_SCRIPT_REL: &str = "bootc-migrate/cleanup-prompt.sh";
+
+/// The autostart entry. `NoDisplay`: it is a one-shot prompt, not an app.
+pub const PROMPT_DESKTOP: &str = "[Desktop Entry]\n\
+     Type=Application\n\
+     Name=Complete system migration\n\
+     Comment=Offer to commit a finished bootc migration, or surface its first-boot findings\n\
+     Exec=/bin/sh /etc/bootc-migrate/cleanup-prompt.sh\n\
+     NoDisplay=true\n\
+     X-GNOME-Autostart-enabled=true\n";
+
+/// The prompt script. `BOOTC_MIGRATE_STATE_DIR` overrides the state dir so
+/// tests run it against fixtures; production leaves it unset.
+pub const PROMPT_SCRIPT: &str = r#"#!/bin/sh
+# bootc-migrate desktop cleanup prompt (L2). Autostarted once per desktop
+# user after a migration. Silent unless there is something to say; stamps
+# after showing (even on "Later") so it never nags twice.
+set -u
+STATE_DIR=${BOOTC_MIGRATE_STATE_DIR:-/var/lib/bootc-migrate}
+STAMP_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/bootc-migrate
+STAMP=$STAMP_DIR/cleanup-prompted
+[ -f "$STAMP" ] && exit 0
+
+result=$(cat "$STATE_DIR/verify-result" 2>/dev/null || echo MISSING)
+commit_pending=0
+# Same three conditions as `status`: our own report, booted the staged
+# composefs deployment, legacy content still on disk.
+if [ -f "$STATE_DIR/report.json" ] && grep -q 'composefs=' /proc/cmdline 2>/dev/null; then
+    # Any non-dot entry besides the target's own bootc/ storage.
+    for e in /sysroot/ostree/*; do
+        [ -e "$e" ] || continue
+        case "$e" in */bootc) continue ;; esac
+        commit_pending=1; break
+    done
+fi
+if [ "$commit_pending" = 0 ] && { [ "$result" = OK ] || [ "$result" = MISSING ]; }; then
+    exit 0
+fi
+
+# Headless, or no dialog tool: say it once for the journal and leave the
+# stamp alone — the next graphical login still gets the prompt.
+if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    echo "bootc-migrate: migration follow-up pending (verify: $result, commit: $commit_pending); run 'bootc-migrate status'." >&2
+    exit 0
+fi
+DIALOG=""
+if command -v zenity >/dev/null 2>&1; then DIALOG=zenity
+elif command -v kdialog >/dev/null 2>&1; then DIALOG=kdialog
+fi
+[ -n "$DIALOG" ] || {
+    echo "bootc-migrate: migration follow-up pending but no dialog tool found; run 'bootc-migrate status'." >&2
+    exit 0
+}
+
+BIN=""
+for c in bootc-migrate /usr/local/bin/bootc-migrate /var/tmp/bootc-migrate; do
+    if command -v "$c" >/dev/null 2>&1; then BIN=$c; break; fi
+done
+
+stamp() { mkdir -p "$STAMP_DIR"; touch "$STAMP"; }
+
+if [ "$commit_pending" = 1 ] && [ -n "$BIN" ]; then
+    TEXT="The migration finished and the old system is still on disk as a fallback. Commit the new system as permanent? This deletes the old deployment; it cannot be undone."
+    if [ "$DIALOG" = zenity ]; then
+        zenity --question --title="Complete system migration" --width=450 \
+            --text="$TEXT" --ok-label="Commit" --cancel-label="Later"
+        ans=$?
+    else
+        kdialog --title "Complete system migration" --yesno "$TEXT" --yes-label "Commit" --no-label "Later"
+        ans=$?
+    fi
+    [ "$ans" = 0 ] && pkexec "$BIN" commit
+    stamp
+    exit 0
+fi
+
+# Findings, or a pending commit with no binary to run it: inform, with the
+# manual command for the commit case.
+if [ "$commit_pending" = 1 ]; then
+    TEXT="A migration commit is pending (the old system is still on disk), but bootc-migrate was not found to run it. Run 'bootc-migrate commit' as root when ready."
+else
+    TEXT="The post-migration check reported: $result. See /var/lib/bootc-migrate/verify-report.json, or run 'bootc-migrate status'."
+fi
+if [ "$DIALOG" = zenity ]; then
+    zenity --info --title="Migration follow-up" --width=450 --text="$TEXT"
+else
+    kdialog --title "Migration follow-up" --msgbox "$TEXT"
+fi
+stamp
+exit 0
+"#;
+
+/// Stage the prompt into `etc_dir`: the script (mode 755) and the autostart
+/// entry. Runs at every staging route alongside the L1 probe.
+pub fn install_cleanup_prompt(etc_dir: &Path) -> Result<()> {
+    let script_path = etc_dir.join(PROMPT_SCRIPT_REL);
+    if let Some(parent) = script_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&script_path, PROMPT_SCRIPT)
+        .with_context(|| format!("failed to write {}", script_path.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+    let desktop_path = etc_dir.join(PROMPT_DESKTOP_REL);
+    if let Some(parent) = desktop_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&desktop_path, PROMPT_DESKTOP)
+        .with_context(|| format!("failed to write {}", desktop_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +365,42 @@ mod tests {
             assert!(VERIFY_SCRIPT.contains(needle), "script lost {needle}");
         }
         assert!(VERIFY_SCRIPT.starts_with("#!/bin/sh\n"));
+    }
+
+    #[test]
+    fn prompt_installs_script_and_autostart_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let etc = dir.path().join("etc");
+
+        install_cleanup_prompt(&etc).unwrap();
+
+        let script = etc.join(PROMPT_SCRIPT_REL);
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), PROMPT_SCRIPT);
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let desktop = std::fs::read_to_string(etc.join(PROMPT_DESKTOP_REL)).unwrap();
+        assert_eq!(desktop, PROMPT_DESKTOP);
+        assert!(desktop.contains("Exec=/bin/sh /etc/bootc-migrate/cleanup-prompt.sh"));
+        assert!(desktop.contains("NoDisplay=true"));
+    }
+
+    #[test]
+    fn prompt_script_shape() {
+        // Static contract: silent unless something is pending, never nags
+        // twice, degrades without a display or dialog tool.
+        for needle in [
+            "cleanup-prompted",
+            "BOOTC_MIGRATE_STATE_DIR",
+            "WAYLAND_DISPLAY",
+            "zenity",
+            "kdialog",
+            "pkexec",
+        ] {
+            assert!(PROMPT_SCRIPT.contains(needle), "script lost {needle}");
+        }
+        assert!(PROMPT_SCRIPT.starts_with("#!/bin/sh\n"));
     }
 }

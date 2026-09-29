@@ -56,6 +56,10 @@ enum Commands {
     /// PRETTY_NAME renames, `--apply` writes the result to NVRAM after
     /// taking a restorable snapshot, and `--undo` restores from it.
     BootEntries(BootEntriesArgs),
+    /// Show what migration happened here and what is left to do: the
+    /// staged route and target, the first-boot verify verdict, and whether
+    /// `commit` is available.
+    Status,
     /// Stash or restore a user's DE config around a cross-DE re-base (issue
     /// #68), for one explicitly-named DE and one explicitly-named home. The
     /// `rebase` flow does this automatically for every human account when
@@ -415,6 +419,13 @@ fn run() -> Result<()> {
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::BootEntries(ref args)) => boot_entries::run_boot_entries(args),
         Some(Commands::DeMigrate(ref args)) => de_migrate_command::run(args),
+        Some(Commands::Status) => {
+            print!(
+                "{}",
+                bootc_migrate_core::status::render(&bootc_migrate_core::status::gather())
+            );
+            Ok(())
+        }
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");

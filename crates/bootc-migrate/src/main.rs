@@ -140,6 +140,11 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show what migration happened here and what is left to do: the
+    /// staged route and target, the first-boot verify verdict, and whether
+    /// `commit` is available.
+    #[command(name = "status")]
+    Status,
     /// Convert the bootloader between GRUB2 and systemd-boot without
     /// touching the rootfs backend (issue #65).
     ///
@@ -241,6 +246,18 @@ fn main() {
             eprintln!("Error: {}", e);
             exit_flushed!(1);
         }
+        if let Some(g) = tee_guard.take() {
+            g.finish();
+        }
+        return;
+    }
+
+    // Handle `status` subcommand
+    if let Some(Command::Status) = args.command {
+        print!(
+            "{}",
+            bootc_migrate_core::status::render(&bootc_migrate_core::status::gather())
+        );
         if let Some(g) = tee_guard.take() {
             g.finish();
         }

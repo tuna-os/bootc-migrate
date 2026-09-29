@@ -543,6 +543,9 @@ impl OstreeInstallConfig<'_> {
             "[firstboot] verify probe staged; it reports to {} on first boot",
             crate::firstboot_verify::VERIFY_REPORT
         );
+        crate::firstboot_verify::install_cleanup_prompt(&deploy_root.join("etc"))
+            .context("failed to stage the desktop cleanup prompt")?;
+        println!("[firstboot] desktop cleanup prompt staged");
 
         // ---- SELinux labels ----
         // The merge and the /var copy wrote files with the labels the host

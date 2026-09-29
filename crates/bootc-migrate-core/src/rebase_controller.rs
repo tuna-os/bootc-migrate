@@ -269,6 +269,7 @@ fn schedule_image_swap_firstboot() -> Result<()> {
     let etc = deploy.join("etc");
     cross_family::install_firstboot_unit(&etc, &unit)?;
     crate::firstboot_verify::install_verify_probe(&etc)?;
+    crate::firstboot_verify::install_cleanup_prompt(&etc)?;
     let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
     let etc_ctx = "system_u:object_r:etc_t:s0";
     let unit_dir = etc.join("systemd/system");
@@ -306,6 +307,14 @@ fn schedule_image_swap_firstboot() -> Result<()> {
             etc_ctx,
         ),
         (verify_marker, etc_ctx),
+        (
+            etc.join(crate::firstboot_verify::PROMPT_SCRIPT_REL),
+            etc_ctx,
+        ),
+        (
+            etc.join(crate::firstboot_verify::PROMPT_DESKTOP_REL),
+            etc_ctx,
+        ),
     ];
     for (path, ctx) in &labels {
         let mut value = ctx.as_bytes().to_vec();
@@ -577,6 +586,13 @@ impl ImageSwapConfig<'_> {
         }
 
         schedule_image_swap_firstboot()?;
+
+        crate::status::write_report(
+            std::path::Path::new(crate::status::MIGRATE_REPORT),
+            "composefs -> composefs via ImageSwap",
+            self.target_image,
+        )
+        .context("failed to write the migration report")?;
 
         finalize_staged_now()?;
 
