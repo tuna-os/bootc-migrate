@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Verify a commit is release-ready before it is tagged.
+# Verify a commit is release-ready before hand-pushing a tag for it.
 #
-# release.yml triggers on any `v*` tag push with no gate of its own — it
-# does not check that the tagged commit's CI or E2E matrix passed. RELEASING.md
-# "Before tagging" step 2 requires the full E2E matrix green on the exact
-# commit being tagged, but that has been a purely manual, memory-dependent
-# check. This script makes it a command instead: it asks the GitHub API for
-# ci.yml's and e2e-tests.yml's conclusion on the given commit and fails
-# loudly if either is missing or non-green, so a tag is never pushed against
-# a commit that only *might* have been verified.
+# Releases are normally automatic: merging a version bump to `main` is what
+# cuts them, and `required-checks` already guarantees CI and the full E2E
+# matrix were green on that commit before it could merge (see RELEASING.md).
+# This script is the escape hatch for the other path — hand-pushing a `v*`
+# tag against a commit that is not the head of `main` — where that guarantee
+# does not hold. It asks the GitHub API for `CI`'s and `E2E Migration
+# Tests`' conclusion on the given commit and fails loudly if either is
+# missing or non-green, so a tag is never pushed against a commit that only
+# *might* have been verified.
 #
 # Usage:
 #   ./scripts/verify-release-ready.sh [<sha-or-ref>]
@@ -43,9 +44,8 @@ check_workflow "E2E Migration Tests" || status=1
 
 if [ "$status" -ne 0 ]; then
   echo
-  echo "FAIL: $SHA is not release-ready — see RELEASING.md 'Before tagging'." >&2
-  echo "A red or missing run here means the E2E matrix has not been proven" >&2
-  echo "green on this exact commit. Do not tag until it has." >&2
+  echo "FAIL: $SHA is not release-ready — a hand-pushed tag needs CI and E2E" >&2
+  echo "green on this exact commit (see RELEASING.md, 'Cutting it')." >&2
   exit 1
 fi
 
