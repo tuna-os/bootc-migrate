@@ -18,7 +18,19 @@ const LOCK_PATH: &str = "/var/run/bootc-migrate.lock";
 const REMOUNT_RW_TARGETS: [&str; 2] = ["/sysroot", "/boot"];
 
 fn acquire_lock() -> Result<File> {
-    let lock = File::create(LOCK_PATH).context("failed to create lock file")?;
+    acquire_exclusive_lock_at(std::path::Path::new(LOCK_PATH))
+}
+
+/// The exclusive migration lock on its own, for routes that manage their own
+/// sleep guard and remounts ([`crate::ostree_install`]). Same lock file as
+/// [`MigrationLifecycle`], so the two binaries exclude each other (#303).
+/// The message names bootc-migrate either way: that text is frozen output.
+pub(crate) fn acquire_exclusive_lock() -> Result<File> {
+    acquire_exclusive_lock_at(std::path::Path::new(LOCK_PATH))
+}
+
+fn acquire_exclusive_lock_at(path: &std::path::Path) -> Result<File> {
+    let lock = File::create(path).context("failed to create lock file")?;
     // Non-blocking exclusive advisory lock, released when this fd is closed
     // (i.e. on process exit). Guards against concurrent migration runs.
     match flock(&lock, FlockOperation::NonBlockingLockExclusive) {
@@ -26,7 +38,7 @@ fn acquire_lock() -> Result<File> {
         Err(Errno::WOULDBLOCK | Errno::ACCESS) => {
             return Err(anyhow!(
                 "Another instance of bootc-migrate is already running (lock held at {}).",
-                LOCK_PATH
+                path.display()
             ));
         }
         Err(e) => return Err(e).context("failed to acquire lock"),
@@ -148,6 +160,21 @@ mod tests {
         assert!(
             lifecycle._sleep.is_none(),
             "dry run must not hold a sleep inhibitor"
+        );
+    }
+
+    /// Two opens of the same lock file conflict: the second run refuses
+    /// instead of racing the first (#303). Uses a tempdir file, never the
+    /// production lock — tests must not fence out a live migration.
+    #[test]
+    fn exclusive_lock_refuses_a_second_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-migrate.lock");
+        let _first = acquire_exclusive_lock_at(&path).unwrap();
+        let err = acquire_exclusive_lock_at(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("already running"),
+            "unexpected error: {err:#}"
         );
     }
 }

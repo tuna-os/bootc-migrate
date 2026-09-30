@@ -107,6 +107,118 @@ fn existing_deploy_refusal(existing: &[String]) -> String {
     )
 }
 
+/// Refuse when an OSTree deployment already exists, unless forced. Checked
+/// twice per run: early for a fast failure, and again under the migration
+/// lock where a concurrent run can no longer slip between check and install.
+fn refuse_existing_deploy(force: bool) -> Result<()> {
+    if Path::new(OSTREE_DEPLOY_DIR).is_dir() && !force {
+        let existing = list_deployments()?;
+        if !existing.is_empty() {
+            bail!("{}", existing_deploy_refusal(&existing));
+        }
+    }
+    Ok(())
+}
+
+/// True when /boot is a directory on the LUKS-encrypted root rather than its
+/// own partition: no /boot mount in /proc/mounts, but LUKS kargs on the
+/// cmdline. GRUB cannot unlock that layout, so the installed GRUB entry
+/// drops to a shell (#305). Pure over file text.
+fn boot_on_luks(mounts: &str, cmdline: &str) -> bool {
+    let boot_separate = mounts
+        .lines()
+        .any(|line| matches!(line.split_whitespace().nth(1), Some("/boot")));
+    let luks_root = cmdline
+        .split_whitespace()
+        .any(|word| word.starts_with("rd.luks."));
+    !boot_separate && luks_root
+}
+
+/// Where the run report is mirrored inside the new stateroot `/var`, so it
+/// survives the reboot onto the carried copy (post-boot
+/// `/var/lib/bootc-rebase/ostree-install-report.json`).
+fn carried_report_path() -> PathBuf {
+    Path::new(OSTREE_STATEROOT_VAR)
+        .join("lib/bootc-rebase")
+        .join(REPORT_FILE)
+}
+
+/// True when `fstab` already mounts `mountpoint` (comments ignored).
+fn fstab_has_mount(fstab: &str, mountpoint: &str) -> bool {
+    fstab.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty()
+            && !line.starts_with('#')
+            && line.split_whitespace().nth(1) == Some(mountpoint)
+    })
+}
+
+/// The device `mountpoint` is mounted from, from /proc/mounts text.
+fn mount_source_for(mounts: &str, mountpoint: &str) -> Option<String> {
+    mounts.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let source = fields.next()?;
+        (fields.next() == Some(mountpoint)).then(|| source.to_string())
+    })
+}
+
+/// A filesystem UUID from a mount source, when it names one directly
+/// (`/dev/disk/by-uuid/<uuid>`).
+fn uuid_from_mount_source(source: &str) -> Option<String> {
+    source
+        .strip_prefix("/dev/disk/by-uuid/")
+        .map(|uuid| uuid.trim().to_string())
+        .filter(|uuid| !uuid.is_empty())
+}
+
+/// The ESP's filesystem UUID for fstab: resolved from /proc/mounts, falling
+/// back to blkid when the mount source is a plain device node.
+fn esp_fs_uuid(esp_mountpoint: &str) -> Option<String> {
+    let mounts = fs::read_to_string("/proc/mounts").ok()?;
+    let source = mount_source_for(&mounts, esp_mountpoint)?;
+    if let Some(uuid) = uuid_from_mount_source(&source) {
+        return Some(uuid);
+    }
+    let out = Command::new("blkid")
+        .args(["-o", "value", "-s", "UUID", &source])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let uuid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if uuid.is_empty() { None } else { Some(uuid) }
+}
+
+/// Guarantee the deployed /etc/fstab mounts the ESP at /boot/efi. bootc's
+/// alongside install does not always write one — this host booted with no
+/// fstab at all — and without it the ESP never mounts: bootupd cannot stage
+/// updates and the hand-copied ESP kernel (#305) has no tooling path.
+/// Append-only, skipped when any /boot/efi entry exists.
+fn ensure_esp_fstab_entry(deploy_root: &Path, esp_mountpoint: &str) -> Result<()> {
+    let fstab = deploy_root.join("etc/fstab");
+    let current = fs::read_to_string(&fstab).unwrap_or_default();
+    if fstab_has_mount(&current, "/boot/efi") {
+        return Ok(());
+    }
+    let Some(uuid) = esp_fs_uuid(esp_mountpoint) else {
+        bail!("could not determine the ESP filesystem UUID for {esp_mountpoint}");
+    };
+    let mut out = current;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "UUID={uuid} /boot/efi vfat umask=0077,shortname=winnt 0 2\n"
+    ));
+    fs::write(&fstab, out).with_context(|| format!("writing {}", fstab.display()))?;
+    println!(
+        "[etc] added ESP mount to the deployed fstab ({})",
+        fstab.display()
+    );
+    Ok(())
+}
+
 /// Everything the composefs → ostree strategy needs, translated from CLI
 /// flags exactly once by the caller.
 #[derive(Debug, Clone, Copy)]
@@ -299,12 +411,21 @@ impl OstreeInstallConfig<'_> {
                 bail!("`{tool}` is required for the composefs -> ostree route and was not found");
             }
         }
-        if Path::new(OSTREE_DEPLOY_DIR).is_dir() && !self.force {
-            let existing = list_deployments()?;
-            if !existing.is_empty() {
-                bail!("{}", existing_deploy_refusal(&existing));
-            }
+        if boot_on_luks(
+            &fs::read_to_string("/proc/mounts").unwrap_or_default(),
+            &cmdline,
+        ) {
+            eprintln!(
+                "Warning: /boot lives on the LUKS-encrypted root with no separate /boot \
+                 partition. GRUB cannot unlock argon2id LUKS2, so the GRUB entry installed \
+                 below drops to a bare shell \
+                 (https://github.com/tuna-os/bootc-migrate/issues/305). Staging continues \
+                 — the deployment itself is complete — but before rebooting, copy the new \
+                 deployment's kernel + initrd to the ESP with a BLS Type-1 entry carrying \
+                 the deployment's `ostree=` karg, and boot it via systemd-boot."
+            );
         }
+        refuse_existing_deploy(self.force)?;
 
         // One registry scan serves the lineage gate and the capability
         // checks below — previously each scanned the target again, which
@@ -404,6 +525,11 @@ impl OstreeInstallConfig<'_> {
             return Ok(());
         }
 
+        // #303: the deploy-exists check above races a concurrent run, so hold
+        // the shared migration lock for the live run and re-check under it.
+        let _migration_lock = crate::migration::lifecycle::acquire_exclusive_lock()?;
+        refuse_existing_deploy(self.force)?;
+
         let _sleep_guard =
             crate::migration::SleepGuard::new("bootc composefs -> ostree re-base in progress");
 
@@ -501,6 +627,10 @@ impl OstreeInstallConfig<'_> {
             self.accept_cross_base,
         )?;
         println!("[etc] {etc_merge}");
+        // Day-2 hygiene, not staging: never fail the run over fstab.
+        if let Err(e) = ensure_esp_fstab_entry(&deploy_root, &esp) {
+            eprintln!("Warning: leaving deployed fstab without an ESP entry: {e:#}");
+        }
 
         // ---- /var ----
         println!(
@@ -612,12 +742,23 @@ impl OstreeInstallConfig<'_> {
             grub_boot_entry: grub_entry,
         };
         let report_path = Path::new(STATE_DIR).join(REPORT_FILE);
-        fs::write(
-            &report_path,
-            serde_json::to_string_pretty(&report).expect("OstreeInstallReport serializes"),
-        )
-        .with_context(|| format!("writing {}", report_path.display()))?;
+        let rendered =
+            serde_json::to_string_pretty(&report).expect("OstreeInstallReport serializes");
+        fs::write(&report_path, &rendered)
+            .with_context(|| format!("writing {}", report_path.display()))?;
         println!("Report written to {}", report_path.display());
+        // The report above lands on THIS /var; post-reboot /var is the
+        // carried copy made before it existed. Mirror it into the new
+        // stateroot var so `bootc-rebase status` finds it after the reboot.
+        let carried = carried_report_path();
+        if let Some(parent) = carried.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&carried, &rendered).with_context(|| format!("writing {}", carried.display()))?;
+        println!(
+            "Report also staged at {} for post-boot inspection",
+            carried.display()
+        );
         if rollback_entry {
             println!(
                 "OSTree deployment staged. Reboot to enter it; the composefs deployment stays \
@@ -1633,5 +1774,61 @@ mod tests {
         // /etc merge that actually re-decides the lineage.
         assert!(OSTREE_INSTALL_DECIDE_NOTE.contains("installed deployment"));
         assert!(!OSTREE_INSTALL_DECIDE_NOTE.contains("Phase 4"));
+    }
+
+    /// /boot-on-LUKS detection (#305): true only when /boot is not its own
+    /// mount and the cmdline carries LUKS kargs.
+    #[test]
+    fn boot_on_luks_needs_both_signals() {
+        let luks_cmdline = "root=UUID=x rd.luks.name=abc=root rw";
+        let plain_cmdline = "root=UUID=x rw";
+        let mounts_with_boot =
+            "/dev/mapper/root / btrfs rw 0 0\n/dev/nvme0n1p2 /boot ext4 rw 0 0\n";
+        let mounts_without_boot = "/dev/mapper/root / btrfs rw 0 0\n";
+
+        assert!(boot_on_luks(mounts_without_boot, luks_cmdline));
+        assert!(!boot_on_luks(mounts_with_boot, luks_cmdline));
+        assert!(!boot_on_luks(mounts_without_boot, plain_cmdline));
+        assert!(!boot_on_luks(mounts_with_boot, plain_cmdline));
+    }
+
+    #[test]
+    fn carried_report_path_lands_in_the_new_var() {
+        let path = carried_report_path();
+        assert_eq!(
+            path,
+            Path::new(OSTREE_STATEROOT_VAR)
+                .join("lib/bootc-rebase")
+                .join(REPORT_FILE)
+        );
+    }
+
+    #[test]
+    fn fstab_mount_matching_ignores_comments_and_blanks() {
+        let fstab =
+            "# a comment\n\nUUID=x / ext4 defaults 0 1\nUUID=y /boot/efi vfat umask=0077 0 2\n";
+        assert!(fstab_has_mount(fstab, "/boot/efi"));
+        assert!(fstab_has_mount(fstab, "/"));
+        assert!(!fstab_has_mount(fstab, "/boot"));
+        assert!(!fstab_has_mount(
+            "# UUID=z /boot/efi vfat defaults 0 2\n",
+            "/boot/efi"
+        ));
+        assert!(!fstab_has_mount("", "/boot/efi"));
+    }
+
+    #[test]
+    fn mount_source_and_uuid_parsing() {
+        let mounts = "/dev/mapper/root / btrfs rw 0 0\n/dev/nvme0n1p1 /boot/efi vfat rw 0 0\n";
+        assert_eq!(
+            mount_source_for(mounts, "/boot/efi").as_deref(),
+            Some("/dev/nvme0n1p1")
+        );
+        assert_eq!(mount_source_for(mounts, "/boot"), None);
+        assert_eq!(
+            uuid_from_mount_source("/dev/disk/by-uuid/3E7D-D5C0").as_deref(),
+            Some("3E7D-D5C0")
+        );
+        assert_eq!(uuid_from_mount_source("/dev/nvme0n1p1"), None);
     }
 }
