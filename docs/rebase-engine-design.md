@@ -1,10 +1,9 @@
 # Re-base Engine Design
 
 **Status**: accepted design; phase selection landed in `bootc-rebase` for [RFC #30]
-**Scope**: target architecture for generalizing `bootc-migrate` from a
-composefs-only migrator into a bootc image re-base / migration engine.
-This document is the design counterpart to the RFC; it does not change
-current behavior. Phasing follows the RFC's M1–M3.
+**Scope**: target architecture to expand `bootc-migrate` into a re-base engine.
+This document is the design counterpart to the RFC. It does not change
+current behavior. The plan follows phases M1–M3 from the RFC.
 
 [RFC #30]: https://github.com/tuna-os/bootc-migrate/issues/30
 
@@ -12,14 +11,13 @@ current behavior. Phasing follows the RFC's M1–M3.
 
 ## 1. Problem restated
 
-Today the pipeline is a single fixed scenario: OSTree(bootc) → composefs(bootc)
-with GRUB → systemd-boot. The phase functions are already split
-(`phase1_import_objects` … `phase5_setup_bootloader`, `run_rollback`,
-`migrate_bootloader_standalone`), but the *scenario* is compiled in: the
-sequence, the bootloader policy, and the /etc + UID handling are hard-wired in
-`migration/mod.rs` and `migration/deploy.rs` (the #123 God-modules).
+Today the pipeline is a single scenario: OSTree(bootc) → composefs(bootc) with
+GRUB → systemd-boot. The code will split phase functions (`phase1_import_objects`
+… `phase5_setup_bootloader`), but compiles the scenario into binary code.
+The sequence, bootloader policy, and /etc + UID logic live in `migration/mod.rs`
+and `migration/deploy.rs` (#123).
 
-The RFC generalizes along five axes:
+The RFC has five axes:
 
 | # | Scenario | New machinery |
 |---|----------|---------------|
@@ -58,13 +56,13 @@ pub struct ImageDescriptor {
 }
 ```
 
-`ImageDescriptor` is cheap to obtain: `os-release` + BLS inspection for source,
-registry manifest for target (already implemented in `registry.rs`).
+The system gets `ImageDescriptor` from `os-release` and BLS inspection for
+source, and the registry manifest for target (in `registry.rs`).
 
 ## 3. Phase pipeline
 
-Keep the existing phase split (they are already the right granularity) but give
-it an interface and a context so phases stop reaching into globals:
+Keep the phase split. Give it an interface and context so phases do not use
+global state:
 
 ```rust
 pub trait RebasePhase {
@@ -95,8 +93,8 @@ Phases (current names kept where possible):
 | bootloader | `phase5_setup_bootloader` | policy-driven (§5.1); reused by standalone B |
 | rollback/commit | `transaction.rs` | unchanged; covers the whole phase set |
 
-Each phase returns a `PhaseReport` (what changed, what was skipped, size of
-delta) — the CLI and the future TUI render the same report.
+Each phase returns a `PhaseReport` (changes, skipped items, delta size).
+The CLI and future TUI render the same report.
 
 ## 4. Mode matrix
 
@@ -115,20 +113,21 @@ the pipeline; it is a mode that omits `seal` and pins `bootloader=keep`.
 only phase is bootloader — no new code path.
 
 The executable counterpart is `crates/bootc-rebase/src/routing.rs::plan`.
-`bootc-rebase --plan` prints the selected phases and bootloader policy without
-touching the host. The planner is pure and tested across all four backend
-pairs; strategy execution remains behind the existing protected paths until
-the phase trait extraction below lands. composefs→ostree executes as
-`Strategy::OstreeInstall` (#260): the target's own `bootc install
-to-existing-root` alongside the composefs root, with the ESP snapshot,
-`/etc` merge and `/var` copy owned by `bootc-migrate-core::ostree_install`.
+`bootc-rebase --plan` prints the selected phases and bootloader policy
+without host changes. The planner is pure and has tests for all four backend
+pairs. Strategy execution remains behind protected paths until trait
+extraction is complete.
 
-For frontends and orchestration, `bootc-rebase --plan-json` emits the same
-route as a single JSON object (`from`, `to`, `strategy`, `implemented`,
-`phases`, and `bootloader`). It implies `--plan`: no preflight, registry access,
-or filesystem mutation occurs. This keeps the route/phase contract consumable
-without scraping human-oriented output and makes unsupported reverse routes
-explicit before an apply attempt.
+The composefs→ostree route runs as `Strategy::OstreeInstall` (#260). The
+target's `bootc install to-existing-root` runs alongside the composefs root.
+`bootc-migrate-core::ostree_install` owns the ESP snapshot, `/etc` merge, and
+`/var` copy.
+
+For frontends and tools, `bootc-rebase --plan-json` emits the route as a JSON
+object (`from`, `to`, `strategy`, `implemented`, `phases`, and `bootloader`).
+It implies `--plan`. No preflight, registry access, or filesystem mutation
+occurs. This keeps the plan contract clean without screen scrapes. It makes
+reverse routes that lack support explicit before a user tries an apply.
 
 ## 5. Decision policies (RFC open questions 1–3)
 
@@ -147,19 +146,17 @@ tool that hard-refuses by default is a dead end for its main users. Rules:
 
 - Remap is per-entry (`/etc/passwd`, `/etc/group`, `/etc/shadow`) using the
   target's `base` defaults; the report lists every remapped entry.
-- **Hard refuse** (require `--force`) when two distinct source users collide on
-  the target UID — that is a data-integrity ambiguity, not a preference.
-- `/var` and `/home` ownership are rewritten in the same pass, before the
-  bootloader phase, so the system never boots with mismatched ownership.
+- **Hard refuse** (needs `--force`) if two users from the source have the same
+  target UID. This prevents data errors.
+- The tool rewrites `/var` and `/home` ownership before the bootloader phase.
+  This prevents mismatched file ownership.
 
 ### 5.3 /etc merge conflict policy (Q3)
 
-Keep the 3-way merge (old-default ∆ current → new-default) — it is already
-correct for the common case. New rule for the cross-base case: when *both*
-current and target modified the same key (true conflict), write a
-`.rpmnew`-style sidecar next to the file and add one summary line to the
-final report the user resolves, rather than silently preferring either side.
-Reuse `etc_conflict.rs`; it already implements most of this.
+Keep the 3-way merge (old-default ∆ current → new-default). It works for
+standard cases. When *both* current and target change the same key, write a
+`.rpmnew` sidecar file. Add a summary line to the final report so the user
+resolves conflicts. Reuse `etc_conflict.rs`, which provides this logic.
 
 ## 6. DE-migrate hook contract (Q4)
 
@@ -176,29 +173,27 @@ other  → failure; stderr carries the reason
 
 - Stash location: `~/.local/share/de-migrate/<from-de>/` (namespaced, not
   deleted — enables round-trip restore per the RFC).
-- The engine calls plugins pre- and post-phase as `HookSpec`s in the plan; a
-  missing plugin binary is a warning, never a failure of the migration.
-- The GNOME↔KDE translation itself stays outside the core engine (per RFC out
-  of scope), but the contract is the extension point.
+- The engine runs plugins before and after phases as `HookSpec` entries. A
+  missing plugin binary triggers a warning, not a failure.
+- The GNOME↔KDE translation stays outside the core engine. The hook contract
+  provides the extension point.
 
 ## 7. Acquisition strategy (unchanged)
 
-Registry streaming (`extract_files_via_registry`, `extract_subtree_via_registry`,
-`extract_kernel_modules_via_registry`) remains the only acquisition path — see
-`docs/architecture.md` §1–2 for why (EROFS zero-fill past 4 KB, ENOSPC with
-`podman cp`/`skopeo`). The planner does not get to choose a different strategy.
+Registry stream extraction (`extract_files_via_registry`,
+`extract_subtree_via_registry`, `extract_kernel_modules_via_registry`)
+remains the acquisition path. See `docs/architecture.md` §1–2 for details
+(EROFS zero-fill, ENOSPC with `podman cp`). The planner does not choose a
+different method.
 
 ## 8. Refactor boundary with #123
 
-This is the key constraint: **the planner + phase interface extraction is the
-fix for #123**, so it must not be done as a separate "cleanup" after the
-feature work. Concretely for `migration/deploy.rs` (1,660 LOC) and
-`migration/boot.rs` (1,651 LOC):
+This is the key rule: extract the planner and phase interface to resolve #123.
+Do not defer this work. For `migration/deploy.rs` and `migration/boot.rs`:
 
-1. M1 moves `deploy`'s image-stage vs. var/user carry-over into two phase
-   structs (same code, new seams) — pure move, no behavior change.
-2. M1 moves bootloader policy out of `boot.rs` into `policies.rs` (the §5.1
-   rules), keeping `phase5_setup_bootloader` as the executor.
+1. M1 splits `deploy` logic into two phase structs with no behavior change.
+2. M1 moves bootloader policy to `policies.rs` (§5.1 rules). `phase5_setup_bootloader`
+   executes the policy.
 3. M2 (cross-base) adds `uid_gid.rs` + extends `etc_conflict.rs` — no growth of
    the God-modules.
 
@@ -207,12 +202,10 @@ Anything that does not fit a phase or a policy belongs in a new module, not in
 
 ## 9. Test strategy (Q5)
 
-- **Phase × mode unit matrix**: every phase declares `required_by`/`optional_for`;
-  a unit test iterates all modes × phases and asserts the expected selection
-  (§4 table is executable). This catches a regression in A/B the moment C/D
-  land.
-- **Policy unit tests**: bootloader keep-vs-migrate, UID remap collision
-  refusal, `.rpmnew` sidecar generation — all pure, runnable on any host.
+- **Phase × mode unit matrix**: every phase declares `required_by` and
+  `optional_for`. Unit tests run each mode and assert selections.
+- **Policy unit tests**: bootloader policy, refusal for duplicate UIDs, and
+  `.rpmnew` sidecar files run on any host.
 - **E2E**: keep the existing composefs leg; add C (stable→LTS) and D
   (stable→tuna-os) legs once M2 lands. The phase-selection unit matrix is the
   fast guard; E2E legs are the slow proof.

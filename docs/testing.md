@@ -1,9 +1,8 @@
-# Testing & automation
+# Testing and automation
 
-How this project stays trustworthy: what runs where, what gates what, and
-what is automated so humans don't have to remember it. Companion to
-ROADMAP.md (what we're building) and docs/cfs-cli-generations.md (the
-evidence-gathering method this strategy grew out of).
+This document explains how this project runs tests, gates pull requests, and
+automates validation. This text complements `ROADMAP.md` and
+`docs/cfs-cli-generations.md`.
 
 ## The pyramid
 
@@ -16,21 +15,19 @@ evidence-gathering method this strategy grew out of).
 
 Rules of thumb:
 
-- **Logic goes down the pyramid.** If a behavior can be tested without a VM
-  (extract a pure function, fabricate store contents through public APIs,
-  feed fixture bytes), it must be. The E2E cells exist to catch what only a
-  real boot can: initrd behavior, bootloader handoff, mount namespaces,
-  systemd ordering.
+- **Move logic down the pyramid.** Test behavior without a VM when possible.
+  The E2E cells find issues that need a real boot: initrd behavior, bootloader
+  handoff, and mount namespaces.
 - **A failed E2E cell must name its phase.** The harness (`tests/run-e2e.sh`)
   prints `=== Phase N ===` banners and asserts with `FAIL:` prefixes so logs
-  are greppable (`just e2e-failures`).
-- **Evidence over inference.** When upstream behavior is in question, build
-  the experiment (loopback verity store, container probes) before designing
-  around an assumption — docs/cfs-cli-generations.md is the worked example.
+  are searchable (`just e2e-failures`).
+- **Use evidence instead of assumptions.** When upstream behavior is unclear,
+  run the experiment before you write code. `docs/cfs-cli-generations.md` is
+  the worked example.
 
 ## E2E matrix: current and planned
 
-Current (the four **untouchable MVP regression gates** + M1 addition):
+Current status of regression gates and additions:
 
 | Cell | Proves | Status |
 |---|---|---|
@@ -45,20 +42,20 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | dakota stable (composefs-native) → utah testing (`image-swap` mode) | a composefs image swap across distributions: `--plan` resolves `ImageSwap`, the host's `bootc switch` stages Utah (Bluefin on Fedora Hummingbird), `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in Utah and the Dakota deployment stays as rollback | active, non-gating |
 | bluefin stable → bootcrew/opensuse-bootc (`E2E_CROSS_FAMILY=1`) | the cross-family gate refuses without `--accept-cross-base`; with it, the cross-family `/etc` policy (#256): target defaults win, `.rebase-old` sidecars, carried machine state, target-first identity merge, first-boot unit | active, non-gating |
 
-### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
+### Cross-base mode (`E2E_CROSS_BASE=1`)
 
-`ostree-rebase` mode takes `E2E_CROSS_BASE=1`, which adds
-`--accept-cross-base` (the route is refused without it) and asserts that
-`=== Cross-base UID/GID remap report ===` appeared in the output.
+The `ostree-rebase` mode takes `E2E_CROSS_BASE=1`. This adds `--accept-cross-base`.
+The system refuses the route without this flag. The test asserts that
+`=== Cross-base UID/GID remap report ===` appears in the output.
 
-The assertion is the point. `gate_cross_base` returns `None` and prints
-nothing whenever it declines to act, so silence is indistinguishable from
-success and an unasserted cell would pass vacuously.
+The assertion is necessary. `gate_cross_base` returns `None` and prints nothing
+when it declines to act. Silence will look like success, so an unasserted cell
+passes without proof.
 
-**There is still no matrix cell using it** (#187), but the blocker is now
-identified and it is *not* what this file previously claimed.
+Issue #187 tracks this work. The blocker is clear now, and differs from
+earlier assumptions.
 
-The diagnostic below produced its first real output on 2026-08-28:
+The diagnostic produced this output on 2026-08-28:
 
 ```
 could not reach registry ghcr.io
@@ -66,55 +63,37 @@ could not reach registry ghcr.io
  ; http: unexpected status from http://ghcr.io/v2/: 301)
 ```
 
-ghcr.io **is** reachable from the guest. The `http` attempt got ghcr.io's
-redirect to HTTPS; the `https` attempt got a `401` challenge, parsed it, and
-requested a token — and that token request returned **403**. So `curl` is
-present, DNS resolves, TLS works, and `/v2/` round-trips. What fails is
-specifically `fetch_bearer_token`.
+The guest can reach ghcr.io. The `http` try received a redirect to HTTPS.
+The `https` try received a `401` challenge, parsed it, and requested a token.
+That token request returned **403**. `curl` is present, DNS resolves, and TLS
+works. The failure occurs in `fetch_bearer_token`.
 
-This file previously said the scan "cannot reach ghcr.io", which sent
-investigations toward guest networking. That was wrong. It also explains why
-`bootc switch` pulls fine moments later: containers/image builds its token
-request differently — never evidence about connectivity, only that our token
-request is malformed in a way bootc's is not.
+Earlier text said the scan could not reach ghcr.io. That was incorrect.
+`bootc switch` pulls successfully later because `containers/image` constructs
+its token request differently. Our token request has a format error.
 
-A 403 (not a 401) from the token endpoint points at a malformed or
-over-scoped request: scope construction (`repository:<owner>/<name>:pull`),
-a synthesized `service` parameter, or header expectations ghcr.io enforces
-more strictly than Docker Hub. Tracked on #187.
+A 403 error points to an invalid request format or scope. Issue #187 tracks
+the fix.
 
-Two things were fixed to make that blocker diagnosable rather than merely
-observed:
+Two changes make this blocker easy to diagnose:
 
-- `RegistryEndpoint::resolve` used to `continue` past each scheme's error and
-  report a single opaque `could not reach registry ghcr.io (tried
-  ["https","http"])`. Curl-not-installed, DNS failure, a TLS rejection, a
-  proxy's 403 and a 401 with no challenge all looked identical — which is
-  exactly the information needed to fix any of them. It now reports what each
-  scheme actually did.
-- The scan retry was 3 attempts at a flat 2s, covering only ~4s of a guest's
-  network coming up. It is now 4 attempts with exponential backoff (~14s), and
-  a non-retryable failure (a missing `curl`) returns immediately instead of
-  burning the window and reporting itself as "after N attempts", which reads
-  like a network fault.
+- `RegistryEndpoint::resolve` reports what each scheme returned, instead of a
+  single error string.
+- The scan retry uses four tries with exponential backoff (~14 seconds).
+  A missing `curl` returns immediately.
 
-The `ostree-rebase` path also probes the guest's registry reachability
-directly (`[registry-probe]` lines: whether `curl` exists, what
-`https://ghcr.io/v2/` returns, and `/etc/resolv.conf`), so the next run of any
-ostree-rebase cell reports the true cause rather than leaving it to inference.
+The `ostree-rebase` path also checks registry access (`[registry-probe]` lines:
+`curl` presence, ``https://ghcr.io/v2/`` response, and `/etc/resolv.conf`).
 
-That same scan failure is why **every `ostree-rebase` cell passes
-`--accept-cross-base`**. Since #191 an unscannable target is a refusal rather
-than a silent proceed, so the harness — which knows its image pairs are
-same-lineage Fedora — has to opt in explicitly, exactly as a human operator
-would. The cells assert the refusal *first*, without the flag, so the gate's
-wiring has live coverage and cannot regress to waving things through.
+Every `ostree-rebase` cell passes `--accept-cross-base`. Since #191, an
+unscannable target causes a refusal. The harness must opt in explicitly.
+The cells assert the refusal first without the flag to test the gate.
 
 ### The matrix already has a cross-base pair
 
-With the scan working, `is_cross_base` was evaluated for the first time —
-and `bluefin:stable → dakota:stable` **is** cross-base. From the gating
-ostree re-base cell:
+With the scan active, the test evaluated `is_cross_base`. The pair
+`bluefin:stable → dakota:stable` is cross-base. The output from the ostree
+re-base cell shows:
 
 ```
 === Cross-base UID/GID remap report ===
@@ -124,331 +103,193 @@ Diverging system accounts (renumbered during the re-base):
 Error: Cross-base re-base detected (host and target disagree on ID/ID_LIKE).
 ```
 
-This also corrects a second standing assumption. These pairs were described
-here as "same-lineage Fedora", and the worry was that a cross-base cell would
-need an exotic image because `is_cross_base` is lineage-aware and CentOS
-declares `ID_LIKE="rhel fedora"`. Neither the pessimism nor the premise
-survived contact: the existing pair qualifies.
+This corrects an earlier assumption. These pairs were called "same-lineage Fedora".
+CentOS declares `ID_LIKE="rhel fedora"`. The existing pair qualifies as cross-base.
 
-So #187 does not need a dedicated matrix cell. The gating `ostree-rebase`
-cell now asserts, after opting in with `--accept-cross-base`, that the remap
-report actually appears — the cross-base path executing under assertion,
-which is what the issue asks for. `E2E_CROSS_BASE=1` remains available for
-forcing the check on a pair chosen deliberately.
+Issue #187 does not need a dedicated matrix cell. The gating `ostree-rebase` cell
+asserts that the remap report appears after `--accept-cross-base`.
+`E2E_CROSS_BASE=1` remains available for deliberate checks.
 
-### Desktop migration (`E2E_DE_MIGRATE=1`) — active on the cross-DE cell
+### Desktop migration (`E2E_DE_MIGRATE=1`)
 
-The `bluefin -> aurora` cell (GNOME → KDE) now passes `--de-migrate`. Before
-this, no cell passed it, so the controller reported "skipped (--de-migrate not
-passed)" and #68's stash/restore code never ran — the cell exercised the
-re-base route while proving nothing about desktop migration.
+The `bluefin -> aurora` cell (GNOME → KDE) passes `--de-migrate`.
+Without this flag, the controller reported a skip and stash code never ran.
 
-The harness seeds a GNOME config for the first human account, then asserts
-both that a cross-desktop plan was reported *and* that
-`~/.local/share/de-migrate` exists afterwards. The second half matters: a plan
-without a stash is precisely #68's unshipped half. Like the cross-base
-assertion, the failure branches name which of the four silent causes occurred
-(flag not wired, same desktop, no human users, or target scan failed) rather
-than guessing one.
+The harness will write a GNOME config for the first human user. It asserts that
+a cross-desktop plan exists and `~/.local/share/de-migrate` exists.
+The failure branches report the exact cause if a test fails.
 
 Because desktop detection scans the target image, this cell depends on the
-same registry path as `E2E_CROSS_BASE`, and is blocked by the same 403 on the
-token fetch described above.
+same registry path as `E2E_CROSS_BASE`.
 
-After the reboot, the cell also checks the return trip. On the booted Aurora,
-it restores the GNOME stash with the `de-migrate restore` subcommand. Then it
-asserts that the seeded GNOME config is back in `$HOME` and gone from the
-stash. The shared health check below also requires SDDM, not GDM, as the
-display manager.
+After reboot, the cell checks the return trip. On the booted Aurora system,
+it restores the GNOME stash with `de-migrate restore`. It asserts that the
+seeded config is in `$HOME` and gone from the stash. The health check needs SDDM.
 
 ### tunaOS desktop ring
 
-Four non-gating cells re-base between the Albacore (AlmaLinux 10) desktop
-tags in a ring:
-GNOME → Niri → COSMIC → XFCE → GNOME. Each desktop is a source once and a
-target once. Each change of display manager runs once, because the tags use
-different ones: GDM for GNOME, greetd with the DMS greeter for Niri,
-cosmic-greeter for COSMIC, and greetd with gtkgreet for XFCE.
+Four non-gating cells re-base between Albacore (AlmaLinux 10) desktop tags in a ring:
+GNOME → Niri → COSMIC → XFCE → GNOME. Each desktop serves as source once and
+target once. The tags use different display managers: GDM for GNOME, greetd with
+DMS for Niri, cosmic-greeter for COSMIC, and greetd with gtkgreet for XFCE.
 
-The ring does not use Yellowfin. On its rolling Kitten 10 base, a fresh
-install cannot start D-Bus: SELinux denies dbus-broker its
-`dbus_contexts` file (tunaOS#2485). Every Yellowfin base therefore fails
-before the migration starts. The XFCE cell forwards the journal to the
-serial console, so an EL10 base with this problem shows the reason in
-`qemu.log`.
+The ring does not use Yellowfin. On Kitten 10, a fresh install cannot start
+D-Bus: SELinux denies `dbus_contexts` to dbus-broker (tunaOS#2485).
+The XFCE cell forwards the journal to the serial console to record `qemu.log`.
 
-Each cell sets `de_from` to the base desktop. The harness seeds one config
-file of that desktop and asserts that `--de-migrate` stashes it. After the
-reboot, it restores the file and requires the target's display manager.
+Each cell sets `de_from` to the base desktop. The harness will write one config
+file and asserts that `--de-migrate` stashes it. After reboot, it restores
+the file and checks the target display manager.
 
 ### Post-reboot health check (every mode)
 
-The per-mode assertions prove that user data survived. They do not prove that
-the system which carries the data works. The Dakota → Utah bugs (#267) broke
-D-Bus and left SSH working only by chance.
+The per-mode assertions verify that user data survived. They do not prove that
+the host system functions. Issue #267 showed D-Bus failures on Dakota → Utah migrations.
 
-After every reboot into a migrated system, `tests/e2e-health.sh` runs inside
-the VM and fails the cell when any of these is not true:
+After every reboot into a migrated system, `tests/e2e-health.sh` runs inside the VM:
 
-- The boot completed. The system state is "running" or "degraded".
-- No unit failed, other than the globs in `E2E_ALLOWED_FAILED_UNITS`. Each
-  entry needs a reason next to it.
-- The system bus and logind answer.
-- When the default target is graphical, `graphical.target` is active and the
-  display manager runs. It must be the cell's `expect_dm` when set (`gdm`,
-  `sddm`).
-- Every user and group in the target's `sysusers.d` resolves.
-- On an enforcing SELinux target: no denial against an `unlabeled_t` file,
-  and `restorecon -n` finds no new path to relabel under `/etc` or
-  `/var/home`. Just before the migration, the harness records the paths
-  that the base already has mislabeled. Those paths are reported but do
-  not fail the cell. For example, tunaOS labels `/var/home/linuxbrew`
-  `home_root_t` on a fresh install.
-  A cell can also list path globs in `allowed_mislabeled` when the image's
-  own policy is not consistent. The cell must give the reason. The
-  `albacore:gnome` policy maps `/var/home` to `/home` but writes its home
-  contexts for `/var/home`, so the two ring cells that include it allow
-  `/var/home/*`.
+- The boot must complete with a valid state (`running` or `degraded`).
+- No unit must fail, except patterns in `E2E_ALLOWED_FAILED_UNITS`.
+- The system bus and logind must answer.
+- For graphical targets, `graphical.target` must be active and the display
+  manager must run.
+- Every user and group in the target's `sysusers.d` must resolve.
+- On SELinux targets, no denial against `unlabeled_t` files must occur.
+  `restorecon -n` must find no new paths to relabel under `/etc` or `/var/home`.
+  The harness records existing mislabeled paths before migration.
+  Cells can list globs in `allowed_mislabeled` with a reason.
 
-The composefs migration mode also asserts the other direction of the
-fresh-image comparison. Every file that the target image ships in `/etc` must
-exist after the migration. The list of paths that the migration removes on
-purpose is in `tests/run-e2e.sh`, with a reason for each.
+In composefs migration mode, the test checks all target `/etc` files.
+Every file shipped by the target in `/etc` must exist after migration.
+`tests/run-e2e.sh` lists allowed removals with reasons.
 
-### Boot entries (`E2E_BOOT_ENTRIES=1`) — live NVRAM coverage
+### Boot entries (`E2E_BOOT_ENTRIES=1`)
 
-The gating `bluefin ostree re-base` cell now runs `boot-entries`: a read-only
-`--json` audit, then a `--rename-branding --apply --yes` followed by `--undo`,
-asserting that `efibootmgr -v` output is byte-identical before and after.
+The gating `bluefin ostree re-base` cell runs `boot-entries`. It executes a
+`--json` audit, then `--rename-branding --apply --yes`, followed by `--undo`.
+It asserts that `efibootmgr -v` output is identical before and after.
 
-This is the first cell to mutate real UEFI NVRAM (#189). Until it existed,
-#31's `efibootmgr` executor had only unit tests of the *plan*; the write path
-and the snapshot-restore path had never run against real firmware variables.
+This cell changes real UEFI NVRAM (#189). It tests the write path and the
+snapshot-restore path against firmware variables.
 
-**Scope limit:** #189 also names #65's live bootloader flip. That is *not*
-covered and cannot be — `migrate-bootloader` currently bails with "not
-implemented yet (issue #65)", so there is no flip to exercise.
+`migrate-bootloader` is not yet implemented (issue #65).
 
-Planned, one per milestone exit (see ROADMAP.md):
+Planned items per milestone:
 
-- **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`), active as the non-gating cell above
-- **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
-  kernel update asserting ESP resync; `--undo` restores GRUB
-- **M3**: the cross-base cell above covers centos-family → fedora-family.
-  The exit criterion names the *other* direction (fedora → centos), which
-  needs a CentOS-family target image the harness does not currently install;
-  decide explicitly whether direction matters (#187)
-- **M4**: a migration where **no** legacy-CLI bootc exists (NativeStore
-  writer); kernel-version gate ≥6.12 for file-backed EROFS mounts
-- **M0**: rollback cell — migrate, boot, `rollback`, assert the OSTree
-  deployment boots and the store is intact (#22/#26); greenboot-compatible
-  health scripts asserted present
+- **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`) as a non-gating cell
+- **M2**: ostree-rebase cell with `--bootloader systemd-boot` and kernel update test
+- **M3**: cross-base cell for fedora → centos (#187)
+- **M4**: migration without legacy-CLI bootc (`NativeStore` writer)
+- **M0**: rollback cell with health check verification (#22/#26)
 
-Cell design rules: new capability ⇒ new cell (never widen an MVP cell);
-prefer `E2E_MODE` branches in one harness over new harnesses; every cell
-must be runnable locally (`just e2e*` with env overrides).
+Design rules: create new cells for new capabilities.
+Use `E2E_MODE` flags in the shared harness. Run cells locally with `just e2e*`.
 
 ## TUI testing (three layers)
 
-Interactive code splits the same way the rest of the project does —
-pure logic proven cheap, live behavior proven on a real system:
+Interactive code splits into three layers:
 
-1. **State machines + rendering, headless**: every checklist/wizard's key
-   handling is a pure function (`handle_key`) and every frame draws into
-   ratatui's `TestBackend` for content assertions — `tui::tests` and
-   `drift_review::tests` in `bootc-migrate`, `boot_entry_review::tests`
-   in `bootc-rebase`. Runs in `cargo test`, no terminal involved.
-2. **The raw terminal event loop, in the VM**: `tests/tui-e2e-driver.py`
-   (stdlib-only python3, runs on the system under test) spawns the TUI on
-   a pty, reconstructs the screen from the emitted escape sequences, and
-   types like a human. The `tui-migrate` cell uses it to drive
-   `etc-drift --interactive` and then a full migration through the
-   wizard; two hard-won rules live in its docstring — match against a
-   grid, never the raw stream (ratatui diff-draws), and never type while
-   a forced-repaint winsize nudge is in flight (the key gets dropped).
+1. **State machines and headless display**: pure functions (`handle_key`)
+   process keys. Every frame draws into ratatui's `TestBackend` for tests.
+   `cargo test` runs these tests without a terminal.
+2. **Terminal event loop in VM**: `tests/tui-e2e-driver.py` spawns the TUI on a
+   pty and sends key events. The `tui-migrate` cell drives `etc-drift --interactive`
+   and a full migration. The driver writes asciicast files (`--record`) and
+   screenshots (`--snapshot-dir`). CI renders casts into GIFs with `agg` and
+   saves them in `tui-walkthrough`. Replay casts locally with `asciinema play`
+   or render with `agg`.
+3. **Manual exploratory tests**: use Corral VMs (AGENTS.md) for UI tests.
 
-   The cell also documents itself: the driver records each flow as an
-   asciicast v2 file (`--record`) and saves a plain-text screenshot of
-   every wizard screen it reaches (`--snapshot-dir`). CI renders the
-   casts into timelapse GIFs with `agg` (long quiet phases collapsed via
-   `--idle-time-limit`) and publishes casts + GIFs + screenshots as the
-   `tui-walkthrough` artifact on every tui-migrate run, pass or fail —
-   the automated successor to the manual vhs capture in
-   `scripts/capture-screenshots.sh`. Replay a cast locally with
-   `asciinema play tui-migrate.cast` or re-render with
-   `agg tui-migrate.cast out.gif`.
-3. **Exploratory, by hand**: Corral VMs (AGENTS.md), for anything the
-   scripted flow doesn't reach (resize behavior, colors, feel).
+Run driver self-tests with:
 
-The driver self-tests on any non-OSTree dev box — the wizard runs to the
-Failed screen and must exit cleanly:
-
-    cargo build
-    python3 tests/tui-e2e-driver.py --mode wizard-expect-failure \
-      --binary target/debug/bootc-migrate --target-image quay.io/x/y:z
+```bash
+cargo build
+python3 tests/tui-e2e-driver.py --mode wizard-expect-failure \
+  --binary target/debug/bootc-migrate --target-image quay.io/x/y:z
+```
 
 ## KVM runner options
 
-The whole E2E matrix needs `/dev/kvm` (TCG is ~10× slower and blows any
-sane timeout). **GitHub-hosted Linux runners provide it** — measured
-2026-08-27, `crw-rw-rw- root:kvm`, guest SSH in 31 seconds — so
-`ubuntu-latest` is the default and no variable is needed to turn the
-matrix on. The long-standing "hosted runners have no KVM" note in these
-workflows predated GitHub enabling it and was simply stale.
+The E2E matrix needs `/dev/kvm`. GitHub-hosted Linux runners provide KVM access.
+`ubuntu-latest` is the default runner.
 
-One hosted-runner adjustment is required and lives in both workflows:
-the runner image's podman config leaves `Native Overlay Diff: "false"`,
-which makes every `podman build` layer commit walk and compare the whole
-~10 GB bluefin rootfs — about **30 minutes per trivial `RUN`**, enough
-to burn a 45-minute budget before QEMU ever starts. The `Use native
-overlay diffs for podman` step writes a minimal `/etc/containers/
-storage.conf` and resets the still-empty graph, cutting the full image
-bake to ~8 minutes. It is skipped when `E2E_SELF_HOSTED=true`, because
-that host owns its storage config and its graph holds cached images.
+Both workflows set up podman storage. The runner image defaults to
+`Native Overlay Diff: "false"`, which causes slow layer builds. The step
+`Use native overlay diffs for podman` configures `/etc/containers/storage.conf`
+to reduce build time to ~8 minutes. Self-hosted runners skip this step.
 
-Runner selection, highest precedence first:
+Runner precedence:
 
-1. **`E2E_RUNSON_SPEC` set** → [RunsOn](https://runs-on.com) ephemeral
-   EC2 runners in your own AWS account (useful for more cores than a
-   hosted runner's 4, or when hosted capacity is contended). Install the
-   RunsOn GitHub App and deploy its CloudFormation stack **including the
-   nested launch templates** (an existing stack must be upgraded before
-   `nested-virt` jobs run — plain EC2 VMs have no nested virtualization,
-   so this is what exposes `/dev/kvm` without paying for `.metal`), then
-   set:
+1. **`E2E_RUNSON_SPEC` set**: RunsOn EC2 runners with nested virtualization.
+2. **`E2E_SELF_HOSTED=true`**: self-hosted runner with KVM.
+3. **Default**: `ubuntu-latest`.
 
-       E2E_RUNSON_SPEC=family=c8i+m8i+r8i/cpu=8/ram=32/volume=120gb/nested-virt/image=ubuntu24-full-x64/spot=false
+Use `KVM_E2E_ENABLED='false'` to disable the E2E matrix.
 
-   The workflows prepend the `runs-on=<run-id>` routing key RunsOn
-   requires; everything after it is yours to tune without touching
-   workflow YAML. Constraints worth keeping: `nested-virt` needs an x64
-   image on a supported family (c8i/m8i/r8i); `volume=120gb` covers the
-   60G sparse guest disk plus both ~5 GB images and the Rust target;
-   `spot=false` (or `retry=when-interrupted`) because a 30-90-minute
-   cell is a bad spot candidate.
-2. **`E2E_SELF_HOSTED=true`** → the `kvm`-labelled self-hosted host
-   (kanpur), the original setup.
-3. **Neither** → `ubuntu-latest`.
-
-`KVM_E2E_ENABLED` is now a **kill switch, not an enable switch**: set it
-to `'false'` to stand the whole matrix down (`e2e-gate` treats a skipped
-run as a trivial pass); unset or `'true'` both run. Switching lanes is a
-variable change, never a workflow edit.
-
-### Timeouts, and why they are what they are
+### Timeouts
 
 | Budget | Value | Reason |
 |---|---|---|
-| Per-cell job timeout | 90 min | The tui-migrate cell measured 65 min end to end (image bake + migration + reboot + rollback + commit, driven through the wizard). |
-| `e2e-gate` wait window (ci.yml) | 100 min | Must clear the job timeout plus queue time. It was 50 min while the matrix was gated off; leaving it there would have failed every PR the moment the matrix started gating. |
+| Per-cell job timeout | 90 min | The tui-migrate cell takes 65 min end to end. |
+| `e2e-gate` wait window (ci.yml) | 100 min | Covers job timeout and queue wait times. |
 
-Measured cell runtimes on `ubuntu-latest` (2026-08-27): ostree-rebase-plan
-26 min, composefs-migrate 36 min, tui-migrate 65 min. The `Enable KVM
-access` step probes `/dev/kvm` and warns rather than failing, so a runner
-without it degrades loudly — a cell that suddenly takes hours is that
-warning going unread.
+The `Enable KVM access` step checks `/dev/kvm` and warns if KVM is absent.
 
-## Narrow dispatch (implemented)
+## Narrow dispatch
 
-`e2e-single.yml` dispatches exactly one cell with chosen parameters:
+`e2e-single.yml` runs a single matrix cell:
 
-    gh workflow run e2e-single.yml -f filesystem=btrfs -f mode=composefs-migrate
+```bash
+gh workflow run e2e-single.yml -f filesystem=btrfs -f mode=composefs-migrate
+```
 
-One failing scenario gets iterated alone instead of burning the whole
-matrix per attempt — the contract the ci-fix-loop practice expects. (A
-matrix-filter `if` was rejected: the `matrix` context is not available in
-job-level `if`, a bug actionlint caught before it shipped.) Keep its step
-sequence in sync with e2e-tests.yml.
+This tests one scenario without the full matrix.
 
-## Coverage floor (implemented)
+## Coverage floor
 
-CI's `coverage` job runs `cargo llvm-cov --workspace --all-features` with
-a **regression floor** (`--fail-under-lines`, see `just coverage-check`)
-and posts the summary to the job summary. The floor is not a target — it
-exists to catch commits that delete or bypass meaningful coverage. Raise
-it as milestones add tests; never lower it to merge. Local:
-`just coverage` / `coverage-html`. Baseline 2026-07-19: ~27% lines, with
-the pure-logic modules at 75–100% and the deliberately-untested layers
-(process orchestration, TUI, network/filesystem effectors) at 0 — those
-are the E2E cells' job.
+CI runs `cargo llvm-cov --workspace --all-features` with `--fail-under-lines`.
+The floor prevents unintended drops in test coverage. Run `just coverage` locally.
 
-## Failure triage (implemented)
+## Failure triage
 
-Both E2E workflows write a triage block to `$GITHUB_STEP_SUMMARY` on
-failure: last phase banner reached, every `FAIL:`/`ERROR:` assertion, and
-the log tail — diagnosis starts from the annotation, not a log download.
+E2E workflows write failure summaries to `$GITHUB_STEP_SUMMARY`.
+The summary contains the last phase banner, failed assertions, and log tails.
 
-## Upstream drift canary (implemented)
+## Upstream drift canary
 
-`.github/workflows/upstream-drift-canary.yml` runs twice weekly (and on
-dispatch): `tests/drift-canary.sh` probes every image in
-`tests/canary-baseline.tsv` for its cfs CLI generation and exits 1 on
-drift (auto-filing/updating a canary issue), 2 on probe-infra failure
-(retried next run, never alerted). The #72 breakage is exactly what this
-catches; **the pinned legacy builder drifting to new-gen is the critical
-alert** — it breaks the delegation ladder and blocks the MVP.
+`.github/workflows/upstream-drift-canary.yml` runs twice weekly.
+`tests/drift-canary.sh` checks images in `tests/canary-baseline.tsv` for CLI changes.
+If the legacy builder changes to new-gen, the workflow creates an alert issue.
+Update `canary-baseline.tsv` after you adopt upstream changes.
 
-Maintaining the baseline: when a drift is real and absorbed (code adapted,
-docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
+## Flake policy and notes
 
-## Flake policy & known gotchas
+- Network timeouts and pull errors are infrastructure flakes. Rerun via narrow dispatch.
+  Assertion failures need a diagnosis before a rerun.
+- `gh run rerun` reuses the original merge commit. Merge main into the branch
+  to test new fixes.
+- Cancelled runs show as failed checks.
+- Disk sizing affects guest behavior. A lack of disk space creates false errors.
+- Mount errors on new-gen hosts are expected in phases 4 and 5 until PR #76 lands.
+- The LVM-on-LUKS cell uses tight disk space (60 GB). Check for disk space
+  exhaustion before you diagnose regressions.
 
-- **Retry taxonomy**: GHCR connection-resets and ENOSPC during image pull
-  are infra flakes (rerun the cell via narrow dispatch); assertion failures
-  and phase errors are never rerun without a diagnosis.
-- **`gh run rerun` reuses the run's original merge commit.** If main moved
-  since (e.g. a harness fix landed), rerunning tests stale code — merge
-  main into the PR branch instead. This has bitten before.
-- **Cancelled runs surface as `fail`** in `gh pr checks`; a stuck-queued
-  workflow sometimes needs cancel + rerun to re-enter the queue.
-- **Disk sizing is part of the test.** ENOSPC inside the guest shows up as
-  misleading downstream errors (including probe misfires — see the probe
-  asymmetry note in CONTEXT.md). Cells document their disk_size rationale
-  inline in e2e-tests.yml.
-- **Mount errors on new-gen hosts are expected noise** in phases 4/5 until
-  PR #76 lands (podman fallbacks carry the migration) — don't read them as
-  the failure signal.
-- **The LVM-on-LUKS cell is the disk-tightest one** (60G, BIOS-boot + ESP +
-  separate /boot + fixed 4G /var LV before root sees anything) — an ENOSPC
-  there is the flake class to suspect first, not a regression.
+### Incident: required-checks gate configuration
 
-### Incident: `required-checks` didn't actually gate on `e2e-gate`
-
-PR #73 auto-merged 2026-07-19 while its E2E run showed one cell failing
-(the LVM-on-LUKS ENOSPC flake above). Root cause: `required-checks` — the
-one job branch protection watches — listed `[validate, cargo-deny,
-coverage, actionlint]` in its `needs`, never `e2e-gate`. The two jobs were
-siblings, not a chain, since the workflow's original introduction — this
-predates every change in this document. `required-checks` passed on the
-fast jobs alone while `e2e-gate` independently failed, and GitHub had no
-reason to block the merge.
-
-Fixed by adding `e2e-gate` to `required-checks`' `needs`. The rule going
-forward: **`required-checks` is the merge gate, so every other gate must
-feed into it** — a new CI job that isn't in that `needs` list is invisible
-to branch protection no matter how good the job itself is. (The merge
-itself needed no revert: the fix under test was validated by the other
-three cells, including the critical btrfs one, and the ENOSPC failure was
-the known flake class above.)
+PR #73 merged automatically, but one E2E cell had failed because of disk exhaustion.
+`required-checks` omitted `e2e-gate` from its `needs` list.
+The fix added `e2e-gate` to `required-checks`.
+All CI gates must feed into `required-checks`.
 
 ## Local reproduction
 
-- `just check` — everything CI's validate job runs, now including the
-  feature matrix (`test-all-features`).
-- `just e2e` / `e2e-lts` / `e2e-luks` / `e2e-lvm` — full cells locally;
-  `e2e-status`, `e2e-ssh`, `e2e-tail`, `e2e-scan`, `e2e-reboot-test` for
-  surgical iteration on a phase.
-- `just drift-canary` — the upstream probe, sans CI.
-- Cross-generation store experiments: reproduction commands in
-  docs/cfs-cli-generations.md §Reproducing (needs a `mkfs.ext4 -O verity`
-  loopback; root filesystems commonly lack the verity feature).
+- `just check` runs validation and feature matrix tests.
+- Run full scenarios locally with `just e2e` and `just e2e-lts`.
+- `just drift-canary` runs upstream checks locally.
+- `docs/cfs-cli-generations.md` lists commands for store reproduction tests.
 
-## Gaps / next automation (tracked, not yet built)
+## Future automation
 
-1. **Store-level integration test in CI**: the loopback cross-gen check
-   (legacy write → new-gen fsck) as a cheap weekly job — no VM, ~2 GB.
-2. **Nightly `cargo update --dry-run` + composefs-rs version watch** —
-   surfacing new 0.x releases early (NativeStore pins 0.7).
-3. **Merge-queue discipline**: once the stacked fleet lands, enable GitHub
-   merge queue with `required-checks` as the single required context (it
-   already tolerates skipped optional jobs).
+1. Store integration tests in CI on loopback filesystems.
+2. Scheduled version checks for composefs-rs releases.
+3. Merge queue configuration with `required-checks` as the required context.
