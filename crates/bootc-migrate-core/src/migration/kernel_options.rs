@@ -96,6 +96,8 @@ fn ci_debug_kernel_args(ci: bool) -> Vec<String> {
             "systemd.log_level=debug".into(),
             "systemd.log_target=console".into(),
             "systemd.journald.forward_to_console=1".into(),
+            "plymouth.enable=0".into(),
+            "systemd.show_status=1".into(),
         ]
     } else {
         vec![]
@@ -390,6 +392,8 @@ mod tests {
                     args.iter()
                         .any(|a| a == "systemd.journald.forward_to_console=1")
                 );
+                assert!(args.iter().any(|a| a == "plymouth.enable=0"));
+                assert!(args.iter().any(|a| a == "systemd.show_status=1"));
             } else {
                 assert!(
                     args.is_empty(),
