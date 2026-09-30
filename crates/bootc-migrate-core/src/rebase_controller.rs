@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::cross_base;
+use crate::cross_family;
 use crate::de_controller::DesktopMigrationController;
 use crate::migration;
 use crate::preflight::{self, readiness};
@@ -24,6 +25,10 @@ pub struct CoreMigrationConfig<'a> {
     pub skip_preflight: bool,
     pub force: bool,
     pub de_migrate: bool,
+    /// Proceed onto a target from another OS family with the cross-family
+    /// `/etc` policy (bootc-migrate#256). Deliberately not implied by
+    /// `force`: that flag waives warnings, this one selects a policy.
+    pub accept_cross_base: bool,
 }
 
 /// Reject target images that would corrupt the `.origin` file it is written
@@ -49,6 +54,15 @@ fn gate_decision(gate: readiness::MigrationGate) -> Result<()> {
     match gate {
         readiness::MigrationGate::Proceed => Ok(()),
         readiness::MigrationGate::Refuse(reason) => bail!("{reason}"),
+        // This entry point is the ostree→composefs conversion specifically.
+        // A composefs host reaching it means the router picked the wrong
+        // strategy, so say which one it should have picked rather than
+        // converting a repo that is not there.
+        readiness::MigrationGate::ImageSwap => bail!(
+            "System is already composefs-backed, so there is no backend to convert. \
+             Use the image swap instead: `bootc-rebase --source-backend composefs \
+             --target-backend composefs --target-image <image>`."
+        ),
         readiness::MigrationGate::ConfirmFullCopy => {
             // bootc-rebase is non-interactive by design: no prompt, just a
             // clear instruction (the migrator binary offers the y/N prompt).
@@ -81,6 +95,12 @@ impl CoreMigrationConfig<'_> {
         readiness::print_readiness(&report);
         gate_decision(readiness::gate(&report, self.force, self.skip_preflight))?;
 
+        // #256: a target from another OS family is refused unless accepted,
+        // and when accepted Phase 4 applies the cross-family /etc policy.
+        // Before the DE step and before any mutation, so a --dry-run shows
+        // the verdict too.
+        cross_family::gate(self.target_image, self.accept_cross_base)?;
+
         // #68: decide the DE step before the pipeline runs so a --dry-run shows
         // it too, and stash before anything is staged.
         let de = DesktopMigrationController::new(self.de_migrate, self.target_image);
@@ -104,7 +124,10 @@ impl CoreMigrationConfig<'_> {
             self.skip_import,
             self.bootloader,
             self.force,
-            None,
+            migration::EtcPolicy {
+                overrides: None,
+                accept_cross_base: self.accept_cross_base,
+            },
         )?;
 
         if !self.dry_run
@@ -146,12 +169,276 @@ pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
     match staged_image_from_status(&json) {
         Some(img) if staged_image_matches(target_image, img) => {
             println!("Staged deployment verified: {img}");
-            Ok(())
         }
         Some(img) => {
             bail!("bootc switch staged '{img}' but the requested target was '{target_image}'")
         }
         None => bail!("no staged deployment found after bootc switch"),
+    }
+    Ok(())
+}
+
+/// Where a composefs host keeps each deployment's `/etc` and `.origin`.
+const COMPOSEFS_DEPLOY_ROOT: &str = "/sysroot/state/deploy";
+
+/// The verity digest in `composefs=` on the kernel command line. A leading
+/// `?` marks an image booted without signature enforcement; it is not part
+/// of the digest.
+pub fn booted_composefs_verity(cmdline: &str) -> Option<&str> {
+    cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("composefs="))
+        .map(|v| v.trim_start_matches('?'))
+        .filter(|v| !v.is_empty())
+}
+
+/// The staged deployment's verity: bootc's own report when it gives one,
+/// else the most recently written deployment directory other than the
+/// booted one. `candidates` are `(verity, modified)` pairs for the
+/// directories that carry a `.origin`.
+fn pick_staged_verity(
+    reported: Option<&str>,
+    booted: Option<&str>,
+    candidates: &[(String, std::time::SystemTime)],
+) -> Option<String> {
+    if let Some(v) = reported.filter(|v| !v.is_empty()) {
+        return Some(v.to_string());
+    }
+    candidates
+        .iter()
+        .filter(|(v, _)| Some(v.as_str()) != booted)
+        .max_by_key(|(_, t)| *t)
+        .map(|(v, _)| v.clone())
+}
+
+/// The directory of the deployment `bootc switch` just staged on a
+/// composefs host.
+fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
+    let out = std::process::Command::new("bootc")
+        .args(["status", "--json"])
+        .output()
+        .context("failed to execute bootc status")?;
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let reported = json
+        .pointer("/status/staged/composefs/verity")
+        .and_then(|v| v.as_str());
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let booted = booted_composefs_verity(&cmdline);
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(COMPOSEFS_DEPLOY_ROOT)
+        .with_context(|| format!("failed to list {COMPOSEFS_DEPLOY_ROOT}"))?
+    {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.path().join(format!("{name}.origin")).exists() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        candidates.push((name, modified));
+    }
+    let verity = pick_staged_verity(reported, booted, &candidates)
+        .context("no staged composefs deployment found beside the booted one")?;
+    Ok(std::path::Path::new(COMPOSEFS_DEPLOY_ROOT).join(verity))
+}
+
+/// Arm the image-swap first-boot unit in the staged deployment.
+///
+/// On composefs, `bootc switch` merges the host's `/etc` into the new
+/// deployment at shutdown. Two things break when the host is another
+/// distribution (Dakota to Utah):
+///
+/// - The host's locally created account databases replace the target's,
+///   so the target's system users (`dbus`) are missing. The unit runs the
+///   target's `systemd-sysusers` and `ldconfig` to restore them.
+/// - A host with no SELinux policy writes the merged files unlabeled, and
+///   a target that boots enforcing then denies its own services every file
+///   in `/etc` and `/var`. When the target enforces a policy the host did
+///   not label for, the unit also runs the target's `restorecon`.
+///
+/// The unit runs before `sysinit.target`. Its own files are labelled here
+/// so the booting system can read them.
+fn schedule_image_swap_firstboot() -> Result<()> {
+    let deploy = staged_composefs_deployment()?;
+    let host = selinux::read_host_selinux_config();
+    let target = selinux::read_deployment_selinux_config(&deploy);
+    let relabel = cross_family::relabel_needed(host.as_ref(), target.as_ref());
+    let unit = cross_family::render_image_swap_firstboot_unit(relabel);
+    let etc = deploy.join("etc");
+    cross_family::install_firstboot_unit(&etc, &unit)?;
+    let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
+    let etc_ctx = "system_u:object_r:etc_t:s0";
+    let unit_dir = etc.join("systemd/system");
+    let marker = etc.join(cross_family::FIRSTBOOT_MARKER);
+    let labels = [
+        (unit_dir.join(cross_family::FIRSTBOOT_UNIT), unit_ctx),
+        (unit_dir.join("sysinit.target.wants"), unit_ctx),
+        (
+            unit_dir
+                .join("sysinit.target.wants")
+                .join(cross_family::FIRSTBOOT_UNIT),
+            unit_ctx,
+        ),
+        (
+            marker
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default(),
+            etc_ctx,
+        ),
+        (marker, etc_ctx),
+    ];
+    for (path, ctx) in &labels {
+        let mut value = ctx.as_bytes().to_vec();
+        value.push(0);
+        if let Err(e) = rustix::fs::lsetxattr(
+            path,
+            c"security.selinux",
+            &value,
+            rustix::fs::XattrFlags::empty(),
+        ) {
+            eprintln!("Warning: could not label {} as {ctx}: {e}", path.display());
+        }
+    }
+    println!(
+        "[firstboot] {} will add the target's system users and rebuild the library cache on first boot",
+        cross_family::FIRSTBOOT_UNIT
+    );
+    if relabel {
+        println!(
+            "[selinux] the target enforces SELinux and the host labelled nothing for it: \
+             {} will relabel /etc and /var on first boot",
+            cross_family::FIRSTBOOT_UNIT
+        );
+    }
+    Ok(())
+}
+
+/// libostree's record of a staged deployment awaiting finalization.
+const STAGED_DEPLOYMENT_MARKER: &str = "/run/ostree/staged-deployment";
+
+/// Complete the staged deployment now instead of at shutdown (#262).
+///
+/// libostree finalizes a staged deployment from the `ExecStop=` of
+/// `ostree-finalize-staged.service`, i.e. while the machine is going down.
+/// On a `bootc install to-disk` layout with no separate /boot partition,
+/// /boot is a bind mount of the physical root's boot directory that systemd
+/// can drop before that `ExecStop=` runs; libostree then remounts /boot
+/// read-write without checking that it is still a mountpoint and gets
+/// `EINVAL` (ostreedev/ostree#3365). The finalization fails, the bootloader
+/// entries are never written, and the next boot lands in the previous
+/// deployment with nothing on the console to say why.
+///
+/// Finalizing here, while /boot is mounted and the caller is still watching,
+/// writes the bootloader entries at once and turns that silent misboot into
+/// an error. Only an ostree-backed staging leaves the marker this reads; a
+/// composefs host's `bootc switch` is finalized by bootc itself and is left
+/// alone.
+///
+/// Call this last. Finalization marks the deployment root immutable, so every
+/// write into it (the cross-base remap and /etc policy, their reports, the
+/// SELinux relabel marker, the desktop-migration step) must come before.
+fn finalize_staged_now() -> Result<()> {
+    if !std::path::Path::new(STAGED_DEPLOYMENT_MARKER).exists() {
+        return Ok(());
+    }
+    ensure_boot_mounted();
+    println!("Finalizing the staged deployment now (writing the bootloader entries)...");
+    // Stopping the unit runs its ExecStop= — the same `ostree admin
+    // finalize-staged`, in the same sandbox, that shutdown would have run —
+    // and leaves nothing for shutdown to repeat. Fall back to the command
+    // itself where the unit is not active.
+    let unit = "ostree-finalize-staged.service";
+    let unit_active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let status = if unit_active {
+        std::process::Command::new("systemctl")
+            .args(["stop", unit])
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to execute systemctl stop {unit}: {e}"))?
+    } else {
+        std::process::Command::new("ostree")
+            .args(["admin", "finalize-staged"])
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to execute ostree admin finalize-staged: {e}"))?
+    };
+    if !status.success() {
+        bail!(
+            "finalizing the staged deployment failed (exit {status}); the previous \
+             deployment would boot next. See `journalctl -u {unit}` and \
+             https://github.com/ostreedev/ostree/issues/3365."
+        );
+    }
+    let out = std::process::Command::new("ostree")
+        .args(["admin", "status"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to execute ostree admin status: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match finalized_state(&stdout) {
+        FinalizedState::Pending => {
+            println!("Staged deployment finalized: it is the pending boot target.");
+            Ok(())
+        }
+        FinalizedState::StillStaged => bail!(
+            "the deployment is still staged after finalization; the previous deployment \
+             would boot next"
+        ),
+        FinalizedState::NoOtherDeployment => bail!(
+            "no pending deployment after finalization:\n{}",
+            stdout.trim()
+        ),
+    }
+}
+
+/// Mount /boot if it is not, so the finalization that follows has a
+/// mountpoint to remount. Best effort: a failure here surfaces as the
+/// finalization's own error.
+fn ensure_boot_mounted() {
+    let mounted = std::process::Command::new("findmnt")
+        .args(["-n", "/boot"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if mounted {
+        return;
+    }
+    eprintln!("Note: /boot is not mounted; mounting it before finalization (#262).");
+    let started = std::process::Command::new("systemctl")
+        .args(["start", "boot.mount"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !started {
+        let _ = std::process::Command::new("mount").arg("/boot").status();
+    }
+}
+
+/// What `ostree admin status` says about the deployment that is not booted.
+#[derive(Debug, PartialEq, Eq)]
+enum FinalizedState {
+    /// A deployment is listed as `(pending)`: finalized, boots next.
+    Pending,
+    /// A deployment is still listed as `(staged)`.
+    StillStaged,
+    /// Only the booted deployment is listed.
+    NoOtherDeployment,
+}
+
+/// Classify `ostree admin status` output after a finalization attempt.
+fn finalized_state(status_stdout: &str) -> FinalizedState {
+    let lines: Vec<&str> = status_stdout.lines().map(str::trim).collect();
+    if lines.iter().any(|l| l.ends_with("(staged)")) {
+        FinalizedState::StillStaged
+    } else if lines.iter().any(|l| l.ends_with("(pending)")) {
+        FinalizedState::Pending
+    } else {
+        FinalizedState::NoOtherDeployment
     }
 }
 
@@ -203,6 +490,10 @@ pub struct ImageSwapConfig<'a> {
     pub dry_run: bool,
     pub force: bool,
     pub de_migrate: bool,
+    /// Proceed onto a target from another OS family (bootc-migrate#256).
+    /// This route stages with `bootc switch` and applies no `/etc` policy
+    /// of its own, so acceptance here means the native merge's result.
+    pub accept_cross_base: bool,
 }
 
 /// Scenario A' (issue #66): swap the image on a composefs-backed system —
@@ -231,6 +522,19 @@ impl ImageSwapConfig<'_> {
             );
         }
 
+        // #256: refuse a cross-family target unless accepted. Unlike the
+        // conversion route there is no policy to apply afterwards — `bootc
+        // switch`'s native merge stages the /etc — so say so.
+        cross_family::gate(self.target_image, self.accept_cross_base)?;
+        if self.accept_cross_base {
+            eprintln!(
+                "Note: the image swap stages /etc with `bootc switch`'s native merge; the \
+                 cross-family /etc policy is not applied on this route. If the target is \
+                 from another OS family, expect to reconcile family-specific configuration \
+                 by hand after the reboot."
+            );
+        }
+
         // #68: decide the DE step before staging so a --dry-run shows it too.
         let de = DesktopMigrationController::new(self.de_migrate, self.target_image);
         let de_plan = de.plan_or_report();
@@ -254,6 +558,10 @@ impl ImageSwapConfig<'_> {
         if let Some(plan) = &de_plan {
             de.run_post_switch(plan, false)?;
         }
+
+        schedule_image_swap_firstboot()?;
+
+        finalize_staged_now()?;
 
         println!(
             "Image swap staged. Reboot to enter the new deployment; the previous \
@@ -299,7 +607,7 @@ impl OstreeDeployConfig<'_> {
         println!("Checking system state...");
         let report = preflight::run_preflight_checks()?;
 
-        if !report.is_bootc_ostree && !self.force {
+        if report.booted_backend != Some(crate::rebase_plan::Backend::Ostree) && !self.force {
             bail!(
                 "System is not booted into an OSTree deployment. Cannot perform an ostree re-base."
             );
@@ -377,6 +685,9 @@ impl OstreeDeployConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
+        // #262: last, after every write into the deployment root above.
+        finalize_staged_now()?;
+
         println!(
             "Re-base staged. Reboot to enter the new deployment; the previous \
              deployment remains in the boot menu as rollback."
@@ -388,6 +699,63 @@ impl OstreeDeployConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn booted_composefs_verity_table() {
+        assert_eq!(
+            booted_composefs_verity("root=UUID=1 composefs=abc12 rw"),
+            Some("abc12")
+        );
+        assert_eq!(
+            booted_composefs_verity("composefs=?abc12 quiet"),
+            Some("abc12")
+        );
+        assert_eq!(booted_composefs_verity("rd.composefs=1 root=UUID=1"), None);
+        assert_eq!(booted_composefs_verity("ostree=/ostree/boot.1/x/0"), None);
+        assert_eq!(booted_composefs_verity("composefs= quiet"), None);
+    }
+
+    #[test]
+    fn pick_staged_verity_table() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = |s| UNIX_EPOCH + Duration::from_secs(s);
+        let c = vec![("base".to_string(), t(10)), ("new".to_string(), t(20))];
+        // bootc's report wins.
+        assert_eq!(
+            pick_staged_verity(Some("x"), Some("base"), &c).as_deref(),
+            Some("x")
+        );
+        // Otherwise the newest non-booted deployment.
+        assert_eq!(
+            pick_staged_verity(None, Some("base"), &c).as_deref(),
+            Some("new")
+        );
+        // The booted one is never picked, even when newest.
+        let c2 = vec![("old".to_string(), t(5)), ("base".to_string(), t(30))];
+        assert_eq!(
+            pick_staged_verity(None, Some("base"), &c2).as_deref(),
+            Some("old")
+        );
+        assert_eq!(pick_staged_verity(Some(""), Some("base"), &c[..1]), None);
+    }
+
+    #[test]
+    fn finalized_state_table() {
+        let staged = "  default 594b.0 (staged)\n    origin: <unknown origin type>\n* default bef2.0\n    origin: <unknown origin type>\n";
+        let pending = "  default 594b.0 (pending)\n    origin: <unknown origin type>\n* default bef2.0\n    origin: <unknown origin type>\n";
+        let booted_only = "* default bef2.0\n    origin: <unknown origin type>\n";
+        let rollback_only =
+            "* default bef2.0\n    origin: <unknown origin type>\n  default 1234.0 (rollback)\n";
+        for (input, want) in [
+            (staged, FinalizedState::StillStaged),
+            (pending, FinalizedState::Pending),
+            (booted_only, FinalizedState::NoOtherDeployment),
+            (rollback_only, FinalizedState::NoOtherDeployment),
+            ("", FinalizedState::NoOtherDeployment),
+        ] {
+            assert_eq!(finalized_state(input), want, "input: {input:?}");
+        }
+    }
 
     #[test]
     fn staged_image_extracted_from_status_json() {

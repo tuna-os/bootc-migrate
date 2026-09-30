@@ -15,12 +15,83 @@
 use serde::Serialize;
 use std::path::Path;
 
-/// Identity of a base image, from `/usr/lib/os-release`.
+/// Identity of a base image, from `/usr/lib/os-release`, plus the
+/// package-manager family its `/usr/bin` reveals (bootc-migrate#256).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BaseInfo {
     pub id: String,
     pub id_like: Option<String>,
     pub version_id: Option<String>,
+    /// The package manager the image ships, when a known one is found.
+    /// `os-release` alone misclassifies real pairs: Bluefin LTS declares
+    /// `ID=centos ID_LIKE="rhel fedora"` and Dakota `ID=bluefin-dakota
+    /// ID_LIKE="org.gnome.os"`, which share no name yet are both dnf-managed
+    /// Fedora-lineage images with the same `/etc` conventions. The package
+    /// manager is the second signal [`lineage`] uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkg_family: Option<PkgFamily>,
+}
+
+/// The package-manager family an image is built with. The *frontend*, not
+/// the archive format: Fedora and openSUSE both use rpm, and their `/etc`
+/// (repositories, PAM, service defaults) still has nothing in common.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PkgFamily {
+    /// dnf / dnf5 / microdnf / yum / rpm-ostree: Fedora, RHEL, CentOS and
+    /// their derivatives.
+    Dnf,
+    /// zypper: openSUSE and SUSE.
+    Zypp,
+    /// apt / dpkg: Debian and Ubuntu.
+    Apt,
+    /// pacman: Arch.
+    Pacman,
+    /// apk: Alpine.
+    Apk,
+}
+
+impl PkgFamily {
+    /// The name printed in gate messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            PkgFamily::Dnf => "dnf",
+            PkgFamily::Zypp => "zypper",
+            PkgFamily::Apt => "apt",
+            PkgFamily::Pacman => "pacman",
+            PkgFamily::Apk => "apk",
+        }
+    }
+}
+
+/// `usr/bin` names that identify a [`PkgFamily`]. Any one of them is enough;
+/// a distribution ships at least one, and image builders keep the frontend
+/// even when they strip the rest.
+pub const PKG_FAMILY_BINARIES: &[(&str, PkgFamily)] = &[
+    ("dnf", PkgFamily::Dnf),
+    ("dnf5", PkgFamily::Dnf),
+    ("dnf-3", PkgFamily::Dnf),
+    ("microdnf", PkgFamily::Dnf),
+    ("yum", PkgFamily::Dnf),
+    ("rpm-ostree", PkgFamily::Dnf),
+    ("zypper", PkgFamily::Zypp),
+    ("apt", PkgFamily::Apt),
+    ("apt-get", PkgFamily::Apt),
+    ("dpkg", PkgFamily::Apt),
+    ("pacman", PkgFamily::Pacman),
+    ("apk", PkgFamily::Apk),
+];
+
+/// The package-manager family of the image rooted at `root`, from the
+/// binaries listed in [`PKG_FAMILY_BINARIES`]. A symlink counts even when
+/// dangling (`dnf -> dnf5` inside a partial registry extraction), so the
+/// check is on the directory entry, not on a resolved target.
+pub fn pkg_family_from_root(root: &Path) -> Option<PkgFamily> {
+    let bin = root.join("usr/bin");
+    PKG_FAMILY_BINARIES
+        .iter()
+        .find(|(name, _)| std::fs::symlink_metadata(bin.join(name)).is_ok())
+        .map(|(_, family)| *family)
 }
 
 /// One `/usr/lib/sysusers.d/*.conf` allocation. Only `u`/`g` lines with an
@@ -89,6 +160,10 @@ pub struct ProbeFiles {
     pub has_systemd_boot_payload: bool,
     /// `/usr/bin/bootc` (or `/usr/lib/bootc/`) present.
     pub has_bootc: bool,
+    /// `/usr/bin/bootupctl` present together with `/usr/lib/bootupd/updates`:
+    /// the image can install a bootloader through bootupd, which bootc's
+    /// ostree backend requires (#260).
+    pub has_bootupd: bool,
     /// Any `/usr/lib/dracut/modules.d/*composefs*` directory name present —
     /// signals the image's initramfs already integrates composefs support,
     /// so it likely doesn't need regenerating for that reason.
@@ -96,6 +171,8 @@ pub struct ProbeFiles {
     /// Content of a `/usr/lib/bootc/install/*.toml` file, if present (bootc
     /// install config — may declare a `root-fs` filesystem expectation).
     pub bootc_install_config: Option<String>,
+    /// The package-manager family found under `usr/bin` (#256).
+    pub pkg_family: Option<PkgFamily>,
 }
 
 /// What the target image supports, assembled from [`ProbeFiles`].
@@ -110,6 +187,9 @@ pub struct Capabilities {
     pub systemd_boot_payload: bool,
     /// Ships bootc (required for switch-based strategies).
     pub bootc_present: bool,
+    /// Ships bootupd (required by `bootc install` on the ostree backend,
+    /// the composefs → ostree route's engine; #260).
+    pub bootupd_present: bool,
     /// Desktop environments inventoried from session files (`gnome`, `kde`, …).
     pub desktops: Vec<String>,
     /// Base identity for cross-base gating (#67).
@@ -171,6 +251,7 @@ pub fn parse_base_info(content: &str) -> Option<BaseInfo> {
         id: id?,
         id_like,
         version_id,
+        pkg_family: None,
     })
 }
 
@@ -301,8 +382,16 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
         ostree_capable: probe.prepare_root.is_some(),
         systemd_boot_payload: probe.has_systemd_boot_payload,
         bootc_present: probe.has_bootc,
+        bootupd_present: probe.has_bootupd,
         desktops: desktops_from_sessions(&probe.session_files),
-        base: probe.os_release.as_deref().and_then(parse_base_info),
+        base: probe
+            .os_release
+            .as_deref()
+            .and_then(parse_base_info)
+            .map(|base| BaseInfo {
+                pkg_family: probe.pkg_family,
+                ..base
+            }),
         sysusers: probe
             .sysusers
             .iter()
@@ -381,6 +470,66 @@ pub fn is_cross_base(host: &BaseInfo, target: &BaseInfo) -> bool {
     !(like_contains(&host.id_like, &target.id) || like_contains(&target.id_like, &host.id))
 }
 
+/// How two bases relate, at the granularity the composefs conversion route
+/// cares about (bootc-migrate#256).
+///
+/// [`is_cross_base`] answers "do these two images disagree on identity at
+/// all?" — Bluefin and Dakota do (different `ID`, diverging `wheel` gid),
+/// and the OstreeDeploy route rightly plans a remap for them. But both
+/// declare `ID_LIKE=fedora`: they are the same *family*, their `/etc`
+/// defaults share a vendor lineage, and the same-lineage 3-way merge is the
+/// right merge for them. Fedora → openSUSE shares nothing, and there the
+/// same merge quietly carries one family's `/etc` onto the other.
+///
+/// `ID_LIKE` is one signal, not the verdict. Downstream images relabel
+/// themselves freely (Bluefin LTS is `centos`, Dakota is
+/// `ID_LIKE="org.gnome.os"`), so the package-manager family the image
+/// ships ([`BaseInfo::pkg_family`]) is the second: two dnf-managed images
+/// share Fedora's `/etc` conventions whatever their `ID_LIKE` says, and a
+/// dnf image and a zypper image never do, whatever theirs say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lineage {
+    /// Identical `ID`.
+    SameBase,
+    /// Different `ID`, but a shared family: one side's `ID_LIKE` names the
+    /// other's `ID`, the two `ID_LIKE` lists intersect, or both ship the
+    /// same package-manager family.
+    SameFamily,
+    /// No identity overlap and a different package-manager family on each
+    /// side: positively cross-family.
+    CrossFamily,
+    /// No identity overlap and no package-manager evidence on at least one
+    /// side. Not proven either way; callers warn and keep the standard
+    /// merge rather than refuse or invert the policy on a guess.
+    Unknown,
+}
+
+/// Classify the relation between `host` and `target` — see [`Lineage`].
+pub fn lineage(host: &BaseInfo, target: &BaseInfo) -> Lineage {
+    if host.id == target.id {
+        return Lineage::SameBase;
+    }
+    let words = |like: &Option<String>| -> Vec<String> {
+        like.as_deref()
+            .map(|l| l.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let host_like = words(&host.id_like);
+    let target_like = words(&target.id_like);
+    let related = host_like.contains(&target.id)
+        || target_like.contains(&host.id)
+        || host_like.iter().any(|w| target_like.contains(w));
+    if related {
+        return Lineage::SameFamily;
+    }
+    match (host.pkg_family, target.pkg_family) {
+        (Some(h), Some(t)) if h == t => Lineage::SameFamily,
+        (Some(_), Some(_)) => Lineage::CrossFamily,
+        _ => Lineage::Unknown,
+    }
+}
+
 /// Read this host's own base identity from `/etc/os-release` (falling back
 /// to `/usr/lib/os-release`, the same precedence os-release(5) specifies),
 /// for cross-base gating (#67) against a target image's scanned identity.
@@ -391,6 +540,25 @@ pub fn read_host_base_info() -> Option<BaseInfo> {
         Path::new("/etc/os-release"),
         Path::new("/usr/lib/os-release"),
     )
+    .map(|base| BaseInfo {
+        pkg_family: pkg_family_from_root(Path::new("/")),
+        ..base
+    })
+}
+
+/// Read a mounted image's base identity from its root: `usr/lib/os-release`
+/// first (the vendor copy, always present in a bootc image), then
+/// `etc/os-release`. Registry-independent — this is what Phase 4 uses to
+/// decide the cross-family policy authoritatively (#256).
+pub fn read_base_info_from_root(root: &Path) -> Option<BaseInfo> {
+    read_base_info_from(
+        &root.join("usr/lib/os-release"),
+        &root.join("etc/os-release"),
+    )
+    .map(|base| BaseInfo {
+        pkg_family: pkg_family_from_root(root),
+        ..base
+    })
 }
 
 /// Testable core of [`read_host_base_info`]: try `primary`, falling back to
@@ -594,6 +762,7 @@ mod tests {
             session_files: vec!["gnome.desktop".into()],
             has_systemd_boot_payload: true,
             has_bootc: true,
+            has_bootupd: true,
             ..Default::default()
         };
         let caps = assemble(&probe);
@@ -601,6 +770,7 @@ mod tests {
         assert!(caps.ostree_capable);
         assert!(caps.systemd_boot_payload);
         assert!(caps.bootc_present);
+        assert!(caps.bootupd_present);
         assert_eq!(caps.desktops, vec!["gnome"]);
         assert_eq!(caps.base.as_ref().unwrap().id, "fedora");
         assert_eq!(caps.sysusers.len(), 1);
@@ -690,21 +860,214 @@ mod tests {
             id: "fedora".into(),
             id_like: None,
             version_id: None,
+            pkg_family: None,
         };
         let dakota = BaseInfo {
             id: "dakota".into(),
             id_like: Some("fedora".into()),
             version_id: None,
+            pkg_family: None,
         };
         let centos = BaseInfo {
             id: "centos".into(),
             id_like: Some("rhel".into()),
             version_id: None,
+            pkg_family: None,
         };
         assert!(!is_cross_base(&fedora, &fedora));
         assert!(!is_cross_base(&fedora, &dakota));
         assert!(!is_cross_base(&dakota, &fedora));
         assert!(is_cross_base(&fedora, &centos));
         assert!(is_cross_base(&dakota, &centos));
+    }
+
+    /// The composefs route keys on family, not bare identity: Bluefin and
+    /// Dakota are cross-base to `is_cross_base` (and correctly so for the
+    /// OstreeDeploy remap) yet same-family here, so the MVP path keeps its
+    /// same-lineage merge; Fedora and openSUSE are the pair that must not.
+    /// `ID_LIKE` decides when it can; the package-manager family decides
+    /// the rest (Bluefin LTS is `centos`, Dakota `ID_LIKE=org.gnome.os`).
+    #[test]
+    fn lineage_table() {
+        use PkgFamily::*;
+        let base = |id: &str, like: Option<&str>, pkg: Option<PkgFamily>| BaseInfo {
+            id: id.into(),
+            id_like: like.map(Into::into),
+            version_id: None,
+            pkg_family: pkg,
+        };
+        let cases = [
+            (
+                "fedora",
+                None,
+                None,
+                "fedora",
+                None,
+                None,
+                Lineage::SameBase,
+            ),
+            // Same ID, even with different ID_LIKE noise.
+            (
+                "fedora",
+                None,
+                None,
+                "fedora",
+                Some("rhel"),
+                None,
+                Lineage::SameBase,
+            ),
+            // One side's ID_LIKE names the other's ID (either direction).
+            (
+                "fedora",
+                None,
+                None,
+                "dakota",
+                Some("fedora"),
+                None,
+                Lineage::SameFamily,
+            ),
+            (
+                "dakota",
+                Some("fedora"),
+                None,
+                "fedora",
+                None,
+                None,
+                Lineage::SameFamily,
+            ),
+            // Both derive from the same parent: the ID_LIKE lists intersect.
+            (
+                "bluefin",
+                Some("fedora"),
+                None,
+                "dakota",
+                Some("fedora"),
+                None,
+                Lineage::SameFamily,
+            ),
+            (
+                "centos",
+                Some("rhel fedora"),
+                None,
+                "dakota",
+                Some("fedora"),
+                None,
+                Lineage::SameFamily,
+            ),
+            // ID_LIKE contradicts nothing but proves nothing: the package
+            // manager decides. The real Bluefin LTS -> Dakota pair.
+            (
+                "centos",
+                Some("rhel fedora"),
+                Some(Dnf),
+                "bluefin-dakota",
+                Some("org.gnome.os"),
+                Some(Dnf),
+                Lineage::SameFamily,
+            ),
+            // Same archive format, different family: rpm is not a lineage.
+            (
+                "fedora",
+                None,
+                Some(Dnf),
+                "opensuse-tumbleweed",
+                Some("opensuse suse"),
+                Some(Zypp),
+                Lineage::CrossFamily,
+            ),
+            (
+                "bluefin",
+                Some("fedora"),
+                Some(Dnf),
+                "opensuse-tumbleweed",
+                Some("opensuse suse"),
+                Some(Zypp),
+                Lineage::CrossFamily,
+            ),
+            (
+                "fedora",
+                None,
+                Some(Dnf),
+                "debian",
+                None,
+                Some(Apt),
+                Lineage::CrossFamily,
+            ),
+            (
+                "ubuntu",
+                Some("debian"),
+                Some(Apt),
+                "arch",
+                None,
+                Some(Pacman),
+                Lineage::CrossFamily,
+            ),
+            // ID_LIKE overlap wins over a package-manager mismatch.
+            (
+                "fedora",
+                None,
+                Some(Dnf),
+                "dakota",
+                Some("fedora"),
+                None,
+                Lineage::SameFamily,
+            ),
+            // No overlap and no package-manager evidence on one side:
+            // neither proven nor refuted.
+            (
+                "fedora",
+                None,
+                Some(Dnf),
+                "debian",
+                None,
+                None,
+                Lineage::Unknown,
+            ),
+            ("fedora", None, None, "debian", None, None, Lineage::Unknown),
+            (
+                "centos",
+                Some("rhel fedora"),
+                Some(Dnf),
+                "bluefin-dakota",
+                Some("org.gnome.os"),
+                None,
+                Lineage::Unknown,
+            ),
+        ];
+        for (h, hl, hp, t, tl, tp, want) in cases {
+            assert_eq!(
+                lineage(&base(h, hl, hp), &base(t, tl, tp)),
+                want,
+                "{h} ({hl:?}, {hp:?}) -> {t} ({tl:?}, {tp:?})"
+            );
+        }
+    }
+
+    /// The package-manager fingerprint is read off directory entries, so a
+    /// dangling symlink (a partial registry extraction) still counts.
+    #[test]
+    fn pkg_family_from_root_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(pkg_family_from_root(root), None);
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        assert_eq!(pkg_family_from_root(root), None);
+        std::os::unix::fs::symlink("dnf5", root.join("usr/bin/dnf")).unwrap();
+        assert_eq!(pkg_family_from_root(root), Some(PkgFamily::Dnf));
+        std::fs::remove_file(root.join("usr/bin/dnf")).unwrap();
+        std::fs::write(root.join("usr/bin/zypper"), b"").unwrap();
+        assert_eq!(pkg_family_from_root(root), Some(PkgFamily::Zypp));
+    }
+
+    #[test]
+    fn assemble_attaches_pkg_family_to_base() {
+        let probe = ProbeFiles {
+            os_release: Some("ID=fedora\n".into()),
+            pkg_family: Some(PkgFamily::Dnf),
+            ..Default::default()
+        };
+        let caps = assemble(&probe);
+        assert_eq!(caps.base.as_ref().unwrap().pkg_family, Some(PkgFamily::Dnf));
+        assert!(caps.to_json().contains("\"pkg_family\": \"dnf\""));
     }
 }

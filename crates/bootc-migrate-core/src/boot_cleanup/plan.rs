@@ -357,11 +357,27 @@ pub fn plan_cleanup(
 
     // Sanity-check the audit itself before honoring any selection built on
     // top of it: a mis-resolved ESP makes every entry look dead.
+    // Firmware-managed entries (PXE, EFI Shell, Setup, removable fallback)
+    // do not point to loaders on the ESP, so they are not evidence about
+    // whether the ESP was resolved correctly.
     let loader_entries = audited
         .iter()
+        .filter(|a| !a.flags.contains(&AuditFlag::FirmwareManaged))
         .filter(|a| a.entry.loader_path.is_some())
         .count();
-    if loader_entries > 0 && !audited.iter().any(is_bootable) {
+    // "At least the booted entry's loader must resolve" only holds when
+    // BootCurrent itself names an NVRAM entry with a loader path. On a
+    // removable-media fallback boot (BootCurrent points at something like
+    // `UEFI Misc Device`, which firmware ran directly with no loader path
+    // recorded at all) there was never a loader entry for this boot to
+    // resolve, so an audit with no bootable entry is expected, not
+    // evidence the ESP was mis-resolved.
+    let booted_entry_has_no_loader = facts.boot_current.as_deref().is_some_and(|id| {
+        audited
+            .iter()
+            .any(|a| a.entry.id.eq_ignore_ascii_case(id) && a.entry.loader_path.is_none())
+    });
+    if loader_entries > 0 && !booted_entry_has_no_loader && !audited.iter().any(is_bootable) {
         return Err(PlanError::EspEvidenceImplausible { loader_entries });
     }
 
@@ -1032,6 +1048,49 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn plan_cleanup_allows_cleanup_on_firmware_fallback_boot() {
+        // Issue #205: a VM/machine booted via removable fallback (BootCurrent has
+        // no loader path, e.g. UEFI Misc Device) where firmware-managed entries
+        // like EFI Internal Shell carry loader paths in the firmware volume (Dead)
+        // and only dead OS installs remain to be cleaned up.
+        // Firmware-managed entries must not count toward EspEvidenceImplausible.
+        let entries = vec![
+            audited("0000", "UiApp", None, &[AuditFlag::FirmwareManaged]),
+            audited("0001", "UEFI Misc Device", None, &[]),
+            audited(
+                "0006",
+                "EFI Internal Shell",
+                Some("\\EFI\\Shell.efi"),
+                &[AuditFlag::FirmwareManaged, AuditFlag::Dead],
+            ),
+            audited(
+                "0009",
+                "E2E Stale Install",
+                Some("\\EFI\\e2e-stale\\bootx64.efi"),
+                &[AuditFlag::Dead],
+            ),
+        ];
+        let facts = NvramFacts {
+            boot_current: Some("0001".to_string()),
+            boot_order: Some("0009,0000,0001,0006".to_string()),
+            rollback_entry_id: None,
+        };
+        let selection = CleanupSelection {
+            delete_ids: vec!["0009".to_string()],
+            renames: Vec::new(),
+        };
+        let plan = plan_cleanup(&entries, &facts, &selection).expect("cleanup should succeed");
+        assert_eq!(
+            plan.ops,
+            vec![PlannedOp::Delete {
+                id: "0009".to_string(),
+                label: "E2E Stale Install".to_string(),
+                flags: vec![AuditFlag::Dead],
+            }]
         );
     }
 

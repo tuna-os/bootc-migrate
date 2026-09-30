@@ -36,7 +36,7 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 "  — no changes will actually be made",
-                Style::default().fg(SUBTLE),
+                Style::default().fg(MUTED),
             ),
         ])
     } else {
@@ -161,6 +161,12 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(
             "  • ⚠ Preflight checks are SKIPPED",
             Style::default().fg(DANGER),
+        )));
+    }
+    if app.opt_accept_cross_base {
+        lines.push(Line::from(Span::styled(
+            "  • ⚠ Cross-family target accepted: the target's /etc defaults win; displaced edits kept as .rebase-old",
+            Style::default().fg(AMBER),
         )));
     }
     lines

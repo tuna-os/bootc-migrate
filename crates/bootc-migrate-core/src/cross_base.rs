@@ -233,9 +233,19 @@ pub fn gate_cross_base(
             );
             Ok(None)
         }
-        CrossBaseVerdict::SameLineage => Ok(None),
+        CrossBaseVerdict::SameLineage => {
+            // Say so: a silent pass is indistinguishable from the #191 bug
+            // (a gate that stopped gating), for the operator and for the E2E
+            // harness alike.
+            println!("{SAME_LINEAGE_NOTE}");
+            Ok(None)
+        }
     }
 }
+
+/// Printed when the gate checked the pair and found one lineage.
+pub const SAME_LINEAGE_NOTE: &str =
+    "Cross-base check: host and target share an OS lineage; no UID/GID remap is needed.";
 
 /// #80: print (read-only, before staging) any system accounts the target
 /// image's `sysusers.d` declares that this host's live identity DB lacks —
@@ -250,9 +260,17 @@ pub fn warn_identity_merge_gap(target_image: &str) {
     else {
         return;
     };
-    let host_passwd =
-        remap::parse_passwd(&std::fs::read_to_string("/etc/passwd").unwrap_or_default());
-    let host_group = remap::parse_group(&std::fs::read_to_string("/etc/group").unwrap_or_default());
+    // EL10 bootc images keep system accounts in /usr/lib/passwd and
+    // /usr/lib/group (nss-altfiles), not in /etc: reading /etc alone listed
+    // dbus, gdm, chrony… as missing on an AlmaLinux host that has them all.
+    let read_db = |etc: &str, usr: &str| {
+        let mut all = std::fs::read_to_string(etc).unwrap_or_default();
+        all.push('\n');
+        all.push_str(&std::fs::read_to_string(usr).unwrap_or_default());
+        all
+    };
+    let host_passwd = remap::parse_passwd(&read_db("/etc/passwd", "/usr/lib/passwd"));
+    let host_group = remap::parse_group(&read_db("/etc/group", "/usr/lib/group"));
     let missing = remap::missing_target_sysusers(&caps.sysusers, &host_passwd, &host_group);
     if missing.is_empty() {
         return;

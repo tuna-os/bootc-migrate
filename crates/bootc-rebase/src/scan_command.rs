@@ -50,6 +50,10 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
         if caps.bootc_present { "yes" } else { "no" }
     );
     println!(
+        "bootupd present:       {}",
+        if caps.bootupd_present { "yes" } else { "no" }
+    );
+    println!(
         "Desktops:              {}",
         if caps.desktops.is_empty() {
             "none".to_string()
