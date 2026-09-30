@@ -287,22 +287,29 @@ FROM BASE_IMAGE_PLACEHOLDER
 # which is exactly what we want.
 RUN mkdir -p /usr/lib/systemd/system-preset && \
     echo 'enable sshd.service' > /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
-    echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
+    echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
+    echo 'enable ssh.service' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
+    echo 'enable ssh.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
 RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
+RUN systemctl enable ssh.service && systemctl enable ssh.socket || true
 # Direct symlink fallback in case systemctl enable was a no-op
 RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
-    ln -sf /usr/lib/systemd/system/sshd.service \
-           /usr/lib/systemd/system/multi-user.target.wants/sshd.service
+    for u in sshd.service ssh.service; do \
+        if [ -f "/usr/lib/systemd/system/$u" ]; then \
+            ln -sf "/usr/lib/systemd/system/$u" "/usr/lib/systemd/system/multi-user.target.wants/$u"; \
+        fi; \
+    done
 # NOTE: e2e-sshd.socket, PermitRootLogin, and other user-specific /etc
-# customizations are baked into the base image here for Bluefin's first boot.
+# customizations are baked into the base image here for the first boot.
 # The ComposeFS 3-way merge will drop these (old==cur, new absent), but
 # Phase 4's `ensure_e2e_ssh_socket` recreates them in the deploy /etc so
-# they're present on the Dakota composefs boot too.
-RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
+# they're present on the target composefs boot too.
+RUN mkdir -p /etc/ssh && \
+    echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
     echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config && \
     echo 'Port 22' >> /etc/ssh/sshd_config
-# Disable firewalld (CentOS Stream 10 blocks SSH by default)
-RUN systemctl disable firewalld 2>/dev/null || true
+# Disable firewalld / ufw / SuSEfirewall (CentOS Stream 10 / Ubuntu block SSH by default)
+RUN systemctl disable firewalld ufw SuSEfirewall2 2>/dev/null || true
 # e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
 RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
@@ -384,11 +391,14 @@ elif [ -f "$CHECKPOINT" ]; then
     CKPT_MNT="/tmp/mnt-e2e-ckpt"
     sudo mkdir -p "$CKPT_MNT"
     sudo mount "$CKPT_ROOT" "$CKPT_MNT"
-    CKPT_SSH="$CKPT_MNT/ostree/deploy/default/var/roothome/.ssh"
-    sudo mkdir -p "$CKPT_SSH"
-    sudo chmod 700 "$CKPT_SSH"
-    sudo cp ./test_key.pub "$CKPT_SSH/authorized_keys"
-    sudo chmod 600 "$CKPT_SSH/authorized_keys"
+    for ckpt_ssh in "$CKPT_MNT"/ostree/deploy/*/var/roothome/.ssh "$CKPT_MNT"/ostree/deploy/*/var/root/.ssh "$CKPT_MNT"/state/os/*/var/roothome/.ssh "$CKPT_MNT"/state/os/*/var/root/.ssh; do
+        if [ -d "$(dirname "$ckpt_ssh")" ]; then
+            sudo mkdir -p "$ckpt_ssh"
+            sudo chmod 700 "$ckpt_ssh"
+            sudo cp ./test_key.pub "$ckpt_ssh/authorized_keys"
+            sudo chmod 600 "$ckpt_ssh/authorized_keys"
+        fi
+    done
     sudo umount "$CKPT_MNT"
     sudo losetup -d "$CKPT_LOOP"
 else
@@ -707,13 +717,14 @@ else
 fi
 echo "stateroot /var on disk: $STATEROOT_VAR"
 
-# Inject SSH key to root home (which is symlinked to /var/roothome on OSTree)
-ROOT_SSH_DIR="$STATEROOT_VAR/roothome/.ssh"
-sudo mkdir -p "$ROOT_SSH_DIR"
-sudo chmod 700 "$ROOT_SSH_DIR"
-sudo cp ./test_key.pub "$ROOT_SSH_DIR/authorized_keys"
-sudo chmod 600 "$ROOT_SSH_DIR/authorized_keys"
-sudo chown -R 0:0 "$ROOT_SSH_DIR"
+# Inject SSH key to root home (which is symlinked to /var/roothome on OSTree, or /var/root)
+for rhome in "$STATEROOT_VAR/roothome/.ssh" "$STATEROOT_VAR/root/.ssh"; do
+    sudo mkdir -p "$rhome"
+    sudo chmod 700 "$rhome"
+    sudo cp ./test_key.pub "$rhome/authorized_keys"
+    sudo chmod 600 "$rhome/authorized_keys"
+    sudo chown -R 0:0 "$rhome"
+done
 
 # Ensure SSH permits root login (already in derived image, but double-check)
 SSHD_CONFIG_DIR="$STATEROOT_VAR/etc/ssh"
@@ -2212,8 +2223,15 @@ if [ "$E2E_CROSS_FAMILY" = "1" ]; then
 set -e
 test -f /etc/default/useradd || { echo "FAIL: source ships no /etc/default/useradd"; exit 1; }
 echo "# e2e cross-family edit" >> /etc/default/useradd
-test -f /etc/dnf/dnf.conf || { echo "FAIL: source ships no /etc/dnf/dnf.conf"; exit 1; }
-echo "max_parallel_downloads=20" >> /etc/dnf/dnf.conf
+if [ -f /etc/dnf/dnf.conf ]; then
+    echo "max_parallel_downloads=20" >> /etc/dnf/dnf.conf
+elif [ -f /etc/zypp/zypp.conf ]; then
+    echo "download.max_concurrent_connections=20" >> /etc/zypp/zypp.conf
+elif [ -f /etc/pacman.conf ]; then
+    echo "ParallelDownloads=20" >> /etc/pacman.conf
+elif [ -f /etc/dpkg/dpkg.cfg ]; then
+    echo "# e2e cross-family edit" >> /etc/dpkg/dpkg.cfg
+fi
 echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' ')"
 CROSSFIX
 fi
@@ -2367,11 +2385,26 @@ grep -q "e2e cross-family edit" "$ETC/default/useradd" \
     && { echo "FAIL: /etc/default/useradd still carries the source edit (target default did not win)"; exit 1; }
 grep -q "e2e cross-family edit" "$ETC/default/useradd.rebase-old" \
     || { echo "FAIL: /etc/default/useradd.rebase-old missing or without the displaced edit"; exit 1; }
-# Only the source's vendor ships dnf.conf: dropped, edit preserved.
-test -e "$ETC/dnf/dnf.conf" \
-    && { echo "FAIL: /etc/dnf/dnf.conf (source-vendor-only) was carried onto the target"; exit 1; }
-grep -q "max_parallel_downloads=20" "$ETC/dnf/dnf.conf.rebase-old" \
-    || { echo "FAIL: /etc/dnf/dnf.conf.rebase-old missing or without the displaced edit"; exit 1; }
+# Source-vendor-only file: dropped, edit preserved in sidecar.
+if [ -f "$ETC/dnf/dnf.conf.rebase-old" ]; then
+    test -e "$ETC/dnf/dnf.conf" \
+        && { echo "FAIL: /etc/dnf/dnf.conf (source-vendor-only) was carried onto the target"; exit 1; }
+    grep -q "max_parallel_downloads=20" "$ETC/dnf/dnf.conf.rebase-old" \
+        || { echo "FAIL: /etc/dnf/dnf.conf.rebase-old missing or without the displaced edit"; exit 1; }
+elif [ -f "$ETC/zypp/zypp.conf.rebase-old" ]; then
+    test -e "$ETC/zypp/zypp.conf" \
+        && { echo "FAIL: /etc/zypp/zypp.conf (source-vendor-only) was carried onto the target"; exit 1; }
+    grep -q "download.max_concurrent_connections=20" "$ETC/zypp/zypp.conf.rebase-old" \
+        || { echo "FAIL: /etc/zypp/zypp.conf.rebase-old missing or without the displaced edit"; exit 1; }
+elif [ -f "$ETC/pacman.conf.rebase-old" ]; then
+    test -e "$ETC/pacman.conf" \
+        && { echo "FAIL: /etc/pacman.conf (source-vendor-only) was carried onto the target"; exit 1; }
+elif [ -f "$ETC/dpkg/dpkg.cfg.rebase-old" ]; then
+    test -e "$ETC/dpkg/dpkg.cfg" \
+        && { echo "FAIL: /etc/dpkg/dpkg.cfg (source-vendor-only) was carried onto the target"; exit 1; }
+else
+    echo "FAIL: expected a source-vendor-only .rebase-old sidecar (e.g. dnf.conf or zypp.conf)"; exit 1
+fi
 # Machine state and user additions carried verbatim (the same-lineage
 # assertions after the reboot check them too; fail early here).
 grep -q "e2e migration marker" "$ETC/hostname" || { echo "FAIL: /etc/hostname not carried"; exit 1; }
@@ -2416,9 +2449,13 @@ printf '%s\n' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
 
-# Belt and suspenders: having both sshd.service (sshd -D) and e2e-sshd.socket
+# Belt and suspenders: having both sshd.service / ssh.service (sshd -D) and e2e-sshd.socket
 # bound to port 22 kills the daemon with 255/EXCEPTION.
-rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service" \
+      "$DEPLOY_ETC/systemd/system/multi-user.target.wants/ssh.service"
+
+mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
+echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
 CFS_POSTMERGEFIX
 
 step "=== Verifying migration artifacts before reboot ==="
@@ -2913,8 +2950,17 @@ set -e
 grep -q "e2e cross-family edit" /etc/default/useradd \
     && { echo "FAIL: live /etc/default/useradd carries the source edit"; exit 1; }
 test -f /etc/default/useradd.rebase-old || { echo "FAIL: live sidecar for default/useradd missing"; exit 1; }
-test -e /etc/dnf/dnf.conf && { echo "FAIL: live /etc/dnf/dnf.conf exists on the target"; exit 1; }
-test -f /etc/dnf/dnf.conf.rebase-old || { echo "FAIL: live sidecar for dnf.conf missing"; exit 1; }
+if [ -f /etc/dnf/dnf.conf.rebase-old ]; then
+    test -e /etc/dnf/dnf.conf && { echo "FAIL: live /etc/dnf/dnf.conf exists on the target"; exit 1; }
+elif [ -f /etc/zypp/zypp.conf.rebase-old ]; then
+    test -e /etc/zypp/zypp.conf && { echo "FAIL: live /etc/zypp/zypp.conf exists on the target"; exit 1; }
+elif [ -f /etc/pacman.conf.rebase-old ]; then
+    test -e /etc/pacman.conf && { echo "FAIL: live /etc/pacman.conf exists on the target"; exit 1; }
+elif [ -f /etc/dpkg/dpkg.cfg.rebase-old ]; then
+    test -e /etc/dpkg/dpkg.cfg && { echo "FAIL: live /etc/dpkg/dpkg.cfg exists on the target"; exit 1; }
+else
+    echo "FAIL: expected a source-vendor-only .rebase-old sidecar in live /etc"; exit 1
+fi
 REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
 test -f "$REPORT" || { echo "FAIL: cross-family report missing after reboot"; exit 1; }
 if grep -q '"firstboot_unit_installed": true' "$REPORT"; then
@@ -2928,7 +2974,10 @@ else
     echo "OK: no first-boot unit was needed."
 fi
 echo "--- package manager on the target ---"
-command -v zypper && ls /etc/zypp/repos.d 2>&1 || echo "(no zypper / no repos.d — informational)"
+command -v zypper && ls /etc/zypp/repos.d 2>&1 || true
+command -v apt && ls /etc/apt/sources.list.d 2>&1 || true
+command -v pacman && ls /etc/pacman.d 2>&1 || true
+command -v dnf && ls /etc/yum.repos.d 2>&1 || true
 echo "--- wheel group numbering (remap evidence) ---"
 getent group wheel || true
 find /var/home -maxdepth 1 -mindepth 1 -exec stat -c '%U:%G %n' {} + 2>/dev/null | head -5

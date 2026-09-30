@@ -26,6 +26,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Cross-family E2E base-pair matrix (#261). Five non-gating matrix cells
+  now exercise `E2E_CROSS_FAMILY=1` across distributions and in both
+  directions: Bluefin → openSUSE Tumbleweed, Debian, Ubuntu, Arch Linux,
+  and reverse-direction openSUSE Tumbleweed → Bluefin. The test harness
+  audits and adapts base-image setup (SSH units, multi-distro root home
+  locations, and family-specific `/etc` configuration sidecars).
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start

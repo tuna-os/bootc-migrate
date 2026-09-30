@@ -537,7 +537,7 @@ sudo ./tests/run-e2e.sh
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
 
-The CI matrix runs fourteen cells (see `.github/workflows/e2e-tests.yml`, which
+The CI matrix runs eighteen cells (see `.github/workflows/e2e-tests.yml`, which
 is authoritative):
 
 | Cell | Base → target | Filesystem | Disk |
@@ -550,6 +550,10 @@ is authoritative):
 | ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
 | TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
 | cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/debian-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/ubuntu-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/arch-bootc:latest | btrfs | 40G |
+| cross-family migration, reverse (non-gating) | bootcrew/opensuse-bootc:latest → bluefin:stable | btrfs | 40G |
 | composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |

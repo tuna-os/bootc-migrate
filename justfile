@@ -94,6 +94,19 @@ e2e-cross-base: build test
       E2E_CROSS_BASE="1" \
       ./tests/run-e2e.sh
 
+# Cross-family composefs migration (#256, #261). Asserts the cross-family gate
+# refuses without --accept-cross-base and applies the cross-family /etc policy.
+e2e-cross-family target="ghcr.io/bootcrew/opensuse-bootc:latest" expect_os_id="opensuse-tumbleweed": build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="{{env_var_or_default('BASE_IMAGE', 'ghcr.io/projectbluefin/bluefin:stable')}}" \
+      TARGET_IMAGE="{{target}}" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_CROSS_FAMILY="1" \
+      E2E_EXPECT_OS_ID="{{expect_os_id}}" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-cross-family.log
+
 # Composefs image swap across distributions: dakota (composefs-native)
 # -> utah (Bluefin on Fedora Hummingbird) through bootc-rebase's ImageSwap
 # route. Asserts the reboot lands in utah with the base kept as rollback.
