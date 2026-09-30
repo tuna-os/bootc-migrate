@@ -7,10 +7,13 @@
 
 use anyhow::{Context, Result, bail};
 
+use std::path::Path;
+
 use crate::cross_base;
 use crate::cross_family;
 use crate::de_controller::DesktopMigrationController;
 use crate::migration;
+use crate::ostree_install;
 use crate::preflight::{self, readiness};
 use crate::selinux;
 
@@ -244,11 +247,54 @@ fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
     Ok(std::path::Path::new(COMPOSEFS_DEPLOY_ROOT).join(verity))
 }
 
+/// The `setfiles` relabel command for the staged composefs deployment's `/etc`.
+pub fn composefs_relabel_command(
+    target_image: &str,
+    deploy_root: &Path,
+    policy_type: &str,
+) -> Vec<String> {
+    let etc = deploy_root.join("etc");
+    let mut cmds = ostree_install::relabel_command(target_image, &[(deploy_root, etc.as_path())]);
+    if let Some(argv) = cmds.first_mut()
+        && let Some(fc) = argv
+            .iter_mut()
+            .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
+    {
+        *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
+    }
+    cmds.into_iter().next().unwrap_or_default()
+}
+
+/// Relabel the staged composefs deployment's `/etc` with the target's policy.
+fn relabel_staged_composefs_etc(
+    target_image: &str,
+    deploy_root: &Path,
+    target: Option<&selinux::SelinuxConfig>,
+) -> Result<()> {
+    let policy_type = target
+        .and_then(|t| t.selinux_type.as_deref())
+        .unwrap_or("targeted");
+    let argv = composefs_relabel_command(target_image, deploy_root, policy_type);
+    if argv.is_empty() {
+        return Ok(());
+    }
+    println!("[selinux] {}", argv.join(" "));
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .with_context(|| "failed to execute setfiles in the target image")?;
+    if !status.success() {
+        bail!("setfiles in the target image failed with exit code {status}");
+    }
+    println!("[selinux] labelled merged /etc with the target's SELinux policy");
+    Ok(())
+}
+
 /// Arm the image-swap first-boot unit in the staged deployment.
 ///
 /// On composefs, `bootc switch` merges the host's `/etc` into the new
-/// deployment at shutdown. Two things break when the host is another
-/// distribution (Dakota to Utah):
+/// deployment. Two things break when the host is another distribution
+/// (Dakota to Utah):
 ///
 /// - The host's locally created account databases replace the target's,
 ///   so the target's system users (`dbus`) are missing. The unit runs the
@@ -256,11 +302,13 @@ fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
 /// - A host with no SELinux policy writes the merged files unlabeled, and
 ///   a target that boots enforcing then denies its own services every file
 ///   in `/etc` and `/var`. When the target enforces a policy the host did
-///   not label for, the unit also runs the target's `restorecon`.
+///   not label for, the merged `/etc` is labelled here before first boot
+///   with `setfiles` from the target image, and the unit runs the target's
+///   `restorecon` over `/var` and `/etc` on first boot.
 ///
 /// The unit runs before `sysinit.target`. Its own files are labelled here
 /// so the booting system can read them.
-fn schedule_image_swap_firstboot() -> Result<()> {
+fn schedule_image_swap_firstboot(target_image: &str) -> Result<()> {
     let deploy = staged_composefs_deployment()?;
     let host = selinux::read_host_selinux_config();
     let target = selinux::read_deployment_selinux_config(&deploy);
@@ -309,9 +357,10 @@ fn schedule_image_swap_firstboot() -> Result<()> {
     if relabel {
         println!(
             "[selinux] the target enforces SELinux and the host labelled nothing for it: \
-             {} will relabel /etc and /var on first boot",
+             labelling merged /etc before first boot; {} will relabel /var",
             cross_family::FIRSTBOOT_UNIT
         );
+        relabel_staged_composefs_etc(target_image, &deploy, target.as_ref())?;
     }
     Ok(())
 }
@@ -559,7 +608,7 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
-        schedule_image_swap_firstboot()?;
+        schedule_image_swap_firstboot(self.target_image)?;
 
         finalize_staged_now()?;
 
@@ -870,5 +919,53 @@ mod tests {
             full_copy.contains("--force"),
             "a non-interactive refusal must name the flag that accepts it"
         );
+    }
+
+    #[test]
+    fn composefs_relabel_command_shape() {
+        let deploy = Path::new("/sysroot/state/deploy/abc123def456");
+        let cases = [
+            (
+                "ghcr.io/tuna-os/utah:testing",
+                "targeted",
+                "/etc/selinux/targeted/contexts/files/file_contexts",
+            ),
+            (
+                "ghcr.io/projectbluefin/utah:testing",
+                "mls",
+                "/etc/selinux/mls/contexts/files/file_contexts",
+            ),
+            (
+                "quay.io/fedora/fedora-bootc:42",
+                "minimum",
+                "/etc/selinux/minimum/contexts/files/file_contexts",
+            ),
+        ];
+
+        for (img, policy, expected_fc) in cases {
+            let cmd = composefs_relabel_command(img, deploy, policy);
+            let joined = cmd.join(" ");
+            assert!(
+                joined.starts_with("podman run --rm --privileged --security-opt label=disable"),
+                "unexpected command prefix for {img}: {joined}"
+            );
+            assert!(
+                joined.contains("--mount type=bind,src=/sysroot,dst=/target"),
+                "missing bind mount in {joined}"
+            );
+            assert!(joined.contains(img), "missing image name in {joined}");
+            assert!(
+                joined.contains("setfiles -F -r /target/state/deploy/abc123def456"),
+                "missing setfiles and alt-root in {joined}"
+            );
+            assert!(
+                joined.contains(expected_fc),
+                "expected file_contexts {expected_fc} not found in {joined}"
+            );
+            assert!(
+                joined.ends_with("/target/state/deploy/abc123def456/etc"),
+                "missing target etc path in {joined}"
+            );
+        }
     }
 }
