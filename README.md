@@ -383,10 +383,12 @@ instead:
   one-shot unit relabels `/etc` and `/var` on first boot.
 
 The tool prints the report and writes it to
-`/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
-This route is exploratory: one non-gating E2E cell exercises it. See
-[ROADMAP.md](ROADMAP.md) and
-[#256](https://github.com/tuna-os/bootc-migrate/issues/256).
+`bootc-migrate-cross-family-report.json` in the staged deployment root.
+This policy applies on the composefs conversion route as well as `bootc-rebase`'s
+`OstreeDeploy` and `ImageSwap` routes. This route is exploratory: non-gating
+E2E cells exercise it. See [ROADMAP.md](ROADMAP.md) and
+[#256](https://github.com/tuna-os/bootc-migrate/issues/256),
+[#259](https://github.com/tuna-os/bootc-migrate/issues/259).
 
 ### Move system Steam into Flatpak Steam
 

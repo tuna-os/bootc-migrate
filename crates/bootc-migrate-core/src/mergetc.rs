@@ -520,7 +520,7 @@ fn is_password_db(rel_path: &str) -> bool {
 /// first field isn't already represented gets appended; `TargetFirst`
 /// swaps the two roles except for the password databases (see
 /// [`is_password_db`]). machine-id is opaque — return current as-is.
-fn merge_identity_db(
+pub fn merge_identity_db(
     rel_path: &str,
     current: Option<&[u8]>,
     new: Option<&[u8]>,
@@ -716,7 +716,7 @@ fn prune_recursive(
 }
 
 /// Copy extended attributes and permissions from src file to dst file (no data copy).
-fn copy_file_metadata(src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_file_metadata(src: &Path, dst: &Path) -> Result<()> {
     // Copy permissions
     if let Ok(meta) = fs::metadata(src) {
         let mode = unix_fs::PermissionsExt::mode(&meta.permissions());
@@ -729,7 +729,7 @@ fn copy_file_metadata(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_file_at(base: &Path, rel_path: &str) -> Option<Vec<u8>> {
+pub fn read_file_at(base: &Path, rel_path: &str) -> Option<Vec<u8>> {
     let full = base.join(rel_path);
     // Use symlink_metadata to avoid following symlinks.
     match fs::symlink_metadata(&full) {

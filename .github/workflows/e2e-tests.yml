@@ -179,6 +179,17 @@ jobs:
             cross_family: true
             expect_os_id: opensuse-tumbleweed
             allow_failure: true
+          - name: bluefin -> openSUSE Tumbleweed (cross-family ostree re-base, OstreeDeploy)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # #259: cross-family re-base on the OstreeDeploy route. Refusal
+            # gate, target defaults, .rebase-old sidecars, target-first
+            # identity merge, /var remap, and /.autorelabel on first boot.
+            target: ghcr.io/bootcrew/opensuse-bootc:latest
+            mode: ostree-rebase
+            disk_size: 40G
+            cross_family: true
+            expect_os_id: opensuse-tumbleweed
+            allow_failure: true
           - name: dakota -> fedora-bootc (composefs -> ostree, OstreeInstall)
             # #260: the reverse backend switch on a host that never had an
             # OSTree deployment. The base is installed composefs-native

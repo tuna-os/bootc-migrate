@@ -108,6 +108,33 @@ e2e-image-swap: build test
       E2E_EXPECT_OS_ID="utah" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-image-swap.log
 
+# Cross-family composefs migration (Bluefin Fedora -> openSUSE Tumbleweed).
+# Asserts the cross-family gate refusal, /etc policy, sidecars, and booted OS identity.
+e2e-cross-family: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/bluefin:stable" \
+      TARGET_IMAGE="ghcr.io/bootcrew/opensuse-bootc:latest" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_CROSS_FAMILY="1" \
+      E2E_EXPECT_OS_ID="opensuse-tumbleweed" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-cross-family.log
+
+# Cross-family ostree re-base (Bluefin Fedora -> openSUSE Tumbleweed, OstreeDeploy).
+# Asserts the cross-family gate refusal, /etc policy, sidecars, and booted OS identity.
+e2e-cross-family-ostree: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/bluefin:stable" \
+      TARGET_IMAGE="ghcr.io/bootcrew/opensuse-bootc:latest" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_MODE="ostree-rebase" \
+      E2E_CROSS_FAMILY="1" \
+      E2E_EXPECT_OS_ID="opensuse-tumbleweed" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-cross-family-ostree.log
+
 e2e-debug: build
     @echo "=== Running E2E with composefs systemd debug logging ==="
     sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \

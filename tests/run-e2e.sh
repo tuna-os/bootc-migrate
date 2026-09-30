@@ -999,6 +999,22 @@ mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
 REBASEFIX
 
+    # #256, #259: fixtures that only the cross-family policy can get right.
+    if [ "${E2E_CROSS_FAMILY:-0}" = "1" ]; then
+        step "=== cross-family: injecting family-specific /etc fixtures (#259) ==="
+        ssh $SSH_OPTS root@localhost bash <<'CROSSFIX'
+set -e
+test -f /etc/default/useradd || { echo "FAIL: source ships no /etc/default/useradd"; exit 1; }
+echo "# e2e cross-family edit" >> /etc/default/useradd
+test -f /etc/dnf/dnf.conf || { echo "FAIL: source ships no /etc/dnf/dnf.conf"; exit 1; }
+echo "max_parallel_downloads=20" >> /etc/dnf/dnf.conf
+if ! id realuser >/dev/null 2>&1; then
+    useradd -m -b /var/home -s /bin/bash realuser
+fi
+echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' ')"
+CROSSFIX
+    fi
+
     # The guest cannot reach ghcr.io for the target-image SCAN (#191) — bootc
     # switch pulls fine, the scan path does not — so gate_cross_base returns
     # Unknown here. Since #191 that is a refusal rather than a silent
@@ -1024,34 +1040,32 @@ REBASEFIX
         echo "resolv.conf: $(tr "\n" " " < /etc/resolv.conf 2>/dev/null || echo MISSING)"
     ' 2>&1 | sed 's/^/[registry-probe] /' || true
 
-    # #191: the gate must REFUSE without an explicit opt-in. It has two valid
-    # ways to refuse, and which one fires depends on whether the target scan
-    # reached the registry:
-    #
-    #   - scan succeeded, pair is cross-base -> "Cross-base re-base detected"
-    #   - scan failed, status unknown        -> "Cannot determine whether ..."
-    #
-    # Both satisfy #191. Asserting only the second was correct while the
-    # registry scan was broken, but it started failing the moment the scan
-    # began working (the token-scope fix): the gate refused for the *better*
-    # reason and the assertion called that a failure. What must never happen is
-    # the re-base proceeding unguarded, so that is what this checks.
-    step "=== ostree-rebase: asserting the cross-base gate refuses without opt-in (#191) ==="
+    # #191, #259: the gate must REFUSE without an explicit opt-in.
+    step "=== ostree-rebase: asserting the cross-base/cross-family gate refuses without opt-in (#191/#259) ==="
     # --dry-run: the gate is evaluated before the dry-run exit, so every
     # refusal still fires, but a pair that passes the gate (same lineage)
     # does not stage the target here and leave a pending deployment that
     # makes the real run below refuse with "Pending OSTree transaction".
     GATE_OUT=$(ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --dry-run" 2>&1 || true)
-    if echo "$GATE_OUT" | grep -q "Cross-base re-base detected"; then
+    if echo "$GATE_OUT" | grep -q "Cross-family re-base detected"; then
+        echo "OK: target scanned cleanly and the pair IS cross-family; gate refused."
+        CROSS_BASE_EXECUTED=1
+    elif echo "$GATE_OUT" | grep -q "Cross-base re-base detected"; then
         echo "OK: target scanned cleanly and the pair IS cross-base; gate refused."
         echo "    The remap report above is #67's code executing for real."
         CROSS_BASE_EXECUTED=1
+    elif echo "$GATE_OUT" | grep -q "Base lineage: host and target are the same"; then
+        echo "OK: target scanned cleanly and the pair shares a lineage; gate passed."
+        CROSS_BASE_EXECUTED=0
     elif echo "$GATE_OUT" | grep -q "Cross-base check: host and target share an OS lineage"; then
         # A same-base pair (tunaOS albacore:gnome -> albacore:niri): the gate
         # scanned the target, found one lineage, and correctly let the
         # re-base through (as a dry run, so nothing was staged).
         echo "OK: target scanned cleanly and the pair shares a lineage; gate passed."
+        CROSS_BASE_EXECUTED=0
+    elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-family re-base"; then
+        echo "OK: target could not be scanned; gate refused on unknown cross-family status (#191/#259)."
         CROSS_BASE_EXECUTED=0
     elif echo "$GATE_OUT" | grep -q "Cannot determine whether this is a cross-base re-base"; then
         echo "OK: target could not be scanned; gate refused on unknown status (#191)."
@@ -1059,8 +1073,11 @@ REBASEFIX
         echo "    gate's wiring but not the remap path. See the [registry-probe]"
         echo "    output above for why the scan failed."
         CROSS_BASE_EXECUTED=0
+    elif echo "$GATE_OUT" | grep -q "base lineage unknown before the pull"; then
+        echo "OK: target could not be scanned; the early gate warned instead of deciding."
+        CROSS_BASE_EXECUTED=0
     else
-        echo "FAIL: the cross-base gate did not refuse."
+        echo "FAIL: the cross-base/cross-family gate did not refuse."
         echo "      Without an explicit --accept-cross-base the re-base must not"
         echo "      proceed, whether the target is known cross-base or unknown."
         echo "      Proceeding unguarded is the #191 bug."
@@ -1134,6 +1151,47 @@ REBASEFIX
             exit 1
         fi
         echo "OK: cross-base remap report emitted during the opted-in re-base."
+    fi
+
+    # #259: cross-family policy on ostree-rebase must have RUN and staged /etc verified
+    if [ "${E2E_CROSS_FAMILY:-0}" = "1" ]; then
+        step "=== cross-family: asserting cross-family policy executed on ostree-rebase (#259) ==="
+        for needle in "Cross-family re-base accepted" \
+                      "=== Cross-family /etc policy report ===" \
+                      "=== Cross-base UID/GID remap report ==="; do
+            if ! grep -qF "$needle" /tmp/rebase-out.log; then
+                echo "FAIL: re-base output lacks '$needle' — the cross-family policy did not run."
+                exit 1
+            fi
+        done
+        echo "OK: cross-family policy and remap reports emitted."
+
+        ssh $SSH_OPTS root@localhost bash <<'OSTREE_CROSSCHECK'
+set -e
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ROOT="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}"
+DEPLOY_ETC="${DEPLOY_ROOT}/etc"
+echo "--- staged deployment: $DEPLOY_ROOT ---"
+test -f "$DEPLOY_ROOT/bootc-migrate-cross-family-report.json" \
+    || { echo "FAIL: cross-family report JSON missing in staged deployment"; exit 1; }
+head -c 2000 "$DEPLOY_ROOT/bootc-migrate-cross-family-report.json"; echo
+# Both families ship default/useradd: target's copy wins, sidecar preserved
+grep -q "e2e cross-family edit" "$DEPLOY_ETC/default/useradd" \
+    && { echo "FAIL: staged /etc/default/useradd still carries source edit"; exit 1; }
+grep -q "e2e cross-family edit" "$DEPLOY_ETC/default/useradd.rebase-old" \
+    || { echo "FAIL: staged /etc/default/useradd.rebase-old missing"; exit 1; }
+# Source-vendor-only dnf.conf dropped, sidecar preserved
+test -e "$DEPLOY_ETC/dnf/dnf.conf" \
+    && { echo "FAIL: staged /etc/dnf/dnf.conf was not dropped"; exit 1; }
+grep -q "max_parallel_downloads=20" "$DEPLOY_ETC/dnf/dnf.conf.rebase-old" \
+    || { echo "FAIL: staged /etc/dnf/dnf.conf.rebase-old missing"; exit 1; }
+# Identity DBs
+grep -q "^realuser:" "$DEPLOY_ETC/passwd" || { echo "FAIL: realuser missing from staged passwd"; exit 1; }
+grep -q "^realuser:" "$DEPLOY_ETC/shadow" || { echo "FAIL: realuser missing from staged shadow"; exit 1; }
+echo "OK: staged deployment has the cross-family shape."
+OSTREE_CROSSCHECK
     fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
@@ -1608,6 +1666,30 @@ loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus
 # checks at all — no separate assertion needed.)
 echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
+
+    # #256, #259: the live /etc after reboot must still show the cross-family policy's shape.
+    if [ "${E2E_CROSS_FAMILY:-0}" = "1" ]; then
+        step "=== cross-family: asserting the booted OS identity on ostree-rebase (#259) ==="
+        BOOTED_OS=$(ssh $SSH_OPTS root@localhost "grep -E '^(ID|ID_LIKE|PRETTY_NAME)=' /etc/os-release" 2>/dev/null || true)
+        echo "$BOOTED_OS" | sed 's/^/  /'
+        BOOTED_ID=$(echo "$BOOTED_OS" | sed -n 's/^ID=//p' | tr -d '"')
+        if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+            echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"; exit 1
+        fi
+        echo "OK: booted into $BOOTED_ID."
+
+        step "=== cross-family: post-reboot /etc assertions on ostree-rebase (#259) ==="
+        ssh $SSH_OPTS root@localhost bash <<'OSTREE_CROSSPOST'
+set -e
+grep -q "e2e cross-family edit" /etc/default/useradd \
+    && { echo "FAIL: live /etc/default/useradd carries the source edit"; exit 1; }
+test -f /etc/default/useradd.rebase-old || { echo "FAIL: live sidecar for default/useradd missing"; exit 1; }
+test -e /etc/dnf/dnf.conf && { echo "FAIL: live /etc/dnf/dnf.conf exists on the target"; exit 1; }
+test -f /etc/dnf/dnf.conf.rebase-old || { echo "FAIL: live sidecar for dnf.conf missing"; exit 1; }
+grep -q "^realuser:" /etc/passwd || { echo "FAIL: realuser missing from /etc/passwd after reboot"; exit 1; }
+echo "OK: live /etc reflects cross-family policy after reboot."
+OSTREE_CROSSPOST
+    fi
 
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         # #68's other half: the stash is only useful if switching back
