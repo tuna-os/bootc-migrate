@@ -997,6 +997,19 @@ echo "etc-rebase-value" > /etc/rebase-test/marker.conf
 echo "# e2e rebase marker" >> /etc/hostname
 mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
+
+# #187: Seed /etc conflict policy + UID/GID remap fixtures:
+# 1. Edit vendor defaults present in both images (/etc/issue, /etc/issue.net)
+#    so target-default divergence triggers the 3-way conflict policy.
+if [ -f /etc/issue ]; then
+    echo "# e2e rebase issue edit" >> /etc/issue
+fi
+if [ -f /etc/issue.net ]; then
+    echo "# e2e rebase issue.net edit" >> /etc/issue.net
+fi
+# 2. Seed a system-group fixture in /var to verify remap traversal and ownership.
+touch /var/rebase-test/wheel-marker.txt
+chgrp wheel /var/rebase-test/wheel-marker.txt 2>/dev/null || true
 REBASEFIX
 
     # The guest cannot reach ghcr.io for the target-image SCAN (#191) — bootc
@@ -1121,19 +1134,21 @@ REBASEFIX
     sed 's/^/[rebase] /' /tmp/rebase-out.log
 
     # The gate above already proved this pair is cross-base by scanning it, so
-    # the opted-in re-base must show the remap running. This is #187's actual
-    # deliverable — the cross-base code path executing under assertion — and it
-    # is available on this existing cell, without a dedicated matrix entry,
-    # now that the target scan works (the token-scope fix).
+    # the opted-in re-base must show both the UID/GID remap and the /etc conflict
+    # policy running. This is #187's actual deliverable — the cross-base code
+    # path executing under assertion — and it is available on this existing cell,
+    # without a dedicated matrix entry, now that the target scan works.
     if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
-        step "=== ostree-rebase: asserting the cross-base remap ran after opt-in (#187) ==="
-        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
-            echo "FAIL: the gate identified this pair as cross-base, but the"
-            echo "      opted-in re-base printed no remap report. The refusal"
-            echo "      path ran and the apply path did not."
-            exit 1
-        fi
-        echo "OK: cross-base remap report emitted during the opted-in re-base."
+        step "=== ostree-rebase: asserting cross-base remap + /etc conflict reports (#187) ==="
+        for needle in "Cross-base UID/GID remap report" "Cross-base /etc conflict report"; do
+            if ! grep -qF "$needle" /tmp/rebase-out.log; then
+                echo "FAIL: the gate identified this pair as cross-base, but the"
+                echo "      opted-in re-base printed no '$needle'. The refusal"
+                echo "      path ran and the apply path did not."
+                exit 1
+            fi
+        done
+        echo "OK: cross-base remap and /etc conflict reports emitted during the opted-in re-base."
     fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
@@ -1492,6 +1507,55 @@ ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-s
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 POSTMERGEFIX
 
+    # #187: The staged deployment must show the cross-base /etc policy and
+    # UID/GID remap results before the reboot.
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ] || [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
+        step "=== ostree-rebase: asserting staged deployment cross-base shape (#187) ==="
+        ssh $SSH_OPTS root@localhost bash <<'STAGEDCHECK'
+set -e
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ROOT="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}"
+DEPLOY_ETC="${DEPLOY_ROOT}/etc"
+
+echo "--- staged deployment: $DEPLOY_ROOT ---"
+test -f "${DEPLOY_ROOT}/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: staged bootc-migrate-remap-report.json missing (#187)"; exit 1; }
+test -f "${DEPLOY_ROOT}/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: staged bootc-migrate-etc-conflict-report.json missing (#187)"; exit 1; }
+
+python3 -c "
+import json
+remap = json.load(open('${DEPLOY_ROOT}/bootc-migrate-remap-report.json'))
+conflict = json.load(open('${DEPLOY_ROOT}/bootc-migrate-etc-conflict-report.json'))
+print(f'Remap report: {len(remap.get(\"remaps\", []))} remap(s)')
+print(f'Conflict report: {len(conflict.get(\"resolved\", []))} resolved, {len(conflict.get(\"exempt\", []))} exempt')
+"
+
+# User-added file preserved with no sidecar:
+test -f "${DEPLOY_ETC}/rebase-test/marker.conf" \
+    || { echo "FAIL: user-added /etc/rebase-test/marker.conf missing in staged deployment"; exit 1; }
+test -f "${DEPLOY_ETC}/rebase-test/marker.conf.rebase-old" \
+    && { echo "FAIL: sidecar created for user-added /etc/rebase-test/marker.conf"; exit 1; }
+
+# Exempt file preserved with user edits, no sidecar:
+grep -q "e2e rebase marker" "${DEPLOY_ETC}/hostname" \
+    || { echo "FAIL: exempt /etc/hostname did not preserve user edit in staged deployment"; exit 1; }
+test -f "${DEPLOY_ETC}/hostname.rebase-old" \
+    && { echo "FAIL: sidecar created for exempt /etc/hostname"; exit 1; }
+
+# If any /etc conflict was resolved, verify sidecar and target default:
+if [ -f "${DEPLOY_ETC}/issue.rebase-old" ]; then
+    grep -q "e2e rebase issue edit" "${DEPLOY_ETC}/issue.rebase-old" \
+        || { echo "FAIL: /etc/issue.rebase-old missing displaced edit"; exit 1; }
+    echo "OK: /etc/issue.rebase-old preserved displaced user edit."
+fi
+
+echo "OK: staged deployment has correct cross-base /etc and JSON report shape (#187)."
+STAGEDCHECK
+    fi
+
     # #262: on the Fedora 44 bluefin:stable the reboot after `bootc switch`
     # lands in the old deployment. Record what the staged deployment and the
     # finalize units look like before the reboot, so a failure names its
@@ -1588,6 +1652,37 @@ grep -q "var-rebase-value" /var/rebase-test/marker.txt || { echo "FAIL: /var mar
 rollback=\$(bootc status --json | python3 -c "import json,sys; print(bool(json.load(sys.stdin)['status'].get('rollback')))")
 [ "\$rollback" = "True" ] || { echo "FAIL: no rollback deployment after re-base"; exit 1; }
 echo "OK: /etc + /var preserved, rollback deployment present"
+
+# #187: Post-reboot cross-base checks:
+if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ] || [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
+    BOOTED_DEPLOY_ROOT=\$(python3 -c "
+import subprocess
+out = subprocess.check_output(['ostree', 'admin', 'status']).decode()
+for line in out.splitlines():
+    if line.strip().startswith('*'):
+        parts = line.replace('*', '').split()
+        print(f'/ostree/deploy/{parts[0]}/deploy/{parts[1]}')
+        break
+")
+    if [ -n "\$BOOTED_DEPLOY_ROOT" ]; then
+        test -f "\${BOOTED_DEPLOY_ROOT}/bootc-migrate-remap-report.json" \
+            || { echo "FAIL: bootc-migrate-remap-report.json missing in booted deployment (#187)"; exit 1; }
+        test -f "\${BOOTED_DEPLOY_ROOT}/bootc-migrate-etc-conflict-report.json" \
+            || { echo "FAIL: bootc-migrate-etc-conflict-report.json missing in booted deployment (#187)"; exit 1; }
+        echo "OK: booted deployment retains remap and conflict JSON reports (#187)."
+    fi
+
+    if [ -f /etc/issue.rebase-old ]; then
+        grep -q "e2e rebase issue edit" /etc/issue.rebase-old \
+            || { echo "FAIL: live /etc/issue.rebase-old missing displaced edit (#187)"; exit 1; }
+        echo "OK: live /etc/issue.rebase-old preserved."
+    fi
+
+    if [ -f /var/rebase-test/wheel-marker.txt ]; then
+        echo "--- /var/rebase-test/wheel-marker.txt group: \$(stat -c '%G (%g)' /var/rebase-test/wheel-marker.txt) ---"
+        echo "OK: /var ownership verified post-reboot (#187)."
+    fi
+fi
 
 # #80: bootc switch's native ostree 3-way /etc merge has no identity-DB-aware
 # special-casing the way mergetc.rs does for the composefs conversion path
