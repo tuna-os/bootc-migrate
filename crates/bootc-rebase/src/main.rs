@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 mod boot_entries;
 mod boot_entry_review;
+mod commit_command;
 mod de_migrate_command;
 mod scan_command;
 
@@ -64,6 +65,33 @@ enum Commands {
     /// deliberately refuses to guess at (an image shipping several desktops,
     /// or one this tool does not recognize).
     DeMigrate(DeMigrateArgs),
+    /// Remove the composefs state a composefs -> ostree re-base left behind
+    /// (issue #315), once the OSTree deployment has booted and rollback is
+    /// no longer wanted. A bare invocation is a dry run: it checks the
+    /// preconditions, verifies the old /var against the live one, and lists
+    /// every path it would delete with its size. `--apply` deletes, after a
+    /// typed confirmation.
+    Commit(CommitArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct CommitArgs {
+    /// Actually delete the listed paths. Without this the command only
+    /// reports.
+    #[arg(long)]
+    apply: bool,
+
+    /// Skip the typed confirmation that --apply otherwise requires.
+    #[arg(long)]
+    yes: bool,
+
+    /// Proceed past failed soft checks: paths of the old /var missing from
+    /// the live /var, a booted deployment other than the one the install
+    /// report names, a missing report or ESP snapshot, or no shim/GRUB
+    /// firmware entry. Never overrides booting from composefs or a
+    /// filesystem mounted inside a path to delete.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -401,6 +429,10 @@ fn main() -> Result<()> {
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::BootEntries(ref args)) => boot_entries::run_boot_entries(args),
         Some(Commands::DeMigrate(ref args)) => de_migrate_command::run(args),
+        Some(Commands::Commit(ref args)) => {
+            check_root_privilege()?;
+            commit_command::run(args)
+        }
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");
@@ -726,6 +758,23 @@ mod tests {
                 _ => panic!("expected DeMigrateAction::Restore"),
             },
             _ => panic!("expected Commands::DeMigrate"),
+        }
+    }
+
+    #[test]
+    fn commit_is_a_dry_run_by_default() {
+        // #315: deleting the old world must take an explicit --apply.
+        match Cli::parse_from(["bootc-rebase", "commit"]).command {
+            Some(Commands::Commit(args)) => {
+                assert!(!args.apply);
+                assert!(!args.yes);
+                assert!(!args.force);
+            }
+            other => panic!("expected Commands::Commit, got {other:?}"),
+        }
+        match Cli::parse_from(["bootc-rebase", "commit", "--apply", "--yes", "--force"]).command {
+            Some(Commands::Commit(args)) => assert!(args.apply && args.yes && args.force),
+            other => panic!("expected Commands::Commit, got {other:?}"),
         }
     }
 

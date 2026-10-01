@@ -40,7 +40,7 @@
 //! [`newest_deployment`]) are pure; the I/O lives in [`OstreeInstallConfig::run`].
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -220,8 +220,9 @@ pub fn carry_over_kargs(cmdline: &str) -> Vec<String> {
 }
 
 /// What the run did, written as JSON under [`STATE_DIR`] so it survives the
-/// reboot.
-#[derive(Debug, Clone, Serialize)]
+/// reboot, and read back by the commit step
+/// ([`crate::ostree_install_commit`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OstreeInstallReport {
     pub target_image: String,
     pub deployment: String,

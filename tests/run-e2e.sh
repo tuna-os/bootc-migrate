@@ -1862,6 +1862,69 @@ VARDIAG
 
     assert_system_healthy "composefs-to-ostree"
 
+    # Commit (#315): reclaim the composefs state now that the OSTree
+    # deployment booted. The dry run must list the old world and delete
+    # nothing; --apply must delete it, keep the OSTree side and the
+    # forensics, and leave a host that still boots healthy.
+    step "=== composefs-to-ostree: commit dry run ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+    COMMIT_DRY_RC=0
+    ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase commit" > /tmp/commit-dry.log 2>&1 || COMMIT_DRY_RC=$?
+    sed 's/^/[commit-dry] /' /tmp/commit-dry.log
+    [ "$COMMIT_DRY_RC" = 0 ] || { echo "FAIL: bootc-rebase commit (dry run) exited $COMMIT_DRY_RC"; exit 1; }
+    grep -q 'Dry run complete: nothing was deleted' /tmp/commit-dry.log || {
+        echo "FAIL: the commit dry run did not report completion"; exit 1; }
+    for p in /sysroot/state/os/default/var /sysroot/composefs; do
+        grep -qF "$p" /tmp/commit-dry.log || { echo "FAIL: the commit dry run does not list $p"; exit 1; }
+    done
+    ssh $SSH_OPTS root@localhost "test -d /sysroot/state/os/default/var && test -d /sysroot/composefs" || {
+        echo "FAIL: the commit dry run deleted something"; exit 1; }
+
+    step "=== composefs-to-ostree: commit --apply ==="
+    ssh $SSH_OPTS root@localhost "df -h /sysroot" 2>&1 | sed 's/^/[commit-df-before] /' || true
+    COMMIT_RC=0
+    ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase commit --apply --yes" > /tmp/commit.log 2>&1 || COMMIT_RC=$?
+    sed 's/^/[commit] /' /tmp/commit.log
+    [ "$COMMIT_RC" = 0 ] || { echo "FAIL: bootc-rebase commit --apply exited $COMMIT_RC"; exit 1; }
+    grep -q 'Commit complete' /tmp/commit.log || { echo "FAIL: bootc-rebase commit did not complete"; exit 1; }
+    ssh $SSH_OPTS root@localhost bash <<'COMMITCHECK' || { echo "FAIL: post-commit layout is wrong"; exit 1; }
+set -e
+for p in /sysroot/state/os/default/var /sysroot/state/deploy /sysroot/composefs; do
+    [ ! -e "$p" ] || { echo "still present: $p"; exit 1; }
+done
+[ -d /sysroot/ostree/repo ] || { echo "the OSTree repo is gone"; exit 1; }
+ls -d /sysroot/ostree/deploy/default/deploy/*.0 >/dev/null || { echo "the OSTree deployment is gone"; exit 1; }
+[ -f /var/lib/bootc-rebase/ostree-install-report.json ] || { echo "install report not mirrored"; exit 1; }
+[ -f /var/lib/bootc-rebase/ostree-install-commit.json ] || { echo "commit record missing"; exit 1; }
+df -h /sysroot | sed 's/^/[commit-df-after] /'
+COMMITCHECK
+    echo "OK: composefs state removed; OSTree repo, deployment and forensics kept."
+
+    step "=== composefs-to-ostree: rebooting after commit ==="
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>&1; then
+            step "VM accessible via SSH after the commit reboot ($((SECONDS - WAIT_START))s)."
+            break
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "ERROR: VM did not boot back after bootc-rebase commit."
+        serial_failure_lines | tail -40 || true
+        tail -120 qemu.log
+        exit 1
+    fi
+    ssh $SSH_OPTS root@localhost "cat /proc/cmdline" | grep -qE '(^| )ostree=' || {
+        echo "FAIL: after the commit reboot the OSTree deployment was not booted"; exit 1; }
+    VAR_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/rebase-test/marker.txt 2>/dev/null || echo MISSING")
+    [ "$VAR_MARKER" = "var-rebase-value" ] || { echo "FAIL: /var fixture lost after commit (got: $VAR_MARKER)"; exit 1; }
+    assert_system_healthy "composefs-to-ostree after commit"
+
     step "=== composefs-to-ostree PASSED ==="
     exit 0
 fi

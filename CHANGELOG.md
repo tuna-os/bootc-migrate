@@ -26,6 +26,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- `bootc-rebase commit` removes the composefs state that a composefs → ostree
+  re-base keeps as rollback (#315). Without `--apply` it is a dry run that
+  checks the booted deployment, the ESP snapshot, the firmware entry and the
+  old `/var` against the live `/var`, and lists every path with its size.
+  With `--apply` it copies the install report and ESP snapshot into the live
+  `/var` first. Then it deletes the old `/var`, the composefs store and the
+  composefs deployments. The OSTree repo, `/boot`, the ESP and NVRAM stay.
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start
