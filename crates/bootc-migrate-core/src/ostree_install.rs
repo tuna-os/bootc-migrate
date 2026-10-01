@@ -55,6 +55,8 @@ use crate::registry;
 use crate::scan;
 use crate::xattr;
 
+mod esp_resident;
+
 /// The physical root of a composefs host (the block-device filesystem the
 /// composefs store and state live on).
 pub const PHYSICAL_ROOT: &str = "/sysroot";
@@ -232,6 +234,13 @@ pub struct OstreeInstallReport {
     pub var_copied: bool,
     pub cross_family: bool,
     pub grub_boot_entry: Option<String>,
+    /// `/boot` has no partition of its own and the root is encrypted, so
+    /// GRUB cannot read the new deployment's kernels (#305).
+    pub boot_on_encrypted_root: bool,
+    /// The ESP-resident BLS entry written for that layout.
+    pub esp_resident_entry: Option<String>,
+    /// The systemd-boot firmware entry put first for that layout.
+    pub systemd_boot_entry: Option<String>,
 }
 
 // ---- I/O -----------------------------------------------------------------
@@ -326,6 +335,36 @@ impl OstreeInstallConfig<'_> {
         let report = preflight::run_preflight_checks().ok();
         let booted_image = report.as_ref().and_then(|r| r.booted_image.clone());
 
+        // #305: with /boot on an encrypted root, the GRUB stub bootupd
+        // writes cannot reach the new kernels; the deployment boots through
+        // the restored systemd-boot from an ESP copy instead.
+        let boot_on_luks = esp_resident::detect(
+            &boot_bind_plan(&esp, &live_boot_mounts(&esp)),
+            PHYSICAL_ROOT,
+            &cmdline,
+        );
+        if boot_on_luks {
+            println!(
+                "/boot is on the encrypted root with no boot partition of its own; GRUB cannot \
+                 unlock it, so the new deployment will boot through systemd-boot from a copy \
+                 of its kernel on the ESP."
+            );
+            if !Path::new(&esp)
+                .join(esp_resident::SYSTEMD_BOOT_EFI)
+                .is_file()
+                && !self.force
+            {
+                bail!(
+                    "/boot is on the encrypted root and the ESP has no systemd-boot ({}) to \
+                     boot the new deployment from; the GRUB stub bootupd writes cannot unlock \
+                     the root, so the first boot would stop at a GRUB shell. Install \
+                     systemd-boot on the ESP, or pass --force and then {}.",
+                    esp_resident::SYSTEMD_BOOT_EFI,
+                    esp_resident::manual_workaround()
+                );
+            }
+        }
+
         if self.dry_run {
             println!("[DRY RUN] Would pull {} with podman.", self.target_image);
             println!(
@@ -336,8 +375,13 @@ impl OstreeInstallConfig<'_> {
                 install_command(self.target_image, &carry_over_kargs(&cmdline)).join(" ")
             );
             println!(
-                "[DRY RUN] Would 3-way merge /etc into the new deployment (source defaults from {}), copy /var to {OSTREE_STATEROOT_VAR}, restore the composefs ESP artifacts, and put the GRUB entry first in BootOrder.",
-                booted_image.as_deref().unwrap_or("<unknown booted image>")
+                "[DRY RUN] Would 3-way merge /etc into the new deployment (source defaults from {}), copy /var to {OSTREE_STATEROOT_VAR}, restore the composefs ESP artifacts, and {}.",
+                booted_image.as_deref().unwrap_or("<unknown booted image>"),
+                if boot_on_luks {
+                    "copy the new kernel and initrd to the ESP with a BLS entry, make it systemd-boot's default, and put \"Linux Boot Manager\" first in BootOrder"
+                } else {
+                    "put the GRUB entry first in BootOrder"
+                }
             );
             return Ok(());
         }
@@ -480,7 +524,34 @@ impl OstreeInstallConfig<'_> {
         } else {
             false
         };
-        let grub_entry = put_grub_first()?;
+        let mut esp_resident_entry = None;
+        let mut systemd_boot_entry = None;
+        let grub_entry = if boot_on_luks && rollback_entry {
+            println!("=== Bootloader: ESP-resident entry (/boot on the encrypted root) ===");
+            match esp_resident::stage(Path::new(PHYSICAL_ROOT), Path::new(&esp), &deployment) {
+                Ok(entry) => esp_resident_entry = Some(entry),
+                Err(e) => eprintln!(
+                    "Warning: could not write the ESP-resident entry ({e:#}). systemd-boot \
+                     stays first, so the host boots the composefs deployment again. To boot \
+                     the new deployment, {}.",
+                    esp_resident::manual_workaround()
+                ),
+            }
+            // GRUB first would stop at a GRUB shell on this layout; the
+            // worst case with systemd-boot first is the composefs default.
+            systemd_boot_entry = put_systemd_boot_first()?;
+            None
+        } else {
+            if boot_on_luks {
+                eprintln!(
+                    "Warning: /boot is on the encrypted root and no firmware entry reaches \
+                     systemd-boot, so GRUB stays first and the first boot will likely stop at \
+                     a GRUB shell. Before rebooting, {}.",
+                    esp_resident::manual_workaround()
+                );
+            }
+            put_grub_first()?
+        };
 
         let report = OstreeInstallReport {
             target_image: self.target_image.to_string(),
@@ -492,6 +563,9 @@ impl OstreeInstallConfig<'_> {
             var_copied,
             cross_family: cross.is_some(),
             grub_boot_entry: grub_entry,
+            boot_on_encrypted_root: boot_on_luks,
+            esp_resident_entry: esp_resident_entry.clone(),
+            systemd_boot_entry,
         };
         let report_path = Path::new(STATE_DIR).join(REPORT_FILE);
         fs::write(
@@ -500,7 +574,15 @@ impl OstreeInstallConfig<'_> {
         )
         .with_context(|| format!("writing {}", report_path.display()))?;
         println!("Report written to {}", report_path.display());
-        if rollback_entry {
+        if esp_resident_entry.is_some() {
+            println!(
+                "OSTree deployment staged. Reboot to enter it through systemd-boot; the \
+                 composefs deployment stays selectable in the systemd-boot menu as rollback. \
+                 /boot is on the encrypted root, so `bootc upgrade` writes later kernels \
+                 where neither GRUB nor this ESP entry reads them: refresh the ESP copy after \
+                 each upgrade (#305)."
+            );
+        } else if rollback_entry {
             println!(
                 "OSTree deployment staged. Reboot to enter it; the composefs deployment stays \
                  selectable through the \"Linux Boot Manager\" firmware entry as rollback."
@@ -835,11 +917,16 @@ pub fn boot_bind_plan(esp: &str, live_mounts: &[&str]) -> Vec<(String, String)> 
     plan
 }
 
-fn bind_boot_into_physical_root(esp: &str) -> Result<BootBinds> {
-    let live_mounts: Vec<&str> = ["/boot", "/boot/efi", "/efi", esp]
+/// The host's live boot mountpoints, as [`boot_bind_plan`] takes them.
+fn live_boot_mounts(esp: &str) -> Vec<&str> {
+    ["/boot", "/boot/efi", "/efi", esp]
         .into_iter()
         .filter(|p| is_mountpoint(Path::new(p)))
-        .collect();
+        .collect()
+}
+
+fn bind_boot_into_physical_root(esp: &str) -> Result<BootBinds> {
+    let live_mounts = live_boot_mounts(esp);
     let mut bound = Vec::new();
     for (live, rel) in boot_bind_plan(esp, &live_mounts) {
         let target = Path::new(PHYSICAL_ROOT).join(&rel);
@@ -1164,6 +1251,36 @@ fn put_grub_first() -> Result<Option<String>> {
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (GRUB entry Boot{id} first)");
+    Ok(Some(id))
+}
+
+/// Put systemd-boot's firmware entry ("Linux Boot Manager") first in
+/// `BootOrder`, for the layout where GRUB cannot boot the deployment
+/// (#305). Returns the entry id, or `None` with a warning when there is
+/// no such entry.
+fn put_systemd_boot_first() -> Result<Option<String>> {
+    let out = Command::new("efibootmgr")
+        .arg("-v")
+        .output()
+        .context("running efibootmgr")?;
+    if !out.status.success() {
+        bail!(
+            "efibootmgr failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let Some(id) = esp_resident::parse_systemd_boot_entry_id(&txt) else {
+        eprintln!("Warning: no \"Linux Boot Manager\" firmware entry found; BootOrder unchanged.");
+        return Ok(None);
+    };
+    let order = rollback::parse_boot_order(&txt).unwrap_or_default();
+    let new_order = rollback::build_new_boot_order(&order, &id);
+    run_checked(
+        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        "efibootmgr --bootorder",
+    )?;
+    println!("[nvram] BootOrder: {new_order} (systemd-boot entry Boot{id} first)");
     Ok(Some(id))
 }
 
