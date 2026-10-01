@@ -26,6 +26,17 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- TUI route step on composefs hosts (#312). After you select an image,
+  the wizard scans the target. It offers a choice between composefs and
+  ostree only when the target supports both. A target that supports one
+  backend shows a fixed line. The ostree choice runs the `OstreeInstall`
+  route through `bootc-rebase`, which the wizard finds next to its own
+  binary or on `PATH`. When `bootc-rebase` is missing, the wizard shows
+  how to install it and does not run. The bootloader is fixed by the
+  route, so it shows as a fixed line. The image list on composefs hosts
+  now includes Utah (`ghcr.io/projectbluefin/utah:testing`). Its note
+  and the route step say that the E2E status is unknown. The wizard on
+  ostree hosts does not change.
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start

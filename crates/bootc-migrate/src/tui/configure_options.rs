@@ -12,7 +12,7 @@ use super::*;
 pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            " Step 4 · Configure Options ",
+            format!(" Step {} · Configure Options ", app.current_step()),
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -22,61 +22,46 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let options: Vec<(&str, String, bool)> = vec![
-        (
-            "Dry-run (recommended first run)",
-            if app.opt_dry_run {
-                "[x]".to_owned()
-            } else {
-                "[ ]".to_owned()
-            },
-            app.opt_dry_run,
-        ),
-        (
-            "Skip Phase 1 OSTree import (faster, less dedup)",
-            if app.opt_skip_import {
-                "[x]".to_owned()
-            } else {
-                "[ ]".to_owned()
-            },
-            app.opt_skip_import,
-        ),
-        (
-            "Bootloader",
-            match app.opt_bootloader {
-                Bootloader::SystemdBoot => "[systemd-boot ●] [grub2 ○]".to_owned(),
-                Bootloader::Grub2 => "[systemd-boot ○] [grub2 ●]".to_owned(),
-            },
-            false,
-        ),
-        (
-            "Skip preflight checks (⚠ not recommended)",
-            if app.opt_skip_preflight {
-                "[x]".to_owned()
-            } else {
-                "[ ]".to_owned()
-            },
-            app.opt_skip_preflight,
-        ),
-        (
-            "Force (ignore non-fatal warnings)",
-            if app.opt_force {
-                "[x]".to_owned()
-            } else {
-                "[ ]".to_owned()
-            },
-            app.opt_force,
-        ),
-        (
-            "Accept a cross-family target (⚠ target /etc wins)",
-            if app.opt_accept_cross_base {
-                "[x]".to_owned()
-            } else {
-                "[ ]".to_owned()
-            },
-            app.opt_accept_cross_base,
-        ),
-    ];
+    let check = |on: bool| if on { "[x]" } else { "[ ]" }.to_owned();
+    let options: Vec<(&str, String, bool)> = app
+        .option_rows()
+        .iter()
+        .map(|row| match row {
+            OptRow::DryRun => (
+                "Dry-run (recommended first run)",
+                check(app.opt_dry_run),
+                app.opt_dry_run,
+            ),
+            OptRow::SkipImport => (
+                "Skip Phase 1 OSTree import (faster, less dedup)",
+                check(app.opt_skip_import),
+                app.opt_skip_import,
+            ),
+            OptRow::Bootloader => (
+                "Bootloader",
+                match app.opt_bootloader {
+                    Bootloader::SystemdBoot => "[systemd-boot ●] [grub2 ○]".to_owned(),
+                    Bootloader::Grub2 => "[systemd-boot ○] [grub2 ●]".to_owned(),
+                },
+                false,
+            ),
+            OptRow::SkipPreflight => (
+                "Skip preflight checks (⚠ not recommended)",
+                check(app.opt_skip_preflight),
+                app.opt_skip_preflight,
+            ),
+            OptRow::Force => (
+                "Force (ignore non-fatal warnings)",
+                check(app.opt_force),
+                app.opt_force,
+            ),
+            OptRow::AcceptCrossBase => (
+                "Accept a cross-family target (⚠ target /etc wins)",
+                check(app.opt_accept_cross_base),
+                app.opt_accept_cross_base,
+            ),
+        })
+        .collect();
 
     let mut lines: Vec<Line> = vec![Line::raw("")];
     for (i, (label, value, _active)) in options.iter().enumerate() {

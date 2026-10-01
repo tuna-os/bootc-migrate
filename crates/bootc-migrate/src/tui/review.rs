@@ -11,7 +11,7 @@ use super::*;
 pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            " Step 5 · Review & Run ",
+            format!(" Step {} · Review & Run ", app.current_step()),
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -93,7 +93,9 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ])
         .split(chunks[1]);
 
-    let (btn_label, btn_bg) = if app.opt_dry_run {
+    let (btn_label, btn_bg) = if app.engine_missing() {
+        ("  ✗ Engine missing    ", MUTED)
+    } else if app.opt_dry_run {
         ("  ▶ Run Dry-Run     ", TEAL)
     } else {
         ("  ⚡ Run Migration   ", Color::Rgb(40, 180, 70))
@@ -109,8 +111,52 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(btn, btn_layout[1]);
 }
 
+/// composefs hosts: the route chosen on the route screen, not the
+/// conversion's phases, which do not run there.
+fn build_route_summary(app: &App) -> Vec<Line<'static>> {
+    let line = |text: String, fg: Color| Line::from(Span::styled(text, Style::default().fg(fg)));
+    let strategy = if app.is_ostree_install() {
+        "OstreeInstall"
+    } else {
+        "ImageSwap"
+    };
+    let mut lines = vec![
+        line(format!("  • Target image: {}", app.selected_image()), TEXT),
+        line(
+            format!(
+                "  • Route: composefs -> {} ({strategy})",
+                app.target_backend
+            ),
+            TEXT,
+        ),
+        line(
+            format!(
+                "  • Bootloader: {}",
+                route::route_bootloader(app.target_backend)
+            ),
+            TEXT,
+        ),
+        line(
+            format!(
+                "  • E2E status: {}",
+                route::route_e2e_status(app.target_backend)
+            ),
+            AMBER,
+        ),
+    ];
+    if app.engine_missing() {
+        lines.push(line(format!("  ✗ {}", route::BOOTC_REBASE_MISSING), DANGER));
+    }
+    lines
+}
+
 fn build_review_summary(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if app.composefs_host() {
+        lines.extend(build_route_summary(app));
+        push_flag_lines(app, &mut lines);
+        return lines;
+    }
     let img = app.selected_image();
     lines.push(Line::from(Span::styled(
         format!("  • Migrate to image: {img}"),
@@ -151,6 +197,12 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
         format!("  • Bootloader: {bl}"),
         Style::default().fg(TEXT),
     )));
+    push_flag_lines(app, &mut lines);
+    lines
+}
+
+/// Warnings for the risky flags, the same on every route.
+fn push_flag_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     if app.opt_force {
         lines.push(Line::from(Span::styled(
             "  • ⚠ Force mode: non-fatal warnings will be ignored",
@@ -169,5 +221,4 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(AMBER),
         )));
     }
-    lines
 }

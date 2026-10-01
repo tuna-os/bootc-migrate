@@ -41,11 +41,14 @@ use self::review::render_review;
 use self::running::render_running;
 
 use self::configure_options::render_configure_options;
+use self::route::{ScanState, UTAH_TESTING, render_select_route};
 use self::select_image::render_select_image;
 
 use bootc_migrate_core::rebase_plan::Backend;
+use bootc_migrate_core::scan::Capabilities;
 
 mod configure_options;
+mod route;
 mod select_image;
 
 mod complete;
@@ -144,6 +147,17 @@ pub(crate) fn image_choices(
                     label: "Dakota stable".to_owned(),
                     image: DAKOTA_STABLE.to_owned(),
                     note: "the default".to_owned(),
+                    custom: false,
+                });
+            }
+            // Dakota -> Utah is the flagship reverse migration (#312). Utah is
+            // pre-alpha and neither route to it has a green main E2E cell
+            // (docs/support-matrix.md), so the note says so.
+            if booted_image != Some(UTAH_TESTING) {
+                choices.push(ImageChoice {
+                    label: "Utah testing".to_owned(),
+                    image: UTAH_TESTING.to_owned(),
+                    note: "pre-alpha; E2E status unknown".to_owned(),
                     custom: false,
                 });
             }
@@ -248,6 +262,27 @@ fn default_phases() -> Vec<PhaseInfo> {
     ]
 }
 
+/// The phases of the OstreeInstall route (composefs -> ostree), with the
+/// `bootc-rebase` output line that starts each. That route prints its own
+/// `=== … ===` headers rather than the migrator's numbered phases.
+const OSTREE_INSTALL_PHASES: &[(&str, &str)] = &[
+    ("Preflight", "Route:"),
+    ("Pull target image", "=== Pull:"),
+    ("bootc install (ostree)", "[deploy]"),
+    ("Carry /etc + /var", "=== /etc:"),
+    ("Bootloader", "=== Bootloader:"),
+];
+
+fn ostree_install_phases() -> Vec<PhaseInfo> {
+    OSTREE_INSTALL_PHASES
+        .iter()
+        .map(|(label, _)| PhaseInfo {
+            label,
+            status: PhaseStatus::Pending,
+        })
+        .collect()
+}
+
 // ─── Log line colours ─────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 enum LogKind {
@@ -308,12 +343,47 @@ enum Screen {
     Welcome,
     Preflight,
     SelectImage,
+    /// composefs hosts only: backend/bootloader for the scanned target.
+    SelectRoute,
     ConfigureOptions,
     Review,
     Running,
     Complete,
     Failed,
 }
+
+// ─── Options rows ─────────────────────────────────────────────────────────────
+/// One row on the options screen. The rows shown depend on the route, so
+/// keys act on the row under the cursor rather than on a fixed index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptRow {
+    DryRun,
+    SkipImport,
+    Bootloader,
+    SkipPreflight,
+    Force,
+    AcceptCrossBase,
+}
+
+/// The OSTree -> composefs conversion: every row, in the order the
+/// `tui-migrate` E2E driver walks.
+const CONVERSION_ROWS: &[OptRow] = &[
+    OptRow::DryRun,
+    OptRow::SkipImport,
+    OptRow::Bootloader,
+    OptRow::SkipPreflight,
+    OptRow::Force,
+    OptRow::AcceptCrossBase,
+];
+
+/// composefs hosts: there is no OSTree import to skip, and the bootloader is
+/// fixed by the route (shown on the route screen), so neither row is offered.
+const COMPOSEFS_HOST_ROWS: &[OptRow] = &[
+    OptRow::DryRun,
+    OptRow::SkipPreflight,
+    OptRow::Force,
+    OptRow::AcceptCrossBase,
+];
 
 // ─── Bootloader choice ────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +412,18 @@ pub struct App {
     image_list_state: ListState,
     custom_image: String,
     custom_image_editing: bool,
+
+    // SelectRoute (composefs hosts only)
+    scan: ScanState,
+    /// The image `scan` describes, so going back and forward without changing
+    /// the selection does not fetch it again.
+    scan_image: String,
+    scan_rx: Option<mpsc::Receiver<Result<Capabilities, String>>>,
+    /// Fetches a target's capabilities. A field so tests need no registry.
+    scanner: fn(&str) -> Result<Capabilities>,
+    target_backend: Backend,
+    /// The OstreeInstall engine, when installed (see `route::find_bootc_rebase`).
+    bootc_rebase: Option<std::path::PathBuf>,
 
     // ConfigureOptions
     opt_dry_run: bool,
@@ -396,6 +478,15 @@ impl App {
             image_list_state,
             custom_image: String::new(),
             custom_image_editing: false,
+            scan: ScanState::NotRun,
+            scan_image: String::new(),
+            scan_rx: None,
+            scanner: bootc_migrate_core::scan::scan_target_image,
+            target_backend: Backend::Composefs,
+            bootc_rebase: route::find_bootc_rebase(
+                std::env::current_exe().ok().as_deref(),
+                std::env::var_os("PATH").as_deref(),
+            ),
             opt_dry_run: true,
             opt_skip_import: false,
             opt_bootloader: Bootloader::SystemdBoot,
@@ -431,6 +522,74 @@ impl App {
         self.image_choices.get(idx).is_some_and(|c| c.custom)
     }
 
+    /// Whether the wizard is on a composefs host, where the route screen
+    /// appears. An ostree host, or one preflight could not read, keeps the
+    /// conversion wizard unchanged.
+    fn composefs_host(&self) -> bool {
+        self.booted_backend == Some(Backend::Composefs)
+    }
+
+    /// The selected route is composefs -> ostree, run through `bootc-rebase`.
+    fn is_ostree_install(&self) -> bool {
+        self.composefs_host() && self.target_backend == Backend::Ostree
+    }
+
+    fn option_rows(&self) -> &'static [OptRow] {
+        if self.composefs_host() {
+            COMPOSEFS_HOST_ROWS
+        } else {
+            CONVERSION_ROWS
+        }
+    }
+
+    /// Backends the scan allows for the selected target. Empty when the scan
+    /// has not finished, failed, or found neither.
+    fn viable_backends(&self) -> Vec<Backend> {
+        match &self.scan {
+            ScanState::Done(caps) => route::viable_backends(caps),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Scan the selected target in the background, unless it is already
+    /// scanned. A failed scan is retried.
+    fn start_scan(&mut self) {
+        let image = self.selected_image();
+        if image == self.scan_image && matches!(self.scan, ScanState::Done(_) | ScanState::Running)
+        {
+            return;
+        }
+        self.scan_image = image.clone();
+        self.scan = ScanState::Running;
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        let scanner = self.scanner;
+        std::thread::spawn(move || {
+            let _ = tx.send(scanner(&image).map_err(|e| format!("{e:#}")));
+        });
+    }
+
+    /// Take a finished scan result, if one has arrived, and pick the backend:
+    /// keep the current one when the target still allows it, otherwise the
+    /// first viable one, and composefs (the pre-scan behaviour) when none is.
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else { return };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("scan thread exited".to_owned()),
+        };
+        self.scan_rx = None;
+        self.scan = match result {
+            Ok(caps) => ScanState::Done(Box::new(caps)),
+            Err(e) => ScanState::Failed(e),
+        };
+        let viable = self.viable_backends();
+        if !viable.contains(&self.target_backend) {
+            self.target_backend = viable.first().copied().unwrap_or(Backend::Composefs);
+        }
+    }
+
     /// Rebuild the target list from a fresh preflight report, keeping the
     /// cursor on the first row — the one the detection picked.
     fn refresh_image_choices(&mut self, report: &bootc_migrate_core::preflight::PreflightReport) {
@@ -445,6 +604,9 @@ impl App {
     }
 
     fn build_command_args(&self) -> Vec<String> {
+        if self.is_ostree_install() {
+            return self.ostree_install_args();
+        }
         let mut args: Vec<String> = Vec::new();
         let exe =
             std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("bootc-migrate"));
@@ -479,6 +641,42 @@ impl App {
         args
     }
 
+    /// composefs -> ostree runs through `bootc-rebase`, the only engine with
+    /// `--target-backend`. Only the flags that route reads are passed. When
+    /// the engine is missing the bare name stands in, so the review screen
+    /// still shows the exact command, and `start_migration` refuses to run.
+    fn ostree_install_args(&self) -> Vec<String> {
+        let exe = self
+            .bootc_rebase
+            .as_ref()
+            .map_or_else(|| "bootc-rebase".to_owned(), |p| p.display().to_string());
+        let mut args = vec![
+            exe,
+            "--target-image".to_owned(),
+            self.selected_image(),
+            "--target-backend".to_owned(),
+            "ostree".to_owned(),
+        ];
+        if self.opt_dry_run {
+            args.push("--dry-run".to_owned());
+        }
+        if self.opt_skip_preflight {
+            args.push("--skip-preflight".to_owned());
+        }
+        if self.opt_force {
+            args.push("--force".to_owned());
+        }
+        if self.opt_accept_cross_base {
+            args.push("--accept-cross-base".to_owned());
+        }
+        args
+    }
+
+    /// The selected route needs `bootc-rebase` and it is not installed.
+    fn engine_missing(&self) -> bool {
+        self.is_ostree_install() && self.bootc_rebase.is_none()
+    }
+
     fn command_display(&self) -> String {
         self.build_command_args().join(" ")
     }
@@ -493,7 +691,11 @@ impl App {
 
         let (tx, rx) = mpsc::channel::<MigMsg>();
         self.rx = Some(rx);
-        self.phases = default_phases();
+        self.phases = if self.is_ostree_install() {
+            ostree_install_phases()
+        } else {
+            default_phases()
+        };
         self.log_lines.clear();
         self.log_scroll = 0;
         self.migration_done = false;
@@ -550,6 +752,15 @@ impl App {
 
     /// Parse a log line to update phase statuses.
     fn update_phases_from_line(&mut self, line: &str) {
+        if self.is_ostree_install() {
+            if let Some(idx) = OSTREE_INSTALL_PHASES
+                .iter()
+                .position(|(_, marker)| line.starts_with(marker))
+            {
+                self.set_phase_running(idx);
+            }
+            return;
+        }
         if line.contains("Phase 0") || line.contains("=== Phase 0") {
             self.set_phase_running(0);
         } else if line.contains("=== Phase 1: Skipped") {
@@ -692,8 +903,22 @@ impl App {
                 Screen::Preflight
             }
             Screen::Preflight => Screen::SelectImage,
+            Screen::SelectImage if self.composefs_host() => {
+                self.start_scan();
+                Screen::SelectRoute
+            }
             Screen::SelectImage => Screen::ConfigureOptions,
+            // The route is decided only once the scan has answered.
+            Screen::SelectRoute if matches!(self.scan, ScanState::NotRun | ScanState::Running) => {
+                Screen::SelectRoute
+            }
+            Screen::SelectRoute => {
+                self.options_cursor = 0;
+                Screen::ConfigureOptions
+            }
             Screen::ConfigureOptions => Screen::Review,
+            // Nothing to run: the review screen shows the install hint.
+            Screen::Review if self.engine_missing() => Screen::Review,
             Screen::Review => {
                 self.start_migration();
                 Screen::Running
@@ -714,24 +939,29 @@ impl App {
             Screen::Welcome => Screen::Welcome,
             Screen::Preflight => Screen::Welcome,
             Screen::SelectImage => Screen::Preflight,
+            Screen::SelectRoute => Screen::SelectImage,
+            Screen::ConfigureOptions if self.composefs_host() => Screen::SelectRoute,
             Screen::ConfigureOptions => Screen::SelectImage,
             Screen::Review => Screen::ConfigureOptions,
             Screen::Running | Screen::Complete | Screen::Failed => Screen::Running,
         };
     }
 
-    fn total_wizard_steps() -> usize {
-        5 // Welcome, Preflight, Image, Options, Review
+    /// Welcome, Preflight, Image, [Route,] Options, Review. The route step
+    /// exists on composefs hosts only.
+    fn total_wizard_steps(&self) -> usize {
+        if self.composefs_host() { 6 } else { 5 }
     }
 
     fn current_step(&self) -> usize {
+        let route = usize::from(self.composefs_host());
         match self.screen {
             Screen::Welcome => 1,
             Screen::Preflight => 2,
             Screen::SelectImage => 3,
-            Screen::ConfigureOptions => 4,
-            Screen::Review => 5,
-            Screen::Running | Screen::Complete | Screen::Failed => 5,
+            Screen::SelectRoute => 4,
+            Screen::ConfigureOptions => 4 + route,
+            Screen::Review | Screen::Running | Screen::Complete | Screen::Failed => 5 + route,
         }
     }
 
@@ -755,6 +985,7 @@ impl App {
             Screen::Welcome => self.handle_welcome_key(key),
             Screen::Preflight => self.handle_preflight_key(key),
             Screen::SelectImage => self.handle_select_image_key(key),
+            Screen::SelectRoute => self.handle_route_key(key),
             Screen::ConfigureOptions => self.handle_options_key(key),
             Screen::Review => self.handle_review_key(key),
             Screen::Running => self.handle_running_key(key),
@@ -868,10 +1099,35 @@ impl App {
         false
     }
 
+    fn handle_route_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            // Only a dual-capable target has anything to switch to.
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('h')
+            | KeyCode::Char('l')
+            | KeyCode::Char(' ') => {
+                let viable = self.viable_backends();
+                if viable.len() > 1 {
+                    self.target_backend = match self.target_backend {
+                        Backend::Composefs => Backend::Ostree,
+                        Backend::Ostree => Backend::Composefs,
+                    };
+                }
+            }
+            KeyCode::Char('r') if matches!(self.scan, ScanState::Failed(_)) => self.start_scan(),
+            KeyCode::Enter | KeyCode::Char('n') => self.next_screen(),
+            KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
+            KeyCode::Char('q') => self.show_quit_dialog = true,
+            _ => {}
+        }
+        false
+    }
+
     fn handle_options_key(&mut self, key: KeyCode) -> bool {
-        // 6 options: dry_run(0), skip_import(1), bootloader(2),
-        // skip_preflight(3), force(4), accept_cross_base(5)
-        const NUM_OPTIONS: usize = 6;
+        let rows = self.option_rows();
+        let num_options = rows.len();
+        let on_bootloader = rows.get(self.options_cursor) == Some(&OptRow::Bootloader);
         match key {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if self.options_cursor > 0 {
@@ -879,23 +1135,25 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                if self.options_cursor < NUM_OPTIONS - 1 {
+                if self.options_cursor < num_options - 1 {
                     self.options_cursor += 1;
                 }
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                self.toggle_option(self.options_cursor);
-                if key == KeyCode::Enter && self.options_cursor == NUM_OPTIONS - 1 {
+                if let Some(&row) = rows.get(self.options_cursor) {
+                    self.toggle_option(row);
+                }
+                if key == KeyCode::Enter && self.options_cursor == num_options - 1 {
                     self.next_screen();
                 }
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                if self.options_cursor == 2 {
+                if on_bootloader {
                     self.opt_bootloader = Bootloader::Grub2;
                 }
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                if self.options_cursor == 2 {
+                if on_bootloader {
                     self.opt_bootloader = Bootloader::SystemdBoot;
                 }
             }
@@ -907,20 +1165,19 @@ impl App {
         false
     }
 
-    fn toggle_option(&mut self, idx: usize) {
-        match idx {
-            0 => self.opt_dry_run = !self.opt_dry_run,
-            1 => self.opt_skip_import = !self.opt_skip_import,
-            2 => {
+    fn toggle_option(&mut self, row: OptRow) {
+        match row {
+            OptRow::DryRun => self.opt_dry_run = !self.opt_dry_run,
+            OptRow::SkipImport => self.opt_skip_import = !self.opt_skip_import,
+            OptRow::Bootloader => {
                 self.opt_bootloader = match self.opt_bootloader {
                     Bootloader::SystemdBoot => Bootloader::Grub2,
                     Bootloader::Grub2 => Bootloader::SystemdBoot,
                 };
             }
-            3 => self.opt_skip_preflight = !self.opt_skip_preflight,
-            4 => self.opt_force = !self.opt_force,
-            5 => self.opt_accept_cross_base = !self.opt_accept_cross_base,
-            _ => {}
+            OptRow::SkipPreflight => self.opt_skip_preflight = !self.opt_skip_preflight,
+            OptRow::Force => self.opt_force = !self.opt_force,
+            OptRow::AcceptCrossBase => self.opt_accept_cross_base = !self.opt_accept_cross_base,
         }
     }
 
@@ -1028,12 +1285,13 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Screen::Welcome
         | Screen::Preflight
         | Screen::SelectImage
+        | Screen::SelectRoute
         | Screen::ConfigureOptions
         | Screen::Review => {
             format!(
                 "  Step {} of {}",
                 app.current_step(),
-                App::total_wizard_steps()
+                app.total_wizard_steps()
             )
         }
         Screen::Running => "  Migration running…".to_owned(),
@@ -1075,6 +1333,26 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("↑↓", "Move"),
             ("Enter", "Select / Next"),
             ("e / Tab", "Edit custom"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
+        Screen::SelectRoute if app.viable_backends().len() > 1 => &[
+            ("←→", "Backend"),
+            ("Enter", "Next"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
+        Screen::SelectRoute if matches!(app.scan, ScanState::Failed(_)) => &[
+            ("Enter", "Next"),
+            ("r", "Re-scan"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
+        Screen::SelectRoute => &[("Enter", "Next"), ("b", "Back"), ("q", "Quit")],
+        Screen::ConfigureOptions if app.composefs_host() => &[
+            ("↑↓", "Move"),
+            ("Space", "Toggle"),
+            ("n", "Next"),
             ("b", "Back"),
             ("q", "Quit"),
         ],
@@ -1123,6 +1401,7 @@ fn render_screen(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Screen::Welcome => render_welcome(f, area),
         Screen::Preflight => render_preflight(f, app, area),
         Screen::SelectImage => render_select_image(f, app, area),
+        Screen::SelectRoute => render_select_route(f, app, area),
         Screen::ConfigureOptions => render_configure_options(f, app, area),
         Screen::Review => render_review(f, app, area),
         Screen::Running => render_running(f, app, area),
@@ -1258,6 +1537,11 @@ fn event_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
+        if app.screen == Screen::SelectRoute {
+            app.poll_scan();
+            app.advance_spinner();
+        }
+
         // Drain migration channel first
         if app.screen == Screen::Running {
             app.drain_migration_channel();
