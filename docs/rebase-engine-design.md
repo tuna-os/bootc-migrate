@@ -130,6 +130,43 @@ or filesystem mutation occurs. This keeps the route/phase contract consumable
 without scraping human-oriented output and makes unsupported reverse routes
 explicit before an apply attempt.
 
+### First-boot follow-up per route (L1 probe, L2 status and prompt)
+
+Each route that stages a deployment writes the L1 verify probe and the L2
+desktop prompt into the new deployment
+(`bootc-migrate-core::firstboot_verify`). The table shows what each part
+does on each route.
+
+| Route | L1 verify probe | L2 `status` | L2 desktop prompt |
+|---|---|---|---|
+| CoreMigration (ostree → composefs) | staged | route, verify result, commit state | offers `commit`; shows findings |
+| ImageSwap (composefs → composefs) | staged | route, verify result | shows findings |
+| OstreeInstall (composefs → ostree) | staged | route, verify result, report path, day-2 checks | always shows once: report path and day-2 checks (#313) |
+| OstreeDeploy (ostree → ostree) | not staged | no report, so no route | not staged |
+
+OstreeInstall details (#313):
+
+- The probe applies to an OSTree deployment without changes. Its three
+  checks (home ownership, system users of the target, duplicated
+  machine-id) do not depend on the backend. When the route copies `/var`,
+  the home-ownership check is relevant. The probe writes to
+  `/var/lib/bootc-migrate/`, in the carried `/var`.
+- The route has no commit step. The composefs entry stays as the rollback.
+  Thus the prompt does not use `report.json` with `composefs=`. It shows
+  when two conditions are true: the carried
+  `/var/lib/bootc-rebase/ostree-install-report.json` exists, and the kernel
+  command line contains `ostree=`. When you boot the composefs rollback
+  entry, the prompt stays silent.
+- The day-2 checks come from the first real Dakota → Utah migration:
+  - the ESP entry in `/etc/fstab`
+  - the default boot entry
+  - SELinux labels on service data under `/var`
+  - the owner of container storage
+
+  The probe does not check these. `status` and the prompt list them for a
+  manual check. `status::OSTREE_INSTALL_DAY2_CHECKS` holds the list, and a
+  unit test keeps the prompt text in sync with it.
+
 ## 5. Decision policies (RFC open questions 1–3)
 
 ### 5.1 Bootloader (Q1)

@@ -15,6 +15,41 @@ pub const MIGRATE_REPORT: &str = "/var/lib/bootc-migrate/report.json";
 /// OstreeInstall's report, written pre-reboot and carried with `/var`.
 pub const OSTREE_INSTALL_REPORT: &str = "/var/lib/bootc-rebase/ostree-install-report.json";
 
+/// The route string [`gather`] reports for an OstreeInstall host.
+pub const OSTREE_INSTALL_ROUTE: &str = "composefs -> ostree via OstreeInstall";
+
+/// One manual check an OstreeInstall host needs after its first boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Day2Check {
+    /// Phrase the L2 prompt text must also contain (kept in sync by test).
+    pub keyword: &'static str,
+    /// The `status` line.
+    pub text: &'static str,
+}
+
+/// Day-2 checks for OstreeInstall: the breakage the first real Dakota ->
+/// Utah run (#313) found by hand, which the L1 probe does not cover.
+pub const OSTREE_INSTALL_DAY2_CHECKS: &[Day2Check] = &[
+    Day2Check {
+        keyword: "/etc/fstab",
+        text: "the ESP has an /etc/fstab entry (`findmnt --fstab /boot/efi`)",
+    },
+    Day2Check {
+        keyword: "bootloader default",
+        text: "the bootloader default is the OSTree entry, not the composefs rollback",
+    },
+    Day2Check {
+        keyword: "SELinux",
+        text: "service data under /var has the SELinux labels of the new policy \
+               (`restorecon -Rnv /var`)",
+    },
+    Day2Check {
+        keyword: "container storage",
+        text: "container storage belongs to its users \
+               (`~/.local/share/containers` for rootless containers)",
+    },
+];
+
 /// What a staging route records about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MigrationReport {
@@ -170,10 +205,7 @@ fn read_route(p: &StatusPaths) -> (Option<String>, Option<String>) {
             .get("target_image")
             .and_then(|r| r.as_str())
             .map(str::to_string);
-        return (
-            Some("composefs -> ostree via OstreeInstall".to_string()),
-            image,
-        );
+        return (Some(OSTREE_INSTALL_ROUTE.to_string()), image);
     }
     (None, None)
 }
@@ -235,6 +267,13 @@ pub fn render(s: &StatusState) -> String {
         Commit::Available => out.push_str("  Commit: available — run `bootc-migrate commit`\n"),
         Commit::Committed => out.push_str("  Commit: done, nothing legacy remains\n"),
         Commit::NotApplicable(why) => out.push_str(&format!("  Commit: not applicable ({why})\n")),
+    }
+    if s.route.as_deref() == Some(OSTREE_INSTALL_ROUTE) {
+        out.push_str(&format!("  Report: {OSTREE_INSTALL_REPORT}\n"));
+        out.push_str("  Day-2 checks (not covered by the first-boot verify probe):\n");
+        for check in OSTREE_INSTALL_DAY2_CHECKS {
+            out.push_str(&format!("    - {}\n", check.text));
+        }
     }
     out
 }
@@ -364,6 +403,47 @@ mod tests {
         );
         assert_eq!(s.target_image.as_deref(), Some("ghcr.io/x/utah:t"));
         assert!(matches!(s.commit, Commit::NotApplicable(_)), "{s:?}");
+
+        let text = render(&s);
+        assert!(
+            text.contains(&format!("Report: {OSTREE_INSTALL_REPORT}")),
+            "{text}"
+        );
+        for check in OSTREE_INSTALL_DAY2_CHECKS {
+            assert!(
+                text.contains(check.text),
+                "missing {:?}:\n{text}",
+                check.keyword
+            );
+        }
+    }
+
+    #[test]
+    fn day2_checks_render_only_for_ostree_install() {
+        let base = StatusState {
+            route: None,
+            target_image: None,
+            verify: Verify::Clean,
+            commit: Commit::NotApplicable("n/a".to_string()),
+        };
+        for (route, want) in [
+            (None, false),
+            (Some("ostree -> composefs via CoreMigration"), false),
+            (Some("composefs -> composefs via ImageSwap"), false),
+            (Some(OSTREE_INSTALL_ROUTE), true),
+        ] {
+            let s = StatusState {
+                route: route.map(str::to_string),
+                ..base.clone()
+            };
+            let text = render(&s);
+            assert_eq!(text.contains("Day-2 checks"), want, "{route:?}:\n{text}");
+            assert_eq!(
+                text.contains(OSTREE_INSTALL_REPORT),
+                want,
+                "{route:?}:\n{text}"
+            );
+        }
     }
 
     #[test]
