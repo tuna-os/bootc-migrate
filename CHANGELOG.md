@@ -85,6 +85,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `Strategy::OstreeInstall` (composefs → ostree) now holds the same run lock
+  as the forward migration (#303). Before, its check for an existing
+  deployment had no lock, so two runs started together both passed it and
+  then used the same ESP snapshot, install and `/var` copy at the same
+  time. A second run now stops before it changes anything and names the
+  holder (pid and start time). The lock is an
+  `flock`, so a crashed or killed run does not block the next one. A
+  refused run also no longer truncates the holder's pid out of the lock file.
+
 - `bootc-rebase`'s cross-base gate now says when it has checked a pair and
   found one OS lineage. Before, that pass printed nothing, so it looked
   the same as a gate that had stopped gating. The #80 missing-accounts
