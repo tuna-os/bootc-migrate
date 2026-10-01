@@ -443,6 +443,18 @@ impl OstreeInstallConfig<'_> {
             })?;
         }
 
+        // ---- First-boot repair (L3, #309) ----
+        // Staged before the relabel below, so its files get target labels.
+        crate::firstboot_repair::stage_repair(
+            &deploy_root.join("etc"),
+            Path::new(if var_copied {
+                OSTREE_STATEROOT_VAR
+            } else {
+                "/var"
+            }),
+            true,
+        )?;
+
         // ---- SELinux labels ----
         // The merge and the /var copy wrote files with the labels the host
         // had, and a composefs host may run without an SELinux policy at
