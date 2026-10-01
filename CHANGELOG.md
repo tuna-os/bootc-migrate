@@ -91,6 +91,14 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   note now also reads `/usr/lib/passwd` and `/usr/lib/group`. EL10 bootc
   images keep their system accounts there, and the note used to list
   every one of them as missing on an AlmaLinux host.
+- `bootc-rebase`'s composefs → OSTree (`OstreeInstall`) route now supplements
+  the merged `/etc/passwd` and `/etc/group` with the target image's vendor
+  accounts from `/usr/lib/`. Target images with `nss-altfiles` or vendor-split
+  databases (Fedora bootc, CentOS, AlmaLinux) keep system accounts (`chrony`,
+  `rpc`, `rpcuser`, `sssd`, `mail`) in `/usr/lib/` instead of `/usr/etc/`;
+  without them in `/etc/passwd` and `/etc/group`, early-boot
+  `systemd-tmpfiles-setup.service` failed to resolve them before
+  `systemd-userdbd` started, causing `chronyd` and `gssproxy` to fail (#276).
 - `bootc-rebase`'s composefs → OSTree route now fills the new stateroot's
   `/var` with the target image's own `/var` skeleton after it copies the
   live `/var`, without overwriting anything it carried. The stateroot of
