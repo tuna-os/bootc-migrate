@@ -66,7 +66,8 @@ E2E_TEST_MODE="${E2E_TEST_MODE:-migrate}"
 # the first execution of an exploratory route, and its deliverable is the
 # policy under assertion, not Dakota's lifecycle on an openSUSE guest.
 E2E_CROSS_FAMILY="${E2E_CROSS_FAMILY:-0}"
-# os-release ID the migrated system must report (cross-family cells only).
+# os-release ID the migrated system must report (cross-family, image-swap
+# and composefs-to-ostree cells).
 E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
 # Display manager the migrated system must run (gdm, sddm, ...); empty
 # accepts any when the default target is graphical. Checked by
@@ -1803,6 +1804,11 @@ REVSSH
     [ "$HOME_MARKER" = "real-home-data" ] || { echo "FAIL: /var/home data not carried (got: $HOME_MARKER)"; exit 1; }
     REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
     [ "$REALUSER" != "MISSING" ] || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
+    BOOTED_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    echo "  os-release ID: $BOOTED_ID"
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"; exit 1
+    fi
     echo "OK: booted the OSTree deployment of $BOOTED_IMG with /etc, /var and /var/home carried over."
 
     # The composefs deployment must remain reachable: its firmware entry and
@@ -1811,6 +1817,16 @@ REVSSH
     echo "$NVRAM" | sed 's/^/  /'
     echo "$NVRAM" | grep -qi "Linux Boot Manager" || {
         echo "FAIL: the composefs deployment's 'Linux Boot Manager' firmware entry is gone"; exit 1; }
+    # The route puts the shim/GRUB entry bootupd registered first in
+    # BootOrder, so the next cold boot lands in the OSTree deployment
+    # again and systemd-boot stays one firmware pick away as rollback.
+    FIRST_BOOT=$(echo "$NVRAM" | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
+    FIRST_ENTRY=$(echo "$NVRAM" | grep -i "^Boot${FIRST_BOOT}" || true)
+    echo "  first in BootOrder: ${FIRST_ENTRY:-<none>}"
+    if [ -z "$FIRST_BOOT" ] || ! echo "$FIRST_ENTRY" | grep -qiE 'shim|grub' \
+        || echo "$FIRST_ENTRY" | grep -qi "Linux Boot Manager"; then
+        echo "FAIL: the shim/GRUB entry is not first in BootOrder"; exit 1
+    fi
     # The OSTree deployment mounts nothing at /boot/efi by itself (Bluefin's
     # own installs leave the ESP unmounted; gpt-auto may put it at /efi), so
     # look at every usual place and fall back to mounting the ESP partition
