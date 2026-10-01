@@ -171,9 +171,10 @@ pub fn install_verify_probe(etc_dir: &Path) -> Result<()> {
 
 // ---- Desktop cleanup prompt (L2) -------------------------------------------
 // Autostarted once per desktop user after a migration. Offers `commit`
-// when one is pending, surfaces first-boot verify findings otherwise.
-// Silent unless there is something to say; stamps after showing so it
-// never nags twice.
+// when one is pending, points an OstreeInstall host at its report and the
+// day-2 checks, and surfaces first-boot verify findings otherwise. Silent
+// unless there is something to say; stamps after showing so it never nags
+// twice.
 
 /// The autostart entry (relative to `/etc`).
 pub const PROMPT_DESKTOP_REL: &str = "xdg/autostart/bootc-migrate-cleanup.desktop";
@@ -189,14 +190,18 @@ pub const PROMPT_DESKTOP: &str = "[Desktop Entry]\n\
      NoDisplay=true\n\
      X-GNOME-Autostart-enabled=true\n";
 
-/// The prompt script. `BOOTC_MIGRATE_STATE_DIR` overrides the state dir so
-/// tests run it against fixtures; production leaves it unset.
+/// The prompt script. `BOOTC_MIGRATE_STATE_DIR`, `BOOTC_REBASE_STATE_DIR`
+/// and `BOOTC_MIGRATE_CMDLINE` override the state dirs and the kernel
+/// command line so tests run it against fixtures; production leaves them
+/// unset.
 pub const PROMPT_SCRIPT: &str = r#"#!/bin/sh
 # bootc-migrate desktop cleanup prompt (L2). Autostarted once per desktop
 # user after a migration. Silent unless there is something to say; stamps
 # after showing (even on "Later") so it never nags twice.
 set -u
 STATE_DIR=${BOOTC_MIGRATE_STATE_DIR:-/var/lib/bootc-migrate}
+REBASE_STATE_DIR=${BOOTC_REBASE_STATE_DIR:-/var/lib/bootc-rebase}
+CMDLINE=${BOOTC_MIGRATE_CMDLINE:-/proc/cmdline}
 STAMP_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/bootc-migrate
 STAMP=$STAMP_DIR/cleanup-prompted
 [ -f "$STAMP" ] && exit 0
@@ -205,7 +210,7 @@ result=$(cat "$STATE_DIR/verify-result" 2>/dev/null || echo MISSING)
 commit_pending=0
 # Same three conditions as `status`: our own report, booted the staged
 # composefs deployment, legacy content still on disk.
-if [ -f "$STATE_DIR/report.json" ] && grep -q 'composefs=' /proc/cmdline 2>/dev/null; then
+if [ -f "$STATE_DIR/report.json" ] && grep -q 'composefs=' "$CMDLINE" 2>/dev/null; then
     # Any non-dot entry besides the target's own bootc/ storage.
     for e in /sysroot/ostree/*; do
         [ -e "$e" ] || continue
@@ -213,14 +218,27 @@ if [ -f "$STATE_DIR/report.json" ] && grep -q 'composefs=' /proc/cmdline 2>/dev/
         commit_pending=1; break
     done
 fi
-if [ "$commit_pending" = 0 ] && { [ "$result" = OK ] || [ "$result" = MISSING ]; }; then
+# OstreeInstall (composefs -> ostree): its own report, carried with /var,
+# and booted the OSTree deployment. There is no commit step (the composefs
+# entry stays as the rollback), but the route leaves day-2 checks that no
+# probe covers, so it always earns one prompt.
+ostree_followup=0
+if [ -f "$REBASE_STATE_DIR/ostree-install-report.json" ] && grep -q 'ostree=' "$CMDLINE" 2>/dev/null; then
+    ostree_followup=1
+fi
+if [ "$commit_pending" = 0 ] && [ "$ostree_followup" = 0 ] \
+    && { [ "$result" = OK ] || [ "$result" = MISSING ]; }; then
     exit 0
 fi
 
 # Headless, or no dialog tool: say it once for the journal and leave the
 # stamp alone — the next graphical login still gets the prompt.
 if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-    echo "bootc-migrate: migration follow-up pending (verify: $result, commit: $commit_pending); run 'bootc-migrate status'." >&2
+    if [ "$ostree_followup" = 1 ]; then
+        echo "bootc-migrate: OstreeInstall follow-up pending (verify: $result); see $REBASE_STATE_DIR/ostree-install-report.json and run 'bootc-rebase status'." >&2
+    else
+        echo "bootc-migrate: migration follow-up pending (verify: $result, commit: $commit_pending); run 'bootc-migrate status'." >&2
+    fi
     exit 0
 fi
 DIALOG=""
@@ -254,9 +272,13 @@ if [ "$commit_pending" = 1 ] && [ -n "$BIN" ]; then
     exit 0
 fi
 
-# Findings, or a pending commit with no binary to run it: inform, with the
-# manual command for the commit case.
-if [ "$commit_pending" = 1 ]; then
+# OstreeInstall follow-up, findings, or a pending commit with no binary to
+# run it: inform, with the manual command for the commit case.
+if [ "$ostree_followup" = 1 ]; then
+    check=$result
+    [ "$check" = MISSING ] && check="not run"
+    TEXT="This system was migrated from composefs to OSTree. The composefs boot entry stays as a rollback. First-boot check: $check. Check by hand: the ESP has an /etc/fstab entry; the bootloader default is the OSTree entry; service data under /var has the SELinux labels of the new policy (restorecon); container storage belongs to its users. Report: $REBASE_STATE_DIR/ostree-install-report.json. Or run 'bootc-rebase status'."
+elif [ "$commit_pending" = 1 ]; then
     TEXT="A migration commit is pending (the old system is still on disk), but bootc-migrate was not found to run it. Run 'bootc-migrate commit' as root when ready."
 else
     TEXT="The post-migration check reported: $result. See /var/lib/bootc-migrate/verify-report.json, or run 'bootc-migrate status'."
@@ -402,5 +424,119 @@ mod tests {
             assert!(PROMPT_SCRIPT.contains(needle), "script lost {needle}");
         }
         assert!(PROMPT_SCRIPT.starts_with("#!/bin/sh\n"));
+    }
+
+    /// Run the prompt headless against a fixture state; return its stderr
+    /// and whether it left the once-only stamp.
+    fn run_prompt_headless(
+        migrate_files: &[(&str, &str)],
+        rebase_files: &[(&str, &str)],
+        cmdline: &str,
+    ) -> (String, bool) {
+        let dir = tempdir().unwrap();
+        let migrate = dir.path().join("bootc-migrate");
+        let rebase = dir.path().join("bootc-rebase");
+        std::fs::create_dir_all(&migrate).unwrap();
+        std::fs::create_dir_all(&rebase).unwrap();
+        for (name, body) in migrate_files {
+            std::fs::write(migrate.join(name), body).unwrap();
+        }
+        for (name, body) in rebase_files {
+            std::fs::write(rebase.join(name), body).unwrap();
+        }
+        let cmdline_path = dir.path().join("cmdline");
+        std::fs::write(&cmdline_path, cmdline).unwrap();
+        let script = dir.path().join("prompt.sh");
+        std::fs::write(&script, PROMPT_SCRIPT).unwrap();
+        let state_home = dir.path().join("state");
+
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir.path())
+            .env("XDG_STATE_HOME", &state_home)
+            .env("BOOTC_MIGRATE_STATE_DIR", &migrate)
+            .env("BOOTC_REBASE_STATE_DIR", &rebase)
+            .env("BOOTC_MIGRATE_CMDLINE", &cmdline_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "prompt must always exit 0: {out:?}");
+        let stamped = state_home.join("bootc-migrate/cleanup-prompted").exists();
+        (String::from_utf8_lossy(&out.stderr).into_owned(), stamped)
+    }
+
+    #[test]
+    fn prompt_covers_the_ostree_install_direction() {
+        const OSTREE_REPORT: (&str, &str) =
+            ("ostree-install-report.json", r#"{"target_image": "t"}"#);
+        // (case, migrate state, rebase state, cmdline, expected stderr needle
+        // or None for silence)
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, &[(&str, &str)], &[(&str, &str)], &str, Option<&str>)] = &[
+            (
+                "OstreeInstall, booted ostree, clean verify",
+                &[("verify-result", "OK\n")],
+                &[OSTREE_REPORT],
+                "ostree=/ostree/boot.1/x/y/0 rw\n",
+                Some("OstreeInstall follow-up pending (verify: OK)"),
+            ),
+            (
+                "OstreeInstall, booted ostree, probe never ran",
+                &[],
+                &[OSTREE_REPORT],
+                "ostree=/ostree/boot.1/x/y/0\n",
+                Some("OstreeInstall follow-up pending (verify: MISSING)"),
+            ),
+            (
+                "OstreeInstall, booted the composefs rollback entry",
+                &[("verify-result", "OK\n")],
+                &[OSTREE_REPORT],
+                "composefs=abc\n",
+                None,
+            ),
+            (
+                "ostree host, no OstreeInstall report",
+                &[("verify-result", "OK\n")],
+                &[],
+                "ostree=/ostree/boot.1/x/y/0\n",
+                None,
+            ),
+            (
+                "no OstreeInstall report, findings still surface",
+                &[("verify-result", "FINDINGS 1\n")],
+                &[],
+                "ostree=/ostree/boot.1/x/y/0\n",
+                Some("migration follow-up pending (verify: FINDINGS 1, commit: 0)"),
+            ),
+        ];
+        for (case, migrate, rebase, cmdline, want) in cases {
+            let (stderr, stamped) = run_prompt_headless(migrate, rebase, cmdline);
+            match want {
+                Some(needle) => {
+                    assert!(stderr.contains(needle), "{case}: {stderr:?}");
+                    if needle.contains("OstreeInstall") {
+                        assert!(
+                            stderr.contains("ostree-install-report.json"),
+                            "{case}: must point at the report: {stderr:?}"
+                        );
+                    }
+                }
+                None => assert!(stderr.is_empty(), "{case}: expected silence: {stderr:?}"),
+            }
+            // Headless never stamps: the next graphical login still prompts.
+            assert!(!stamped, "{case}: headless run stamped");
+        }
+    }
+
+    #[test]
+    fn ostree_install_prompt_names_every_day2_check() {
+        for check in crate::status::OSTREE_INSTALL_DAY2_CHECKS {
+            assert!(
+                PROMPT_SCRIPT.contains(check.keyword),
+                "prompt lost day-2 check {:?}",
+                check.keyword
+            );
+        }
     }
 }
