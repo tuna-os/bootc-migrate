@@ -311,7 +311,7 @@ jobs:
           #   target: quay.io/fedora/fedora-bootc:44
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Bluefin + Dakota are ~5 GB each. The default ubuntu-latest runner has
       # ~14 GB free; that plus a 20-60 GB disk.raw (a sparse file that grows
@@ -450,7 +450,7 @@ jobs:
 
       - name: Upload TUI walkthrough artifacts
         if: ${{ always() && matrix.scenario.mode == 'tui-migrate' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tui-walkthrough-${{ strategy.job-index }}
           path: |
@@ -490,7 +490,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs-${{ strategy.job-index }}
           path: |
