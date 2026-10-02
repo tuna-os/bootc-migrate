@@ -302,7 +302,11 @@ jobs:
             expect_dm: gdm
             mode: image-swap
             disk_size: 40G
-            expect_os_id: utah
+            # utah:testing is built on Fedora Hummingbird; since the
+            # 2026-10-01 image its os-release says ID=hummingbird (run
+            # 36964331436). The booted-image check above already proves the
+            # target booted; this proves the target /etc/os-release won.
+            expect_os_id: hummingbird
             allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
