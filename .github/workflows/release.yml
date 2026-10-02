@@ -58,7 +58,7 @@ jobs:
       build: ${{ steps.r.outputs.build }}
       publish: ${{ steps.r.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tags are needed to answer "has this version been released?".
           fetch-depth: 0
@@ -117,7 +117,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # build.rs reads the git SHA; a full checkout keeps that meaningful.
           fetch-depth: 0
@@ -136,7 +136,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/bootc-migrate" "$name-bin"
           tar -C target/${{ matrix.target }}/release -czf "dist/$name.tar.gz" bootc-migrate bootc-rebase
           sha256sum "dist/$name.tar.gz" | awk '{print $1}' > "dist/$name.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/
@@ -147,7 +147,7 @@ jobs:
     if: needs.resolve.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
@@ -173,8 +173,8 @@ jobs:
     if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
@@ -185,17 +185,17 @@ jobs:
           mkdir -p ctx/linux/amd64 ctx/linux/arm64
           tar -xzf dist/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz -C ctx/linux/amd64
           tar -xzf dist/bootc-migrate-aarch64-unknown-linux-gnu.tar.gz -C ctx/linux/arm64
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
       - name: Log in to ghcr
         if: needs.resolve.outputs.publish == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ctx
           file: Containerfile
