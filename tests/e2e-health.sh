@@ -259,9 +259,14 @@ fi
 
 # ---- 8. First-boot verify probe (L1) ------------------------------------------
 # Every migrated deployment stages a probe that checks itself on first boot:
-# home ownership, the target's declared users, a duplicated machine-id. Its
+# home ownership, the target's declared users, a kept machine-id. Its
 # one-line summary says OK or FINDINGS <n>; the JSON report has the details.
+# Warnings (a machine-id kept on purpose) are shown and do not fail.
 verify_res=/var/lib/bootc-migrate/verify-result
+if [ -s /var/lib/bootc-migrate/verify-warnings ]; then
+    echo "  first-boot verify probe warnings (not failures):"
+    sed 's/^/    /' /var/lib/bootc-migrate/verify-warnings
+fi
 if [ -f "$verify_res" ]; then
     r=$(cat "$verify_res")
     if [ "$r" = OK ]; then

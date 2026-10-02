@@ -4,7 +4,7 @@
 //! Every staging route installs a small shell probe plus a oneshot unit into
 //! the new deployment. On first boot the probe checks the breakage classes a
 //! migration can introduce — home-directory ownership, the target's declared
-//! system users, a duplicated machine-id — writes a JSON report plus a
+//! system users (and, as a warning only, a kept machine-id) — writes a JSON report plus a
 //! one-line summary to `/var/lib/bootc-migrate/`, and always exits 0:
 //! findings are data for [`crate::rebase_plan`] status and the desktop
 //! cleanup prompt (L2), never boot failures.
@@ -41,15 +41,25 @@ set -u
 OUT_DIR=/var/lib/bootc-migrate
 REPORT=$OUT_DIR/verify-report.json
 RESULT=$OUT_DIR/verify-result
+WARNINGS=$OUT_DIR/verify-warnings
 MARKER=/etc/bootc-migrate/verify-firstboot
 FINDINGS_TMP=$(mktemp)
+WARN_TMP=$(mktemp)
 : > "$FINDINGS_TMP"
+: > "$WARN_TMP"
 # note appends "class<TAB>detail" and echoes it to the journal. The count
 # is read back from the file at the end: notes also fire from pipeline
 # subshells, where a shell variable would not propagate.
 note() {
     printf '%s\t%s\n' "$1" "$2" >> "$FINDINGS_TMP"
     echo "verify: [$1] $2"
+}
+# warn records a "class<TAB>detail" that is worth knowing but is not
+# breakage: it goes into the report's "warnings" and verify-warnings, and
+# does not count toward FINDINGS.
+warn() {
+    printf '%s\t%s\n' "$1" "$2" >> "$WARN_TMP"
+    echo "verify: warning: [$1] $2"
 }
 json_escape() {
     sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | tr -d '\n\r'
@@ -88,14 +98,20 @@ for f in /usr/lib/sysusers.d/*.conf; do
     done
 done
 
-# 3. machine-id must not still be the source's: a duplicated id shadows the
-# new system's journal and confuses anything keyed on it. The marker holds
-# the source id the migration recorded.
+# 3. machine-id still equal to the source's. This is a warning, not a
+# finding. The in-place routes keep the machine-id on purpose: the /etc
+# merge preserves identity files (mergetc), because this is the same
+# machine, and a new id breaks journal continuity, DHCP leases and
+# anything else keyed on it. The source deployment does not run at the
+# same time, so nothing is duplicated on the network. The id is only a
+# problem when the migrated disk is cloned to other machines, which the
+# probe cannot see. So report it, and do not fail the verdict on it.
+# The marker holds the source id the migration recorded.
 if [ -f "$MARKER" ]; then
     src_id=$(cat "$MARKER")
     live_id=$(cat /etc/machine-id 2>/dev/null || true)
     if [ -n "$src_id" ] && [ "$src_id" = "$live_id" ]; then
-        note machine-id "live machine-id $live_id still equals the source's"
+        warn machine-id "live machine-id $live_id still equals the source's (kept on purpose by the in-place migration)"
     fi
 fi
 
@@ -108,11 +124,19 @@ fi
         first=0
         printf '    {"class": "%s", "detail": "%s"}' "$class" "$(printf '%s' "$detail" | json_escape)"
     done < "$FINDINGS_TMP"
+    printf '\n  ],\n  "warnings": [\n'
+    first=1
+    while IFS="$tab" read -r class detail; do
+        [ "$first" = 1 ] || printf ',\n'
+        first=0
+        printf '    {"class": "%s", "detail": "%s"}' "$class" "$(printf '%s' "$detail" | json_escape)"
+    done < "$WARN_TMP"
     printf '\n  ]\n}\n'
 } > "$REPORT"
 n=$(wc -l < "$FINDINGS_TMP" | tr -d ' ')
 if [ "$n" = 0 ]; then echo OK > "$RESULT"; else echo "FINDINGS $n" > "$RESULT"; fi
-rm -f "$FINDINGS_TMP"
+if [ -s "$WARN_TMP" ]; then cp "$WARN_TMP" "$WARNINGS"; else rm -f "$WARNINGS"; fi
+rm -f "$FINDINGS_TMP" "$WARN_TMP"
 echo "verify: $n finding(s); report at $REPORT"
 exit 0
 "#;
@@ -353,10 +377,11 @@ mod tests {
     fn probe_script_shape() {
         // Static contract the E2E health check (section 8) relies on: the
         // probe writes both files, never fails the boot, and covers the
-        // three breakage classes.
+        // three classes.
         for needle in [
             "verify-report.json",
             "verify-result",
+            "verify-warnings",
             "exit 0",
             "home-entries",
             "missing-user",
@@ -364,6 +389,10 @@ mod tests {
         ] {
             assert!(VERIFY_SCRIPT.contains(needle), "script lost {needle}");
         }
+        // A kept machine-id is a warning, never a finding: the in-place
+        // routes keep it on purpose.
+        assert!(VERIFY_SCRIPT.contains("warn machine-id"));
+        assert!(!VERIFY_SCRIPT.contains("note machine-id"));
         assert!(VERIFY_SCRIPT.starts_with("#!/bin/sh\n"));
     }
 
