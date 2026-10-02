@@ -25,14 +25,14 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install registry inspector
         run: sudo apt-get update && sudo apt-get install -y skopeo
       - name: Compose and validate catalog
         run: |
           python3 catalog/generate.py --probe --output public/images.json
           python3 -m json.tool public/images.json >/dev/null
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image-catalog
           path: public/images.json
@@ -44,10 +44,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: image-catalog
           path: catalog-output
