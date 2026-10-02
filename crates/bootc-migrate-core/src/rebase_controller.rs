@@ -360,8 +360,79 @@ fn schedule_image_swap_firstboot(target_image: &str) -> Result<()> {
              labelling merged /etc before first boot; {} will relabel /var",
             cross_family::FIRSTBOOT_UNIT
         );
-        relabel_staged_composefs_etc(target_image, &deploy, target.as_ref())?;
+        // bootc merges the running /etc into the staged one from the
+        // ExecStop= of bootc-finalize-staged.service, at shutdown. A label
+        // set now would cover only the target's own files: everything the
+        // shutdown merge copies from this unlabelled host (machine-id,
+        // passwd, ...) would still boot unlabelled, and PID 1 and journald
+        // are denied it before any first-boot unit can run (#275). So do
+        // the merge now, then label its result.
+        // Fetch the image whose setfiles labels /etc before the boot entries
+        // are swapped, so a missing podman or registry fails here with the
+        // old deployment still the default.
+        println!("[selinux] pulling {target_image} with podman for its setfiles and policy...");
+        let pulled = std::process::Command::new("podman")
+            .args(["pull", target_image])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !pulled {
+            bail!(
+                "could not pull {target_image} with podman to label the merged /etc for the \
+                 target's SELinux policy. The deployment is staged but would boot unlabelled: \
+                 run `bootc rollback` before you reboot, or fix podman and run again."
+            );
+        }
+        finalize_composefs_staged_now()?;
+        relabel_staged_composefs_etc(target_image, &deploy, target.as_ref()).context(
+            "labelling the merged /etc failed after finalization; the new deployment boots \
+             next and its first-boot unit relabels /etc, but early services can fail. Run \
+             `bootc rollback` to keep the current deployment.",
+        )?;
     }
+    Ok(())
+}
+
+/// The unit whose `ExecStop=` finalizes a composefs staged deployment.
+const COMPOSEFS_FINALIZE_UNIT: &str = "bootc-finalize-staged.service";
+
+/// Run bootc's composefs finalization (the `/etc` merge and the boot entry
+/// swap) now instead of at shutdown.
+///
+/// Stopping the unit runs its `ExecStop=` in the same sandbox shutdown
+/// would use, and leaves nothing for shutdown to repeat: the composefs
+/// counterpart of [`finalize_staged_now`]. Changes made to `/etc` after
+/// this point do not reach the new deployment.
+fn finalize_composefs_staged_now() -> Result<()> {
+    let unit = COMPOSEFS_FINALIZE_UNIT;
+    let active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !active {
+        // Nothing waits for shutdown: this bootc merged /etc when it staged.
+        println!("[finalize] {unit} is not active; the staged /etc is already merged");
+        return Ok(());
+    }
+    ensure_boot_mounted();
+    println!("[finalize] merging /etc into the staged deployment now ({unit})...");
+    let status = std::process::Command::new("systemctl")
+        .args(["stop", unit])
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to execute systemctl stop {unit}: {e}"))?;
+    let failed = std::process::Command::new("systemctl")
+        .args(["is-failed", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !status.success() || failed {
+        bail!(
+            "finalizing the staged composefs deployment failed; the previous deployment \
+             would boot next. See `journalctl -u {unit}`."
+        );
+    }
+    println!("[finalize] staged composefs deployment finalized: it boots next");
     Ok(())
 }
 
