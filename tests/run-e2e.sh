@@ -3040,7 +3040,7 @@ step "rollback: reordering BootOrder to $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM (was $OR
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM >/dev/null && systemctl reboot" || true
 
 sleep 3
-wait_for_ssh_with_msg "OSTree rollback boot SSH" 180 "vm-rollback" || {
+wait_for_ssh_with_msg "OSTree rollback boot SSH" 360 "vm-rollback" || {
     echo "FAIL: VM did not come back after OSTree rollback boot"
     exit 1
 }

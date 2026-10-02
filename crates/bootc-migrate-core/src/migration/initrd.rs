@@ -320,7 +320,14 @@ pub(crate) fn rebuild_initrd_with_lvm_if_needed(
         Some(ref var) => Some(prepare_stateroot_var_include(var)?),
         None => None,
     };
-    let emergency_include = prepare_emergency_diagnostic_include().ok();
+    // Test diagnostics only: the E2E harness sets CI (the same gate as the
+    // debug kernel arguments in kernel_options.rs). A user's initrd gets no
+    // extra units.
+    let emergency_include = if std::env::var_os("CI").is_some() {
+        prepare_emergency_diagnostic_include().ok()
+    } else {
+        None
+    };
 
     let mut bound = false;
     let run_rebuild = |bound: &mut bool| -> Result<std::process::ExitStatus> {
