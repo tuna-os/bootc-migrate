@@ -1882,11 +1882,8 @@ ESPCHECK
 
     assert_l2_present "composefs-to-ostree" "/var/tmp/bootc-rebase" "composefs -> ostree via OstreeInstall"
 
-    # What backs /var on the OSTree deployment. On a clean fedora-bootc
-    # install chronyd and gssproxy start; after this route both fail on
-    # missing /var/lib state even though the target's tmpfiles.d creates it
-    # at boot, which points at a /var mount carried over from the composefs
-    # source and mounted over the stateroot /var after tmpfiles ran.
+    # Diagnostic details for the composefs -> ostree deployment (/var mounts,
+    # accounts, and vendor /usr/etc file presence).
     step "=== composefs-to-ostree: /var mount diagnostics ==="
     ssh $SSH_OPTS root@localhost bash <<'VARDIAG' 2>&1 | sed 's/^/[var-diag] /' || true
 set +e
