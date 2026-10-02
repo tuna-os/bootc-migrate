@@ -1830,11 +1830,8 @@ ESPCHECK
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
-    # What backs /var on the OSTree deployment. On a clean fedora-bootc
-    # install chronyd and gssproxy start; after this route both fail on
-    # missing /var/lib state even though the target's tmpfiles.d creates it
-    # at boot, which points at a /var mount carried over from the composefs
-    # source and mounted over the stateroot /var after tmpfiles ran.
+    # Diagnostic details for the composefs -> ostree deployment (/var mounts,
+    # accounts, and vendor /usr/etc file presence).
     step "=== composefs-to-ostree: /var mount diagnostics ==="
     ssh $SSH_OPTS root@localhost bash <<'VARDIAG' 2>&1 | sed 's/^/[var-diag] /' || true
 set +e
