@@ -106,9 +106,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `/var/lib/chrony`, and chronyd failed. The new post-reboot health check
   found this.
 - `bootc-rebase`'s composefs image swap now prepares the new deployment's
-  first boot when the target is another distribution. On composefs, `bootc
-  switch` merges the running `/etc` at shutdown. From Dakota to Utah, this
-  merge has two results:
+  first boot when the target is another distribution (#267, #275). On composefs,
+  `bootc switch` merges the running `/etc` into the staged deployment at
+  shutdown. From
+  Dakota to Utah, this merge has two results:
   - Dakota creates its accounts at runtime, so its `/etc/passwd` replaces
     Utah's, and Utah's `dbus` user is missing.
   - Dakota has no SELinux policy, so the merged files have no labels, and
@@ -116,8 +117,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   In both cases D-Bus does not start and the boot never completes. The
   route now installs a first-boot unit that runs the target's
   `systemd-sysusers` and `ldconfig` before `sysinit.target`. When the
-  target enforces a policy that the host did not label for, the unit
-  also runs the target's `restorecon` over `/etc` and `/var`.
+  target enforces a policy that the host did not label for, the route
+  does that merge before it returns (it stops `bootc-finalize-staged.service`,
+  which runs the merge), then labels the merged `/etc` with `setfiles` from
+  the target image (#275). Before, PID 1 and journald could not use the
+  unlabelled `/etc/machine-id`, so the boot failed before the first-boot unit
+  ran. The first-boot unit still runs the target's `restorecon` over `/var`
+  and `/etc`.
 - `bootc-rebase` finalizes the deployment `bootc switch` staged before it
   returns, instead of leaving it to shutdown (#262). On a `bootc install
   to-disk` layout with no separate /boot partition, libostree's shutdown-time
