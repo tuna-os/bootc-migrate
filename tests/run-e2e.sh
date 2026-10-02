@@ -40,7 +40,7 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # --target-backend composefs against a different composefs-capable image:
 # the ImageSwap route stages the target with the host's own `bootc switch`
 # and the reboot must land in the target's deployment with the base kept
-# as rollback. The matrix pair is dakota -> utah (Fedora Hummingbird).
+# as rollback.
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
