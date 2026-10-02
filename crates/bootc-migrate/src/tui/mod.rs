@@ -1392,10 +1392,18 @@ fn event_loop(
             // Preflight may invoke host tools that write to the terminal
             // while ratatui owns the alternate screen. Force a full redraw
             // after a screen change or a manual re-check.
+            //
+            // Not `terminal.clear()`: it first asks the terminal for the
+            // cursor position (ESC [6n) and fails after 2 s when no answer
+            // comes, which ended the wizard on its first Enter under the
+            // E2E pty driver (and would on any terminal that does not
+            // answer). A resize to the current size clears the whole
+            // fullscreen viewport and resets the back buffer, with no query.
             if app.screen != old_screen
                 || (old_screen == Screen::Preflight && key.code == KeyCode::Char('r'))
             {
-                terminal.clear()?;
+                let size = terminal.size()?;
+                terminal.resize(Rect::new(0, 0, size.width, size.height))?;
             }
         }
     }
