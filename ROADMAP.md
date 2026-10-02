@@ -114,8 +114,7 @@ validation named in that issue's own scope never shipped.
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
 | composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | one non-gating cell (dakota composefs-native → fedora-bootc 44) asserts the route, the fixtures and the preserved rollback entry; never executed on a real host before that cell | #260 |
-| composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) asserts the route, the fixtures, the booted identity and the kept rollback; it depends on a pre-alpha image and has not yet passed end to end | #66 |
-| Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | one non-gating cell (bluefin → bootcrew/opensuse-bootc) asserts the refusal, the staged `/etc` shape and the booted identity; it depends on a community image and has not yet passed end to end | #256 |
+| Cross-family migration and switch routes (`cross_family`) | implemented: lineage gate on all routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel (autorelabel on OstreeDeploy; firstboot unit on composefs/ImageSwap); planner, gate, staged reconciliation and merge outcomes table-tested | non-gating cells (bluefin → bootcrew/opensuse-bootc on composefs and OstreeDeploy) assert the refusal, staged `/etc` shape and booted identity | #256, #259 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -349,21 +348,16 @@ either is imminent:
 - **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch) via `bootc switch`** —
   M3's cross-base work (#67) stays within the Fedora family, where `/etc`
   defaults, UID/GID allocation, and the init/PAM stack share lineage. The
-  composefs *conversion* route now has a cross-family policy (#256,
-  `crates/bootc-migrate-core/src/cross_family.rs`): most of `/etc` is
+  cross-family policy (#256 for composefs conversion; #259 for `OstreeDeploy`
+  and `ImageSwap` switch routes, `crates/bootc-migrate-core/src/cross_family.rs`)
+  handles pairs with no shared base lineage: most of `/etc` is
   non-mergeable (the target's defaults win, the source vendor's files are
   dropped), an explicit allowlist of machine state and every user-added
   path are carried, identity databases merge target-first with a `/var`
   remap, and displaced edits survive as `.rebase-old` sidecars — the
-  "reinstall with data preservation" shape this entry described before it
-  existed. It is gated behind `--accept-cross-base`, exploratory, and
-  covered by one non-gating cell. The `bootc switch` routes (OstreeDeploy,
-  ImageSwap) refuse a cross-family target on the same gate but apply no
-  policy: their `/etc` is the native merge's, which is the same-lineage
-  rule. A cross-family policy over a `bootc switch`-staged deployment would
-  reuse `etc_conflict`'s post-merge seam; that is #259, one of the
-  any-base-to-any-base steps tracked in #258 (with #260 for
-  composefs → ostree and #261 for an E2E base-pair matrix).
+  "reinstall with data preservation" shape. Gated behind `--accept-cross-base`,
+  exploratory, and covered by non-gating E2E cells. Tracked in #258 (with
+  #260 for composefs → ostree and #261 for an E2E base-pair matrix).
 
 ### 1.0 — Universal migrator
 

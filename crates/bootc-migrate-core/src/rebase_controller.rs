@@ -7,12 +7,79 @@
 
 use anyhow::{Context, Result, bail};
 
+use std::path::{Path, PathBuf};
+
 use crate::cross_base;
 use crate::cross_family;
 use crate::de_controller::DesktopMigrationController;
 use crate::migration;
 use crate::preflight::{self, readiness};
+use crate::remap;
+use crate::scan;
 use crate::selinux;
+
+/// Resolve the vendor defaults directory for a target deployment root.
+fn target_vendor_etc_dir(root: &Path) -> PathBuf {
+    let usr_etc = root.join("usr/etc");
+    if usr_etc.is_dir() {
+        usr_etc
+    } else {
+        let factory = root.join("usr/share/factory/etc");
+        if factory.is_dir() {
+            factory
+        } else {
+            root.join("etc")
+        }
+    }
+}
+
+/// Resolve the vendor defaults directory for the source/booted deployment.
+fn source_vendor_etc_dir(root: &Path) -> PathBuf {
+    let usr_etc = root.join("usr/etc");
+    if usr_etc.is_dir() {
+        usr_etc
+    } else {
+        PathBuf::from("/usr/etc")
+    }
+}
+
+/// Apply SELinux security labels to the firstboot unit and its marker file.
+fn label_firstboot_files(etc: &Path) {
+    let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
+    let etc_ctx = "system_u:object_r:etc_t:s0";
+    let unit_dir = etc.join("systemd/system");
+    let marker = etc.join(cross_family::FIRSTBOOT_MARKER);
+    let labels = [
+        (unit_dir.join(cross_family::FIRSTBOOT_UNIT), unit_ctx),
+        (unit_dir.join("sysinit.target.wants"), unit_ctx),
+        (
+            unit_dir
+                .join("sysinit.target.wants")
+                .join(cross_family::FIRSTBOOT_UNIT),
+            unit_ctx,
+        ),
+        (
+            marker
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default(),
+            etc_ctx,
+        ),
+        (marker, etc_ctx),
+    ];
+    for (path, ctx) in &labels {
+        let mut value = ctx.as_bytes().to_vec();
+        value.push(0);
+        if let Err(e) = rustix::fs::lsetxattr(
+            path,
+            c"security.selinux",
+            &value,
+            rustix::fs::XattrFlags::empty(),
+        ) {
+            eprintln!("Warning: could not label {} as {ctx}: {e}", path.display());
+        }
+    }
+}
 
 /// Everything the OSTree-to-ComposeFS migration strategy needs, translated
 /// from CLI flags exactly once by the caller.
@@ -260,48 +327,14 @@ fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
 ///
 /// The unit runs before `sysinit.target`. Its own files are labelled here
 /// so the booting system can read them.
-fn schedule_image_swap_firstboot() -> Result<()> {
-    let deploy = staged_composefs_deployment()?;
+fn schedule_image_swap_firstboot(deploy: &Path) -> Result<()> {
     let host = selinux::read_host_selinux_config();
-    let target = selinux::read_deployment_selinux_config(&deploy);
+    let target = selinux::read_deployment_selinux_config(deploy);
     let relabel = cross_family::relabel_needed(host.as_ref(), target.as_ref());
     let unit = cross_family::render_image_swap_firstboot_unit(relabel);
     let etc = deploy.join("etc");
     cross_family::install_firstboot_unit(&etc, &unit)?;
-    let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
-    let etc_ctx = "system_u:object_r:etc_t:s0";
-    let unit_dir = etc.join("systemd/system");
-    let marker = etc.join(cross_family::FIRSTBOOT_MARKER);
-    let labels = [
-        (unit_dir.join(cross_family::FIRSTBOOT_UNIT), unit_ctx),
-        (unit_dir.join("sysinit.target.wants"), unit_ctx),
-        (
-            unit_dir
-                .join("sysinit.target.wants")
-                .join(cross_family::FIRSTBOOT_UNIT),
-            unit_ctx,
-        ),
-        (
-            marker
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_default(),
-            etc_ctx,
-        ),
-        (marker, etc_ctx),
-    ];
-    for (path, ctx) in &labels {
-        let mut value = ctx.as_bytes().to_vec();
-        value.push(0);
-        if let Err(e) = rustix::fs::lsetxattr(
-            path,
-            c"security.selinux",
-            &value,
-            rustix::fs::XattrFlags::empty(),
-        ) {
-            eprintln!("Warning: could not label {} as {ctx}: {e}", path.display());
-        }
-    }
+    label_firstboot_files(&etc);
     println!(
         "[firstboot] {} will add the target's system users and rebuild the library cache on first boot",
         cross_family::FIRSTBOOT_UNIT
@@ -490,17 +523,15 @@ pub struct ImageSwapConfig<'a> {
     pub dry_run: bool,
     pub force: bool,
     pub de_migrate: bool,
-    /// Proceed onto a target from another OS family (bootc-migrate#256).
-    /// This route stages with `bootc switch` and applies no `/etc` policy
-    /// of its own, so acceptance here means the native merge's result.
+    /// Proceed onto a target from another OS family with the cross-family
+    /// `/etc` policy (bootc-migrate#256, #259). Deliberately not implied by
+    /// `force`: that flag waives warnings, this one selects a policy.
     pub accept_cross_base: bool,
 }
 
 /// Scenario A' (issue #66): swap the image on a composefs-backed system —
 /// no backend conversion. `bootc switch` stages the target natively; this
-/// route is gating + switch + verification. The degenerate direct-store path
-/// (for targets whose bootc cannot switch) is out of scope until the #13
-/// store-selection work lands.
+/// route is gating + switch + verification + cross-family reconciliation (#259).
 impl ImageSwapConfig<'_> {
     pub fn run(&self) -> Result<()> {
         validate_target_image(self.target_image)?;
@@ -522,18 +553,8 @@ impl ImageSwapConfig<'_> {
             );
         }
 
-        // #256: refuse a cross-family target unless accepted. Unlike the
-        // conversion route there is no policy to apply afterwards — `bootc
-        // switch`'s native merge stages the /etc — so say so.
+        // #256, #259: refuse a cross-family target unless accepted.
         cross_family::gate(self.target_image, self.accept_cross_base)?;
-        if self.accept_cross_base {
-            eprintln!(
-                "Note: the image swap stages /etc with `bootc switch`'s native merge; the \
-                 cross-family /etc policy is not applied on this route. If the target is \
-                 from another OS family, expect to reconcile family-specific configuration \
-                 by hand after the reboot."
-            );
-        }
 
         // #68: decide the DE step before staging so a --dry-run shows it too.
         let de = DesktopMigrationController::new(self.de_migrate, self.target_image);
@@ -559,7 +580,109 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
-        schedule_image_swap_firstboot()?;
+        let deploy = staged_composefs_deployment()?;
+        let host_info = scan::read_host_base_info();
+        let target_info = scan::read_base_info_from_root(&deploy);
+
+        let decision = cross_family::decide(host_info, target_info, self.accept_cross_base);
+        if decision.is_err() {
+            let _ = std::fs::remove_dir_all(&deploy);
+        }
+        let cross_family_plan = decision?;
+
+        if let Some(plan) = &cross_family_plan {
+            let source_defaults = source_vendor_etc_dir(Path::new("/"));
+            let target_defaults = target_vendor_etc_dir(&deploy);
+            let staged_etc = deploy.join("etc");
+            let current_etc = Path::new("/etc");
+
+            let etc_plan = cross_family::apply_staged_etc_policy(
+                &source_defaults,
+                current_etc,
+                &target_defaults,
+                &staged_etc,
+                plan,
+            )?;
+
+            let source_passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+            let source_group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+            let target_passwd = std::fs::read_to_string(target_defaults.join("passwd"))
+                .or_else(|_| std::fs::read_to_string(deploy.join("usr/lib/passwd")))
+                .unwrap_or_default();
+            let target_group = std::fs::read_to_string(target_defaults.join("group"))
+                .or_else(|_| std::fs::read_to_string(deploy.join("usr/lib/group")))
+                .unwrap_or_default();
+
+            let remap_plan = remap::plan_remap(
+                &remap::parse_passwd(&source_passwd),
+                &remap::parse_group(&source_group),
+                &remap::parse_passwd(&target_passwd),
+                &remap::parse_group(&target_group),
+            );
+            print!("{}", remap::render_report(&remap_plan));
+
+            let rechowned_now = remap::apply_remap_plan_to_dirs(&[&staged_etc], &remap_plan)
+                .context("failed to apply cross-family remap to staged /etc")?;
+            let var_remap_deferred = !remap_plan.steps.is_empty();
+            if rechowned_now > 0 {
+                println!(
+                    "[imageswap] cross-family remap: {rechowned_now} file(s)/dir(s) renumbered in staged /etc"
+                );
+            }
+            if var_remap_deferred {
+                println!(
+                    "[imageswap] /var is still in use by this system; its renumbering runs from the first-boot unit"
+                );
+            }
+
+            let host_selinux = selinux::read_host_selinux_config();
+            let target_selinux = selinux::read_deployment_selinux_config(&deploy);
+            let relabel_scheduled =
+                cross_family::relabel_needed(host_selinux.as_ref(), target_selinux.as_ref());
+
+            let var_steps: &[remap::RemapStep] = if var_remap_deferred {
+                &remap_plan.steps
+            } else {
+                &[]
+            };
+            let firstboot_unit_installed = match cross_family::render_firstboot_unit(
+                var_steps,
+                relabel_scheduled,
+            ) {
+                Some(unit) => {
+                    cross_family::install_firstboot_unit(&staged_etc, &unit)?;
+                    label_firstboot_files(&staged_etc);
+                    println!(
+                        "[imageswap] installed {} (relabel: {relabel_scheduled}, deferred /var remap steps: {})",
+                        cross_family::FIRSTBOOT_UNIT,
+                        var_steps.len()
+                    );
+                    true
+                }
+                None => false,
+            };
+
+            let remap_report_path = deploy.join("bootc-migrate-remap-report.json");
+            std::fs::write(&remap_report_path, remap_plan.to_json())
+                .with_context(|| format!("failed to write {}", remap_report_path.display()))?;
+
+            let report = cross_family::CrossFamilyReport {
+                host: plan.host.clone(),
+                target: plan.target.clone(),
+                etc: etc_plan,
+                remap: remap_plan,
+                rechowned_now,
+                var_remap_deferred,
+                relabel_scheduled,
+                firstboot_unit_installed,
+            };
+            let report_path = deploy.join(cross_family::REPORT_FILE);
+            std::fs::write(&report_path, serde_json::to_string_pretty(&report)?)
+                .with_context(|| format!("failed to write {}", report_path.display()))?;
+            println!("Cross-family report written to {}", report_path.display());
+        } else {
+            schedule_image_swap_firstboot(&deploy)?;
+        }
 
         finalize_staged_now()?;
 
@@ -587,12 +710,9 @@ pub struct OstreeDeployConfig<'a> {
 /// deployment. `bootc switch` already does the heavy lifting on an
 /// OSTree-backed system — staging the target with OSTree's native 3-way /etc
 /// merge and shared /var — so this route is preflight + gating + `bootc
-/// switch` + verification. The previous deployment stays as the rollback
-/// entry, matching the engine's two-phase contract.
-///
-/// The one place that merge is second-guessed is a cross-base re-base, where
-/// "keep the user's value" is the wrong answer for a path whose vendor
-/// default also moved — see [`cross_base::apply_cross_base_etc_policy`].
+/// switch` + verification + cross-family reconciliation (#259). The previous
+/// deployment stays as the rollback entry, matching the engine's two-phase
+/// contract.
 ///
 /// Bootloader: per the decision on issue #64, this route will migrate to
 /// systemd-boot when the system is ready — wired in once #65's audited
@@ -630,14 +750,11 @@ impl OstreeDeployConfig<'_> {
             );
         }
 
-        // Cross-base gate (#67 part 1): always print the remap report before
-        // anything is staged, and refuse without --accept-cross-base so the
-        // blast radius is visible first — including in --dry-run.
-        let cross_base_plan =
-            cross_base::gate_cross_base(self.target_image, self.accept_cross_base, self.force)?;
+        // #256, #259: refuse a cross-family target unless accepted.
+        cross_family::gate(self.target_image, self.accept_cross_base)?;
 
-        // #80: advisory identity-DB gap check, independent of cross-base status
-        // (the motivating case — Bluefin GNOME → Aurora KDE — is same-base).
+        // #80: advisory identity-DB gap check for same-family re-bases
+        // (e.g. Bluefin GNOME → Aurora KDE).
         cross_base::warn_identity_merge_gap(self.target_image);
 
         // #68: decide the DE step before staging so a --dry-run shows it too.
@@ -662,23 +779,97 @@ impl OstreeDeployConfig<'_> {
 
         stage_via_bootc_switch(self.target_image)?;
 
-        if let Some(plan) = &cross_base_plan {
-            let staged_root = cross_base::staged_deployment_root()
-                .context("failed to locate the staged deployment for cross-base post-processing")?;
-            cross_base::apply_cross_base_remap(&staged_root, plan)?;
-            cross_base::apply_cross_base_etc_policy(&staged_root)?;
+        let staged_root = cross_base::staged_deployment_root()
+            .context("failed to locate the staged deployment for post-processing")?;
+        let booted_root = cross_base::booted_deployment_root()
+            .context("failed to locate the booted deployment for post-processing")?;
 
-            // #67: when the base family changes, the SELinux policy type may
-            // differ — schedule /.autorelabel so the target's policy is applied
-            // to every file on first boot.
-            match selinux::check_and_schedule_autorelabel(&staged_root) {
-                Ok(true) => println!(
-                    "SELinux policy type changed for the cross-base target; \
-                     scheduled /.autorelabel in the staged deployment."
-                ),
-                Ok(false) => {}
-                Err(e) => eprintln!("Warning: failed to check SELinux policy compatibility: {e:#}"),
+        let host_info = scan::read_host_base_info();
+        let target_info = scan::read_base_info_from_root(&staged_root);
+
+        let decision = cross_family::decide(host_info, target_info, self.accept_cross_base);
+        if decision.is_err() {
+            let _ = std::process::Command::new("ostree")
+                .args(["admin", "undeploy", "0"])
+                .status();
+        }
+        let cross_family_plan = decision?;
+
+        if let Some(plan) = &cross_family_plan {
+            let source_defaults = source_vendor_etc_dir(&booted_root);
+            let target_defaults = target_vendor_etc_dir(&staged_root);
+            let staged_etc = staged_root.join("etc");
+            let current_etc = Path::new("/etc");
+
+            let etc_plan = cross_family::apply_staged_etc_policy(
+                &source_defaults,
+                current_etc,
+                &target_defaults,
+                &staged_etc,
+                plan,
+            )?;
+
+            let source_passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+            let source_group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+            let target_passwd = std::fs::read_to_string(target_defaults.join("passwd"))
+                .or_else(|_| std::fs::read_to_string(staged_root.join("usr/lib/passwd")))
+                .unwrap_or_default();
+            let target_group = std::fs::read_to_string(target_defaults.join("group"))
+                .or_else(|_| std::fs::read_to_string(staged_root.join("usr/lib/group")))
+                .unwrap_or_default();
+
+            let remap_plan = remap::plan_remap(
+                &remap::parse_passwd(&source_passwd),
+                &remap::parse_group(&source_group),
+                &remap::parse_passwd(&target_passwd),
+                &remap::parse_group(&target_group),
+            );
+            print!("{}", remap::render_report(&remap_plan));
+
+            let rechowned_now = if !remap_plan.is_empty() {
+                remap::apply_remap_plan(&staged_root, &remap_plan)?
+            } else {
+                0
+            };
+            if rechowned_now > 0 {
+                println!(
+                    "Cross-family remap applied: {rechowned_now} file(s)/dir(s) rechowned under {}",
+                    staged_root.display()
+                );
             }
+
+            let host_selinux = selinux::read_host_selinux_config();
+            let target_selinux = selinux::read_deployment_selinux_config(&staged_root);
+            let relabel_scheduled =
+                cross_family::relabel_needed(host_selinux.as_ref(), target_selinux.as_ref());
+            if relabel_scheduled {
+                match selinux::schedule_autorelabel(&staged_root) {
+                    Ok(()) => println!(
+                        "SELinux policy type changed for the cross-family target; \
+                         scheduled /.autorelabel in the staged deployment."
+                    ),
+                    Err(e) => eprintln!("Warning: failed to schedule /.autorelabel: {e:#}"),
+                }
+            }
+
+            let remap_report_path = staged_root.join("bootc-migrate-remap-report.json");
+            std::fs::write(&remap_report_path, remap_plan.to_json())
+                .with_context(|| format!("failed to write {}", remap_report_path.display()))?;
+
+            let report = cross_family::CrossFamilyReport {
+                host: plan.host.clone(),
+                target: plan.target.clone(),
+                etc: etc_plan,
+                remap: remap_plan,
+                rechowned_now,
+                var_remap_deferred: false,
+                relabel_scheduled,
+                firstboot_unit_installed: false,
+            };
+            let report_path = staged_root.join(cross_family::REPORT_FILE);
+            std::fs::write(&report_path, serde_json::to_string_pretty(&report)?)
+                .with_context(|| format!("failed to write {}", report_path.display()))?;
+            println!("Cross-family report written to {}", report_path.display());
         }
 
         if let Some(plan) = &de_plan {

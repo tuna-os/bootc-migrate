@@ -26,6 +26,16 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Cross-family policy on `bootc switch` routes (`OstreeDeploy`, `ImageSwap`, #259).
+  When re-basing across OS families with `--accept-cross-base`, the staged deployment
+  is reconciled before reboot: target defaults win, source-vendor-only files are dropped,
+  machine state and user-added files are carried, identity databases merge target-first,
+  file ownership under `/var` and staged `/etc` is renumbered, user edits displaced by
+  target defaults survive as `.rebase-old` sidecars, SELinux relabeling is scheduled
+  (`/.autorelabel` on `OstreeDeploy`; first-boot unit on `ImageSwap`), and report JSON is
+  written. If cross-family status is refused post-staging, the staged deployment is cleaned up
+  (`ostree admin undeploy 0` or directory removal). Added an exploratory E2E cell for
+  `bluefin -> openSUSE Tumbleweed (OstreeDeploy)`.
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start

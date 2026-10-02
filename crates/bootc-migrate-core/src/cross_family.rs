@@ -595,6 +595,160 @@ pub fn install_firstboot_unit(etc_dir: &Path, unit: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- Staged deployment application (bootc switch routes) -------------------
+
+/// Apply the cross-family `/etc` policy over a staged deployment (e.g. after
+/// `bootc switch`).
+///
+/// Unlike the composefs conversion route (which feeds forced decisions to
+/// `mergetc`), the `bootc switch` routes let the native merge stage
+/// `<staged>/etc` first, and this reconciliation step rewrites `<staged>/etc`
+/// from the plan:
+/// - paths in `sidecars` get `<path>.rebase-old` sidecars holding the user's
+///   displaced value from `current_dir`;
+/// - paths in `take_target` are replaced with the target default from
+///   `target_default_dir`;
+/// - paths in `dropped` (source-vendor-only) are deleted;
+/// - paths in `carried` keep the user's version from `current_dir`;
+/// - identity databases in `identity` are union-merged target-first (passwords
+///   source-first) and written to `staged_etc_dir`.
+pub fn apply_staged_etc_policy(
+    source_default_dir: &Path,
+    current_dir: &Path,
+    target_default_dir: &Path,
+    staged_etc_dir: &Path,
+    plan: &CrossFamilyPlan,
+) -> Result<EtcCrossFamilyPlan> {
+    let states =
+        crate::mergetc::etc_path_states(source_default_dir, current_dir, target_default_dir)
+            .context("failed to read the three /etc trees for the cross-family policy")?;
+    let etc_plan = plan_etc(&states);
+    print!("{}", render_etc_report(&plan.host, &plan.target, &etc_plan));
+
+    // 1. Write sidecars for displaced user-modified paths
+    for rel_path in &etc_plan.sidecars {
+        let sidecar_rel = format!("{rel_path}{}", crate::mergetc::REBASE_OLD_SUFFIX);
+        write_entry(current_dir, rel_path, staged_etc_dir, &sidecar_rel)
+            .with_context(|| format!("failed to preserve /etc/{sidecar_rel}"))?;
+    }
+
+    // 2. Overwrite target defaults
+    for rel_path in &etc_plan.take_target {
+        if target_default_dir.join(rel_path).exists()
+            || fs::symlink_metadata(target_default_dir.join(rel_path)).is_ok()
+        {
+            write_entry(target_default_dir, rel_path, staged_etc_dir, rel_path)
+                .with_context(|| format!("failed to write target default for /etc/{rel_path}"))?;
+        }
+    }
+
+    // 3. Drop source-vendor-only paths
+    for rel_path in &etc_plan.dropped {
+        let dest = staged_etc_dir.join(rel_path);
+        if dest.exists() || dest.is_symlink() {
+            if dest.is_dir() && !dest.is_symlink() {
+                let _ = fs::remove_dir_all(&dest);
+            } else {
+                let _ = fs::remove_file(&dest);
+            }
+        }
+    }
+
+    // 4. Ensure carried paths are preserved from current
+    for rel_path in &etc_plan.carried {
+        if current_dir.join(rel_path).exists()
+            || fs::symlink_metadata(current_dir.join(rel_path)).is_ok()
+        {
+            write_entry(current_dir, rel_path, staged_etc_dir, rel_path)
+                .with_context(|| format!("failed to preserve carried path /etc/{rel_path}"))?;
+        }
+    }
+
+    // 5. Union-merge identity DBs target-first
+    for rel_path in &etc_plan.identity {
+        let cur_bytes = crate::mergetc::read_file_at(current_dir, rel_path);
+        let new_bytes = crate::mergetc::read_file_at(target_default_dir, rel_path);
+        if let Some(merged) = crate::mergetc::merge_identity_db(
+            rel_path,
+            cur_bytes.as_deref(),
+            new_bytes.as_deref(),
+            crate::mergetc::IdentityMergePolicy::TargetFirst,
+        ) {
+            let dest = staged_etc_dir.join(rel_path);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if dest.exists() || dest.is_symlink() {
+                let _ = fs::remove_file(&dest);
+            }
+            fs::write(&dest, &merged)
+                .with_context(|| format!("failed to write merged identity db /etc/{rel_path}"))?;
+            let meta_src = if current_dir.join(rel_path).exists() {
+                current_dir.join(rel_path)
+            } else {
+                target_default_dir.join(rel_path)
+            };
+            if meta_src.exists() {
+                let _ = crate::mergetc::copy_file_metadata(&meta_src, &dest);
+            }
+        }
+    }
+
+    Ok(etc_plan)
+}
+
+/// Reproduce `src_base/rel_path` (file or symlink, with its metadata) at
+/// `dest_base/dest_rel`, replacing whatever is there.
+fn write_entry(src_base: &Path, src_rel: &str, dest_base: &Path, dest_rel: &str) -> Result<()> {
+    let src = src_base.join(src_rel);
+    let dest = dest_base.join(dest_rel);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let meta = match fs::symlink_metadata(&src) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to read metadata for {}", src.display()));
+        }
+    };
+    if dest.exists() || dest.is_symlink() {
+        if dest.is_dir() && !dest.is_symlink() {
+            fs::remove_dir_all(&dest)
+                .with_context(|| format!("failed to replace directory {}", dest.display()))?;
+        } else {
+            fs::remove_file(&dest)
+                .with_context(|| format!("failed to replace file {}", dest.display()))?;
+        }
+    }
+    if meta.file_type().is_symlink() {
+        let target = fs::read_link(&src)
+            .with_context(|| format!("failed to read symlink {}", src.display()))?;
+        std::os::unix::fs::symlink(&target, &dest)
+            .with_context(|| format!("failed to create symlink at {}", dest.display()))?;
+    } else {
+        let content =
+            fs::read(&src).with_context(|| format!("failed to read {}", src.display()))?;
+        fs::write(&dest, &content)
+            .with_context(|| format!("failed to write {}", dest.display()))?;
+        let _ = crate::mergetc::copy_file_metadata(&src, &dest);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let _ = rustix::fs::chownat(
+                rustix::fs::CWD,
+                &dest,
+                Some(rustix::fs::Uid::from_raw(meta.uid())),
+                Some(rustix::fs::Gid::from_raw(meta.gid())),
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            );
+        }
+    }
+    Ok(())
+}
+
 // ---- Phase 4 application (I/O) --------------------------------------------
 
 /// What the `/etc` transition learned from the mounted target while it had
@@ -1387,6 +1541,224 @@ mod tests {
         assert_eq!(
             (remap_plan.remaps[0].old_id, remap_plan.remaps[0].new_id),
             (10, 997)
+        );
+    }
+
+    /// The cross-family policy applied over a staged deployment (the `bootc switch`
+    /// routes: OstreeDeploy and ImageSwap), where native merge staged /etc and
+    /// `apply_staged_etc_policy` reconciles it directly.
+    #[test]
+    fn policy_applied_to_staged_deployment() {
+        let old = tempfile::tempdir().unwrap();
+        let cur = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let w = |d: &tempfile::TempDir, p: &str, c: &str| {
+            let full = d.path().join(p);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, c).unwrap();
+        };
+
+        // Source vendor (Fedora) + current (live) + target vendor (openSUSE).
+        w(&old, "login.defs", "fedora-defaults\n");
+        w(&cur, "login.defs", "fedora-defaults\n");
+        w(&new, "login.defs", "suse-defaults\n");
+
+        w(&old, "default/useradd", "HOME=/home\n");
+        w(&cur, "default/useradd", "HOME=/home\nSHELL=/bin/zsh\n");
+        w(&new, "default/useradd", "HOME=/var/home\n");
+
+        w(&old, "dnf/dnf.conf", "[main]\n");
+        w(&cur, "dnf/dnf.conf", "[main]\nmax_parallel_downloads=20\n");
+
+        w(&old, "yum.repos.d/fedora.repo", "[fedora]\n");
+        w(&cur, "yum.repos.d/fedora.repo", "[fedora]\n");
+
+        w(&new, "zypp/repos.d/oss.repo", "[repo-oss]\n");
+
+        w(&old, "hostname", "fedora\n");
+        w(&cur, "hostname", "mybox\n");
+        w(&new, "hostname", "localhost\n");
+
+        w(&cur, "migration-test/marker.conf", "etc-state-value\n");
+        w(
+            &cur,
+            "sudoers.d/90-realuser",
+            "realuser ALL=(ALL) NOPASSWD: ALL\n",
+        );
+
+        w(
+            &old,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\n",
+        );
+        w(
+            &cur,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n",
+        );
+        w(
+            &new,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:997:997::/:/sbin/nologin\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\n",
+        );
+        w(&old, "shadow", "root:*:1::::::\n");
+        w(
+            &cur,
+            "shadow",
+            "root:$6$real:1::::::\nrealuser:$6$u:1::::::\n",
+        );
+        w(&new, "shadow", "root:*:1::::::\nchrony:!:1::::::\n");
+
+        // Seed staged directory with what native merge produces: user modified
+        // files are present with user edits, source untouched files are present or absent.
+        w(&staged, "login.defs", "fedora-defaults\n");
+        w(&staged, "default/useradd", "HOME=/home\nSHELL=/bin/zsh\n");
+        w(
+            &staged,
+            "dnf/dnf.conf",
+            "[main]\nmax_parallel_downloads=20\n",
+        );
+        w(&staged, "yum.repos.d/fedora.repo", "[fedora]\n");
+        w(&staged, "hostname", "mybox\n");
+        w(&staged, "migration-test/marker.conf", "etc-state-value\n");
+        w(
+            &staged,
+            "sudoers.d/90-realuser",
+            "realuser ALL=(ALL) NOPASSWD: ALL\n",
+        );
+        w(
+            &staged,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n",
+        );
+        w(
+            &staged,
+            "shadow",
+            "root:$6$real:1::::::\nrealuser:$6$u:1::::::\n",
+        );
+
+        let plan = CrossFamilyPlan {
+            host: base("bluefin", Some("fedora")),
+            target: base("opensuse-tumbleweed", Some("opensuse suse")),
+        };
+
+        let etc_plan =
+            apply_staged_etc_policy(old.path(), cur.path(), new.path(), staged.path(), &plan)
+                .unwrap();
+
+        assert!(!etc_plan.take_target.is_empty());
+        assert!(!etc_plan.dropped.is_empty());
+        assert!(!etc_plan.carried.is_empty());
+        assert!(!etc_plan.identity.is_empty());
+        assert_eq!(etc_plan.sidecars.len(), 2);
+
+        let read = |p: &str| fs::read_to_string(staged.path().join(p)).ok();
+        let sidecar = |p: &str| read(&format!("{p}{}", crate::mergetc::REBASE_OLD_SUFFIX));
+
+        // Target ships it: target's copy. Untouched -> no sidecar; edited -> sidecar.
+        assert_eq!(read("login.defs").as_deref(), Some("suse-defaults\n"));
+        assert_eq!(sidecar("login.defs"), None);
+        assert_eq!(read("default/useradd").as_deref(), Some("HOME=/var/home\n"));
+        assert_eq!(
+            sidecar("default/useradd").as_deref(),
+            Some("HOME=/home\nSHELL=/bin/zsh\n")
+        );
+
+        // Source-vendor-only: dropped; edited one survives as sidecar.
+        assert_eq!(read("dnf/dnf.conf"), None);
+        assert_eq!(
+            sidecar("dnf/dnf.conf").as_deref(),
+            Some("[main]\nmax_parallel_downloads=20\n")
+        );
+        assert_eq!(read("yum.repos.d/fedora.repo"), None);
+        assert_eq!(sidecar("yum.repos.d/fedora.repo"), None);
+
+        // Target-only: added.
+        assert_eq!(
+            read("zypp/repos.d/oss.repo").as_deref(),
+            Some("[repo-oss]\n")
+        );
+
+        // Machine state and user additions: carried verbatim.
+        assert_eq!(read("hostname").as_deref(), Some("mybox\n"));
+        assert_eq!(sidecar("hostname"), None);
+        assert_eq!(
+            read("migration-test/marker.conf").as_deref(),
+            Some("etc-state-value\n")
+        );
+        assert_eq!(
+            read("sudoers.d/90-realuser").as_deref(),
+            Some("realuser ALL=(ALL) NOPASSWD: ALL\n")
+        );
+
+        // Identity: target numbering wins, human user is appended, root keeps password hash.
+        assert_eq!(
+            read("passwd").as_deref(),
+            Some(
+                "root:x:0:0::/root:/bin/bash\nwheel:x:997:997::/:/sbin/nologin\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n"
+            )
+        );
+        assert_eq!(
+            read("shadow").as_deref(),
+            Some("root:$6$real:1::::::\nrealuser:$6$u:1::::::\nchrony:!:1::::::\n")
+        );
+        assert_eq!(sidecar("passwd"), None);
+    }
+
+    /// Table-driven tests for staged apply edge cases (symlinks, deeply nested dirs).
+    #[test]
+    fn apply_staged_etc_policy_symlinks_and_nested() {
+        let old = tempfile::tempdir().unwrap();
+        let cur = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+
+        // Symlink in target defaults replacing file in current
+        fs::write(old.path().join("os-release"), "ID=fedora\n").unwrap();
+        fs::write(cur.path().join("os-release"), "ID=fedora\n").unwrap();
+        std::os::unix::fs::symlink("../usr/lib/os-release", new.path().join("os-release")).unwrap();
+        fs::write(staged.path().join("os-release"), "ID=fedora\n").unwrap();
+
+        // Nested directory dropped
+        let old_nested = old.path().join("sub/dir/config");
+        fs::create_dir_all(old_nested.parent().unwrap()).unwrap();
+        fs::write(&old_nested, "nested=1\n").unwrap();
+
+        let cur_nested = cur.path().join("sub/dir/config");
+        fs::create_dir_all(cur_nested.parent().unwrap()).unwrap();
+        fs::write(&cur_nested, "nested=edited\n").unwrap();
+
+        let staged_nested = staged.path().join("sub/dir/config");
+        fs::create_dir_all(staged_nested.parent().unwrap()).unwrap();
+        fs::write(&staged_nested, "nested=edited\n").unwrap();
+
+        let plan = CrossFamilyPlan {
+            host: base("bluefin", Some("fedora")),
+            target: base("opensuse-tumbleweed", Some("opensuse suse")),
+        };
+
+        apply_staged_etc_policy(old.path(), cur.path(), new.path(), staged.path(), &plan).unwrap();
+
+        // os-release should now be a symlink
+        let symlink_path = staged.path().join("os-release");
+        assert!(
+            fs::symlink_metadata(&symlink_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(&symlink_path).unwrap().to_str().unwrap(),
+            "../usr/lib/os-release"
+        );
+
+        // Nested file should be dropped and sidecar preserved
+        assert!(!staged_nested.exists());
+        let sidecar_nested = staged.path().join("sub/dir/config.rebase-old");
+        assert_eq!(
+            fs::read_to_string(sidecar_nested).unwrap(),
+            "nested=edited\n"
         );
     }
 }
