@@ -321,17 +321,30 @@ fn schedule_image_swap_firstboot(target_image: &str) -> Result<()> {
     let unit = cross_family::render_image_swap_firstboot_unit(relabel);
     let etc = deploy.join("etc");
     cross_family::install_firstboot_unit(&etc, &unit)?;
+    crate::firstboot_verify::install_verify_probe(&etc)?;
+    crate::firstboot_verify::install_cleanup_prompt(&etc)?;
     let unit_ctx = "system_u:object_r:systemd_unit_file_t:s0";
     let etc_ctx = "system_u:object_r:etc_t:s0";
     let unit_dir = etc.join("systemd/system");
     let marker = etc.join(cross_family::FIRSTBOOT_MARKER);
+    let verify_marker = etc.join(crate::firstboot_verify::VERIFY_MARKER);
     let labels = [
         (unit_dir.join(cross_family::FIRSTBOOT_UNIT), unit_ctx),
+        (
+            unit_dir.join(crate::firstboot_verify::VERIFY_UNIT),
+            unit_ctx,
+        ),
         (unit_dir.join("sysinit.target.wants"), unit_ctx),
         (
             unit_dir
                 .join("sysinit.target.wants")
                 .join(cross_family::FIRSTBOOT_UNIT),
+            unit_ctx,
+        ),
+        (
+            unit_dir
+                .join("sysinit.target.wants")
+                .join(crate::firstboot_verify::VERIFY_UNIT),
             unit_ctx,
         ),
         (
@@ -342,6 +355,19 @@ fn schedule_image_swap_firstboot(target_image: &str) -> Result<()> {
             etc_ctx,
         ),
         (marker, etc_ctx),
+        (
+            etc.join(crate::firstboot_verify::VERIFY_SCRIPT_REL),
+            etc_ctx,
+        ),
+        (verify_marker, etc_ctx),
+        (
+            etc.join(crate::firstboot_verify::PROMPT_SCRIPT_REL),
+            etc_ctx,
+        ),
+        (
+            etc.join(crate::firstboot_verify::PROMPT_DESKTOP_REL),
+            etc_ctx,
+        ),
     ];
     for (path, ctx) in &labels {
         let mut value = ctx.as_bytes().to_vec();
@@ -723,6 +749,13 @@ impl ImageSwapConfig<'_> {
         }
 
         schedule_image_swap_firstboot(self.target_image)?;
+
+        crate::status::write_report(
+            std::path::Path::new(crate::status::MIGRATE_REPORT),
+            "composefs -> composefs via ImageSwap",
+            self.target_image,
+        )
+        .context("failed to write the migration report")?;
 
         finalize_staged_now()?;
 

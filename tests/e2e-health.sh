@@ -6,8 +6,9 @@
 # The per-mode assertions in run-e2e.sh prove that user data survived. This
 # script proves that the system that carries it works: boot completed, no
 # unit failed, the system bus and logind answer, the display manager runs,
-# every account the target image declares exists, and, on an SELinux target,
-# nothing is unlabeled or mislabeled. The Dakota -> Utah bugs (#267) were
+# every account the target image declares exists, /var ownership and mtimes
+# survived the copy, and, on an SELinux target, nothing is unlabeled or
+# mislabeled. The Dakota -> Utah bugs (#267) were
 # both of the kind this catches, and were caught only because they also
 # happened to break sshd.
 #
@@ -216,6 +217,66 @@ if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enfo
     fi
 else
     echo "  SELinux: not enforcing; label checks skipped"
+fi
+
+# ---- 7. /var ownership and mtimes survived the copy --------------------------
+# The migration carries /var to the new deployment file by file; the copy
+# must preserve owner, group, and mtime (live Dakota -> Utah lost all
+# three: every file landed root-owned with fresh mtimes and the desktop
+# broke, #308). seed_ownership_fixture recorded the pre-migration identity
+# of a small tree; every entry must still match.
+own_dir=/var/lib/e2e-ownership
+if [ -f "$own_dir/expect.tsv" ]; then
+    own_bad=0
+    tab=$(printf '\t')
+    while IFS="$tab" read -r rel want_ids want_epoch kind want_target; do
+        p="$own_dir/tree/$rel"
+        case "$kind" in
+            f|d)
+                if [ ! -e "$p" ]; then
+                    bad "ownership fixture missing: $rel"; own_bad=1; continue
+                fi
+                got="$(stat -c '%u:%g:%Y' "$p")"
+                if [ "$got" != "$want_ids:$want_epoch" ]; then
+                    bad "ownership fixture $rel is $got, expected $want_ids:$want_epoch"
+                    own_bad=1
+                fi ;;
+            l)
+                if [ ! -L "$p" ]; then
+                    bad "ownership fixture $rel is no longer a symlink"; own_bad=1; continue
+                fi
+                got="$(readlink "$p")"
+                if [ "$got" != "$want_target" ]; then
+                    bad "ownership fixture $rel points at $got, expected $want_target"
+                    own_bad=1
+                fi ;;
+        esac
+    done < "$own_dir/expect.tsv"
+    [ "$own_bad" = 0 ] && ok "/var ownership and mtimes survived the migration"
+else
+    echo "  no ownership fixture was seeded; identity checks skipped"
+fi
+
+# ---- 8. First-boot verify probe (L1) ------------------------------------------
+# Every migrated deployment stages a probe that checks itself on first boot:
+# home ownership, the target's declared users, a kept machine-id. Its
+# one-line summary says OK or FINDINGS <n>; the JSON report has the details.
+# Warnings (a machine-id kept on purpose) are shown and do not fail.
+verify_res=/var/lib/bootc-migrate/verify-result
+if [ -s /var/lib/bootc-migrate/verify-warnings ]; then
+    echo "  first-boot verify probe warnings (not failures):"
+    sed 's/^/    /' /var/lib/bootc-migrate/verify-warnings
+fi
+if [ -f "$verify_res" ]; then
+    r=$(cat "$verify_res")
+    if [ "$r" = OK ]; then
+        ok "first-boot verify probe reported no findings"
+    else
+        bad "first-boot verify probe reported: $r"
+        head -30 /var/lib/bootc-migrate/verify-report.json 2>/dev/null | sed 's/^/    /'
+    fi
+else
+    echo "  no first-boot verify result; the probe did not run (this route stages none)"
 fi
 
 exit "$fail"
