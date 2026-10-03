@@ -108,6 +108,21 @@ e2e-image-swap: build test
       E2E_EXPECT_OS_ID="utah" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-image-swap.log
 
+# The Dakota -> Utah migration through the OstreeInstall route (#302):
+# dakota (composefs-native) -> utah on the OSTree backend. Asserts the
+# reboot lands in utah with GRUB first and the composefs entry as rollback.
+e2e-dakota-utah: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/utah:testing" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_MODE="composefs-to-ostree" \
+      E2E_EXPECT_OS_ID="utah" \
+      E2E_EXPECT_DM="gdm" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-dakota-utah.log
+
 e2e-debug: build
     @echo "=== Running E2E with composefs systemd debug logging ==="
     sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
