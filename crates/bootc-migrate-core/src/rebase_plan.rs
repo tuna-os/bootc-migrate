@@ -12,8 +12,10 @@
 
 use std::fmt;
 
+use serde::Serialize;
+
 /// A bootc root-storage backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Backend {
     /// Classic OSTree deployment (hardlink checkout of an ostree commit).
     Ostree,
