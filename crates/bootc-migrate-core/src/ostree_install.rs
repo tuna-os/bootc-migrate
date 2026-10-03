@@ -48,7 +48,7 @@ use std::process::Command;
 use crate::cross_family;
 use crate::mergetc::{self, IdentityMergePolicy, MergePolicy};
 use crate::migration::rollback;
-use crate::migration::{MountGuard, PodmanImageMount, find_esp_or_mount};
+use crate::migration::{MountGuard, PodmanImageMount, acquire_lock, find_esp_or_mount};
 use crate::preflight;
 use crate::rebase_controller::validate_target_image;
 use crate::registry;
@@ -244,6 +244,15 @@ impl OstreeInstallConfig<'_> {
         if self.dry_run {
             println!("*** DRY RUN MODE — no changes will be made ***");
         }
+        // #303: the deployment-exists check below is check-then-act, so two
+        // runs started together would both pass it and race the ESP
+        // snapshot, the install and the /var copy. The run lock, held until
+        // this returns, makes the second one refuse here instead.
+        let _lock = if self.dry_run {
+            None
+        } else {
+            Some(acquire_lock()?)
+        };
         println!("Checking system state...");
 
         let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();

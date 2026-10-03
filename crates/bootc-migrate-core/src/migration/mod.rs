@@ -30,7 +30,7 @@ pub use boot::find_esp_or_mount;
 // Public API: bootc-rebase constructs this as `migration::SleepGuard`.
 pub use lifecycle::SleepGuard;
 
-pub(crate) use lifecycle::MigrationLifecycle;
+pub(crate) use lifecycle::{MigrationLifecycle, acquire_lock};
 pub(crate) use mount::{MountGuard, PodmanImageMount};
 pub(crate) use seal::{build_origin_content, patch_boot_digest_in_content};
 
