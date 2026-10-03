@@ -355,7 +355,10 @@ pub fn apply_remap_plan_to_dirs(
             if !target.exists() {
                 continue;
             }
-            let changed = apply_single_step(target, step)?;
+            let target_canon = target
+                .canonicalize()
+                .unwrap_or_else(|_| target.to_path_buf());
+            let changed = apply_single_step(&target_canon, step)?;
             total_changed += changed;
         }
     }
@@ -629,6 +632,44 @@ newsvc:x:985:985::/var/lib/newsvc:/sbin/nologin
         };
 
         let res = apply_remap_plan(temp.path(), &plan);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_apply_remap_plan_traverses_symlinked_var() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_var = temp.path().join("real_var");
+        std::fs::create_dir_all(&real_var).unwrap();
+        let f = real_var.join("testfile");
+        std::fs::write(&f, "content").unwrap();
+
+        let staged = temp.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::os::unix::fs::symlink(&real_var, staged.join("var")).unwrap();
+
+        let plan = RemapPlan {
+            remaps: vec![RemapEntry {
+                name: "testaccount".into(),
+                kind: IdKind::Uid,
+                old_id: 980,
+                new_id: 981,
+            }],
+            steps: vec![
+                RemapStep {
+                    kind: IdKind::Uid,
+                    from: 980,
+                    to: 60000,
+                },
+                RemapStep {
+                    kind: IdKind::Uid,
+                    from: 60000,
+                    to: 981,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let res = apply_remap_plan(&staged, &plan);
         assert!(res.is_ok());
     }
 }

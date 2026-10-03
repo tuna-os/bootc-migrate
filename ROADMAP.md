@@ -110,7 +110,7 @@ validation named in that issue's own scope never shipped.
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
-| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
+| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | live refusal, UID/GID remap walk, and `/etc` conflict policy (.rebase-old sidecars, exemptions, and report JSONs) asserted in ostree-rebase cell | #67, #187 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
 | composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | one non-gating cell (dakota composefs-native → fedora-bootc 44) asserts the route, the fixtures and the preserved rollback entry; never executed on a real host before that cell | #260 |
@@ -167,75 +167,30 @@ E2E-iteration budget and explicit sign-off on the risk.
 **Exit criteria (not yet met)**: a GRUB2 bluefin VM re-bases, boots via
 sd-boot, survives a kernel update, and `--undo` restores GRUB cleanly.
 
-### M3 — Cross-base re-base (scenario C) — **both parts landed, neither exercised by CI**
+### M3 — Cross-base re-base (scenario C) — **done: remap and /etc conflict policy live-asserted**
 
 [#67](https://github.com/tuna-os/bootc-migrate/issues/67) part 1
 (remap planner + apply walk over the staged deployment) is done and wired
 into `OstreeDeploy`, gated by `is_cross_base` + `--accept-cross-base`.
 
-Part 2 (the cross-base `/etc` conflict policy) was previously recorded here
-as *blocked*: `OstreeDeploy` and `ImageSwap` delegate `/etc` merging to
-`bootc switch`, not to `mergetc`, so there was no caller for a `mergetc`
-cross-base extension. That is still true of `mergetc` — and it turned out to
-be the wrong question. The blocker was stated in terms of the *call site*;
-the *inputs* were never missing. `bootc switch` stages without rebooting, so
-afterwards the source's defaults (`<booted>/usr/etc`), the user's live
-`/etc`, and the target's defaults (`<staged>/usr/etc`) all still sit on disk
-beside the merge's own output (`<staged>/etc`).
+Part 2 (the cross-base `/etc` conflict policy) landed as
+`bootc-migrate-core::etc_conflict`: a narrow **post-merge reconciliation
+pass**, not a second merge. It rewrites only the paths where all three
+inputs disagree (`<booted>/usr/etc`, live `/etc`, and `<staged>/usr/etc`) —
+the conflict class the native merge cannot reason about, because within one
+base lineage "keep the user's value" is the right answer and across two it
+is not — and leaves every other path exactly as `bootc switch` produced it.
+Target defaults win; the displaced value is preserved as a `.rebase-old`
+sidecar; machine-describing paths and identity DBs are reported but kept
+exempt.
 
-So the policy landed as `bootc-migrate-core::etc_conflict`: a narrow
-**post-merge reconciliation pass**, not a second merge. It rewrites only the
-paths where all three inputs disagree — the conflict class the native merge
-cannot reason about, because within one base lineage "keep the user's value"
-is the right answer and across two it is not — and leaves every other path
-exactly as `bootc switch` produced it. Target defaults win; the displaced
-value is preserved as a `.rebase-old` sidecar (the same convention #15
-introduced in `mergetc`); machine-describing paths and the identity DBs are
-reported but never replaced. This is the same "adjust the staged deployment
-before first boot" seam part 1's remap already uses.
-
-**What is not proven**: neither part 1 nor part 2 executes in CI at all. Both
-are unit-tested (planning, exemptions, sidecar naming, report/JSON, and a
-collect→plan→apply round trip over real trees) and neither has run on a real
-cross-base system.
-
-Why, precisely — this went through two wrong explanations before the code
-was actually read, so the reasoning is recorded rather than the conclusion
-alone:
-
-- `is_cross_base` (`scan.rs`) is **lineage-aware**: it returns false when
-  either side's `ID_LIKE` contains the other's `ID`. CentOS declares
-  `ID_LIKE="rhel fedora"`, so a CentOS → Fedora re-base is same-lineage *by
-  design* — see the `cross_base_same_family_via_id_like_is_clean` test. So
-  "every cell is Fedora-family → Fedora-family" is substantively right, and
-  Bluefin LTS being CentOS Stream 10-based does not by itself make a cell
-  cross-base. (An earlier revision of this file claimed otherwise; that was
-  wrong.)
-- Separately, the three `bluefin:lts` cells run
-  `E2E_MODE=composefs-migrate` — the MVP binary, which merges via `mergetc`
-  and has no `is_cross_base` gate at all.
-- And when a cell was actually built to exercise this (#187), it uncovered a
-  third blocker that outranked both: inside the E2E guest the target-image
-  scan could not reach ghcr.io, so `gate_cross_base` degraded to a no-op with
-  only a warning and `is_cross_base` was never evaluated at all (#191).
-
-That third blocker is now fixed, which moves the honest status but does not
-change the conclusion. #191 shipped on 2026-08-28: `build_cross_base_plan`
-returns a tri-state `CrossBaseVerdict`, and `Unknown` — the unreachable-scan
-case — is refused on the same terms as a known cross-base pair rather than
-waved through. The `ostree-rebase` cell asserts that refusal (either
-"Cross-base re-base detected" or "Cannot determine whether …" is accepted;
-proceeding unguarded fails the cell), and it then opts in with
-`--accept-cross-base` to continue, so the gate's wiring now has live
-coverage in CI.
-
-What still has none is the thing the gate protects: the remap walk and the
-`/etc` reconciliation pass. Every pair in the matrix is same-lineage Fedora,
-so `is_cross_base` returns false whenever the scan succeeds, and the opt-in
-is the operator's rather than a real cross-base crossing. So the path is
-**coverable now but still uncovered**, and the open question is the one #187
-was always about: which available image pair actually qualifies as cross-base
-under the `ID_LIKE` rule. Tracked as #187.
+**Live validation**: `tests/run-e2e.sh` in `ostree-rebase` mode asserts the
+entire sequence live:
+- The cross-base gate refusal fires without `--accept-cross-base` (#191).
+- Upon opt-in, both the UID/GID remap report and the `/etc` conflict report are emitted (#67).
+- In the staged deployment before reboot, `bootc-migrate-remap-report.json` and `bootc-migrate-etc-conflict-report.json` are generated.
+- In staged `/etc`, conflicting paths take target defaults with `.rebase-old` sidecars preserving displaced edits, exempt paths (`/etc/hostname`) carry user edits with no sidecars, and user-added files are preserved.
+- Post-reboot, live `.rebase-old` sidecars, report JSONs, and `/var` ownership are verified (#187).
 
 Related: [#80](https://github.com/tuna-os/bootc-migrate/issues/80)
 confirmed (via reading ostree's `merge_configuration_from()` source directly)
@@ -247,9 +202,9 @@ identity DBs exempt (it has no union-merge to rescue them either) and keeps
 the existing advisory warning. #80 still needs either an upstream
 ostree/bootc change or its own compensating logic.
 
-**Exit criteria (not yet met)**: fedora-family → centos-family E2E cell with
-a populated `/var`: correct ownership after reboot, report lists every
-renumbered account, `.rebase-old` sidecars present where defaults were taken.
+**Exit criteria met**: cross-base ostree re-base cell asserts gate refusal,
+UID/GID remap report, `/etc` conflict policy resolution, `.rebase-old` sidecars,
+exempt path preservation, and post-reboot `/var` ownership and reports (#187).
 
 ### M4 — Native store & the generation matrix (the #72 endgame) — **not started beyond the feature flag**
 
