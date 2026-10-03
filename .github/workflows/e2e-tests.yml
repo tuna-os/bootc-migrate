@@ -179,6 +179,45 @@ jobs:
             cross_family: true
             expect_os_id: opensuse-tumbleweed
             allow_failure: true
+          - name: bluefin -> Debian (cross-family composefs migration)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # #261: cross-family migration from Fedora lineage to Debian.
+            # apt package family (/etc/apt, /etc/dpkg). Non-gating until
+            # passed twice on main.
+            target: ghcr.io/bootcrew/debian-bootc:latest
+            disk_size: 40G
+            cross_family: true
+            expect_os_id: debian
+            allow_failure: true
+          - name: bluefin -> Ubuntu (cross-family composefs migration)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # #261: cross-family migration from Fedora lineage to Ubuntu
+            # (ID_LIKE=debian). Non-gating until passed twice on main.
+            target: ghcr.io/bootcrew/ubuntu-bootc:latest
+            disk_size: 40G
+            cross_family: true
+            expect_os_id: ubuntu
+            allow_failure: true
+          - name: bluefin -> Arch Linux (cross-family composefs migration)
+            base: ghcr.io/projectbluefin/bluefin:stable
+            # #261: cross-family migration to Arch Linux (no ID_LIKE at all,
+            # pacman package family). Non-gating until passed twice on main.
+            target: ghcr.io/bootcrew/arch-bootc:latest
+            disk_size: 40G
+            cross_family: true
+            expect_os_id: arch
+            allow_failure: true
+          - name: openSUSE Tumbleweed -> bluefin (reverse cross-family composefs migration)
+            base: ghcr.io/bootcrew/opensuse-bootc:latest
+            # #261: reverse-direction cross-family migration from openSUSE
+            # base to Fedora-lineage Bluefin. Exercises non-Fedora base-image
+            # installation and reverse-direction /etc policy + identity merge.
+            # Non-gating until passed twice on main.
+            target: ghcr.io/projectbluefin/bluefin:stable
+            disk_size: 40G
+            cross_family: true
+            expect_os_id: bluefin
+            allow_failure: true
           - name: dakota -> fedora-bootc (composefs -> ostree, OstreeInstall)
             # #260: the reverse backend switch on a host that never had an
             # OSTree deployment. The base is installed composefs-native
