@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-09-03. Living document; the issue tracker is authoritative
+Status date: 2026-09-24. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 Caveat on that split, recorded because it has already misled readers: five
@@ -80,17 +80,31 @@ It allows the proven, renamed migrator to ship while making the newer engine's
 evidence level visible to adopters. After this release, cadence and the
 `bootc-rebase` graduation gate should be tracked separately.
 
-**Status of that gate, 2026-09-03: not started, and the cost is now
-user-visible.** The contract exists (RELEASING.md, #171) and no clause of it
-has been executed. `Cargo.toml`'s workspace version is `0.5.0`; the newest
-GitHub Release is `v0.2.0` from 2026-07-04, carrying only pre-rename
-`bootc-migrate-composefs-*` archives. So the README quick start's
-`releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz`
-returns 404, the same URL under the old asset name returns 200, and
-`ghcr.io/tuna-os/bootc-migrate:latest` refuses anonymous pulls while
-`ghcr.io/tuna-os/bootc-migrate-composefs` still serves them. Both documented
-install paths therefore fail for a new adopter, and the only artifact that
-does resolve is the pre-rename binary the README steers people away from.
+**Status of that gate, 2026-09-24: partially executed.** `v0.6.0` published
+2026-09-04 (the day after this file's prior snapshot), and #241 landed the
+same week making releases fire automatically from the Cargo workspace version
+instead of a manual tag.
+
+- **Identity: met.** `Cargo.toml`'s workspace version is `0.6.0`, matching
+  `git tag v0.6.0` and the current GitHub Release. The README quick start's
+  `releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz`
+  now resolves (302 to the correctly-named asset) instead of 404.
+- **Scope: not met.** The v0.6.0 release notes are an auto-generated PR list;
+  nothing in them states whether `bootc-rebase` ships as excluded,
+  experimental, or supported, or distinguishes its stability language from
+  the protected migrator's.
+- **Validation: not verified from this file.** Whether the protected-MVP E2E
+  cells were confirmed green specifically on the `v0.6.0` commit, and whether
+  a manual release-workflow dry run was run, isn't recorded here or in the
+  release notes.
+- **Safety boundary: not met.** The unvalidated-paths table below exists in
+  this file, but nothing in the release notes links to it or to recovery/undo
+  guidance.
+- **Ownership: changed shape, not met as written.** #241 makes releases
+  automatic on every Cargo version bump rather than a manually gated cut, so
+  "one named release owner and target date" no longer describes how releases
+  actually happen. This clause needs rewriting to match the automated
+  contract, not just a name filled in.
 
 No release owner and no target date are recorded anywhere, which is the one
 gate clause that blocks all the others. Tracked as #236.
