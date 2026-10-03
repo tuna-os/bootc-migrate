@@ -2108,6 +2108,14 @@ useradd -m -U realuser 2>/dev/null || true
 mkdir -p /var/home/realuser
 echo "real-home-data" > /var/home/realuser/home-marker.txt
 chown -R realuser:realuser /var/home/realuser
+# #309 sabotage canary: a tree with a known owner and an old mtime. The
+# migration records it in the identity manifest; a step after staging
+# breaks it, and the first-boot repair must put it back.
+mkdir -p /var/home/realuser/repair-canary/sub
+echo "canary" > /var/home/realuser/repair-canary/file
+echo "canary" > /var/home/realuser/repair-canary/sub/nested
+chown -R realuser:realuser /var/home/realuser/repair-canary
+find /var/home/realuser/repair-canary -exec touch -h -d @1600000000 {} +
 
 # Persist absolute legacy paths like real OSTree user state does. A native
 # /home target must keep these working without rewriting the user's files.
@@ -2418,6 +2426,27 @@ ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-s
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 CFS_POSTMERGEFIX
 
+# #309: post-stage, pre-reboot sabotage. Break the canary tree in the /var
+# the new deployment mounts (the stateroot copy, or the live /var when it
+# stays in place), the way #308's identity-dropping copy did: root-owned,
+# fresh mtimes. The first-boot repair must restore it from the manifest.
+step "=== first-boot repair: sabotaging the canary tree (#309) ==="
+ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
+set -e
+CANARY_REL=home/realuser/repair-canary
+for V in /sysroot/state/os/default/var /var; do
+    [ -d "$V/$CANARY_REL" ] && break
+done
+DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
+test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
+test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
+grep -q "repair-canary/file" "$V/lib/bootc-migrate/identity-manifest.tsv" || { echo "FAIL: canary missing from $V/lib/bootc-migrate/identity-manifest.tsv"; exit 1; }
+chown -R root:root "$V/$CANARY_REL"
+touch "$V/$CANARY_REL/file" "$V/$CANARY_REL/sub/nested"
+echo "sabotaged $V/$CANARY_REL: $(stat -c '%U:%G %Y' "$V/$CANARY_REL/file")"
+REPAIR_SABOTAGE
+
 step "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG'
 set +e
@@ -2541,6 +2570,26 @@ fi
 echo "OK: Booted backend is ComposeFS."
 
 assert_system_healthy "post-migration"
+
+# #309: the first-boot repair ran once, logged the ownership fix, and the
+# canary tree is back to its recorded owner and mtime.
+step "=== first-boot repair: asserting the canary was repaired (#309) ==="
+ssh $SSH_OPTS root@localhost bash <<'REPAIR_ASSERT'
+set -e
+STATE=/var/lib/bootc-migrate
+journalctl -b -u bootc-migrate-repair-firstboot.service --no-pager | tail -20 || true
+test -f "$STATE/repair-log.json" || { echo "FAIL: no repair log at $STATE/repair-log.json"; exit 1; }
+echo "repair-result: $(cat "$STATE/repair-result")"
+grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "repaired"' || {
+    echo "FAIL: repair log does not show the ownership class repaired"; cat "$STATE/repair-log.json"; exit 1; }
+for f in file sub/nested sub; do
+    got=$(stat -c '%U:%G %Y' "/var/home/realuser/repair-canary/$f")
+    [ "$got" = "realuser:realuser 1600000000" ] || { echo "FAIL: canary $f is '$got', expected 'realuser:realuser 1600000000'"; exit 1; }
+done
+test ! -e /etc/bootc-migrate/repair-firstboot || { echo "FAIL: repair marker still armed after first boot"; exit 1; }
+test ! -e /etc/bootc-migrate/bootc-migrate-repair || { echo "FAIL: staged repair binary not removed"; exit 1; }
+echo "OK: canary owner and mtime restored by the first-boot repair."
+REPAIR_ASSERT
 
 # #256: the whole point — the migrated system is the target's family.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then
