@@ -549,7 +549,7 @@ fn merge_identity_db(
 /// The union of two colon-delimited tables keyed by their first field:
 /// every line of `first` verbatim, then each line of `second` whose key
 /// `first` lacks.
-fn union_by_first_field(first: &str, second: &str) -> String {
+pub fn union_by_first_field(first: &str, second: &str) -> String {
     let key_of = |line: &str| line.split(':').next().unwrap_or("").to_string();
     let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = String::with_capacity(first.len() + second.len());
