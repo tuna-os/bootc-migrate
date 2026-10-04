@@ -57,6 +57,29 @@ on:
           identity assertion.
         required: false
         default: ""
+      de_migrate:
+        description: >-
+          Pass --de-migrate (ostree-rebase mode): seed a config of de_from,
+          assert the re-base stashes it, and restore it after the reboot.
+        required: false
+        default: false
+        type: boolean
+      de_from:
+        description: Desktop the base image runs (gnome, kde, cosmic, niri, xfce)
+        required: false
+        default: gnome
+      expect_dm:
+        description: >-
+          Display manager the migrated system must run (gdm, sddm). Empty
+          accepts any when the default target is graphical.
+        required: false
+        default: ""
+      allowed_failed_units:
+        description: >-
+          Space-separated glob patterns of units allowed to be failed after
+          the reboot (tests/e2e-health.sh).
+        required: false
+        default: ""
       runner:
         description: >-
           Runner override for THIS dispatch only (e.g. ubuntu-24.04, or a
@@ -88,7 +111,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
@@ -178,6 +201,10 @@ jobs:
             E2E_CROSS_BASE="${{ inputs.cross_base && '1' || '0' }}" \
             E2E_CROSS_FAMILY="${{ inputs.cross_family && '1' || '0' }}" \
             E2E_EXPECT_OS_ID="${{ inputs.expect_os_id }}" \
+            E2E_EXPECT_DM="${{ inputs.expect_dm }}" \
+            E2E_DE_MIGRATE="${{ inputs.de_migrate && '1' || '0' }}" \
+            E2E_DE_FROM="${{ inputs.de_from }}" \
+            E2E_ALLOWED_FAILED_UNITS="${{ inputs.allowed_failed_units }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       # tui-migrate runs record both interactive flows as asciicast v2
@@ -208,7 +235,7 @@ jobs:
 
       - name: Upload TUI walkthrough artifacts
         if: ${{ always() && inputs.mode == 'tui-migrate' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tui-walkthrough
           path: |
@@ -245,7 +272,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-single-logs
           path: |
