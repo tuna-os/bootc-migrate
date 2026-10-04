@@ -105,13 +105,11 @@ pub fn bls_entry_title(os: &OsRelease, kind: &str) -> String {
         os.pretty_name.clone()
     } else if !os.name.is_empty() {
         os.name.clone()
+    } else if let Some(first) = os.id.chars().next() {
+        let rest = &os.id[first.len_utf8()..];
+        format!("{}{}", first.to_uppercase(), rest)
     } else {
-        if let Some(first) = os.id.chars().next() {
-            let rest = &os.id[first.len_utf8()..];
-            format!("{}{}", first.to_uppercase(), rest)
-        } else {
-            os.id.clone()
-        }
+        os.id.clone()
     };
     format!("{display_name} ({kind})")
 }

@@ -302,7 +302,11 @@ jobs:
             expect_dm: gdm
             mode: image-swap
             disk_size: 40G
-            expect_os_id: utah
+            # utah:testing is built on Fedora Hummingbird; since the
+            # 2026-10-01 image its os-release says ID=hummingbird (run
+            # 36964331436). The booted-image check above already proves the
+            # target booted; this proves the target /etc/os-release won.
+            expect_os_id: hummingbird
             allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
@@ -311,7 +315,7 @@ jobs:
           #   target: quay.io/fedora/fedora-bootc:44
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Bluefin + Dakota are ~5 GB each. The default ubuntu-latest runner has
       # ~14 GB free; that plus a 20-60 GB disk.raw (a sparse file that grows
@@ -450,7 +454,7 @@ jobs:
 
       - name: Upload TUI walkthrough artifacts
         if: ${{ always() && matrix.scenario.mode == 'tui-migrate' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tui-walkthrough-${{ strategy.job-index }}
           path: |
@@ -490,7 +494,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs-${{ strategy.job-index }}
           path: |
