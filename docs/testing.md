@@ -42,6 +42,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
 | bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
 | dakota stable (composefs-native) → fedora-bootc 44 (`composefs-to-ostree` mode) | the reverse backend switch (#260): `--plan` resolves `OstreeInstall`, the target's `bootc install to-existing-root` runs alongside, `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in the OSTree deployment, and the composefs "Linux Boot Manager" entry and ESP kernel remain as rollback | active, non-gating |
+| dakota stable (composefs-native) → utah testing (`image-swap` mode) | a composefs image swap across distributions: `--plan` resolves `ImageSwap`, the host's `bootc switch` stages Utah (Bluefin on Fedora Hummingbird), `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in Utah and the Dakota deployment stays as rollback | active, non-gating |
 | bluefin stable → bootcrew/opensuse-bootc (`E2E_CROSS_FAMILY=1`) | the cross-family gate refuses without `--accept-cross-base`; with it, the cross-family `/etc` policy (#256): target defaults win, `.rebase-old` sidecars, carried machine state, target-first identity merge, first-boot unit | active, non-gating |
 
 ### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
@@ -154,6 +155,66 @@ Because desktop detection scans the target image, this cell depends on the
 same registry path as `E2E_CROSS_BASE`, and is blocked by the same 403 on the
 token fetch described above.
 
+After the reboot, the cell also checks the return trip. On the booted Aurora,
+it restores the GNOME stash with the `de-migrate restore` subcommand. Then it
+asserts that the seeded GNOME config is back in `$HOME` and gone from the
+stash. The shared health check below also requires SDDM, not GDM, as the
+display manager.
+
+### tunaOS desktop ring
+
+Four non-gating cells re-base between the Albacore (AlmaLinux 10) desktop
+tags in a ring:
+GNOME → Niri → COSMIC → XFCE → GNOME. Each desktop is a source once and a
+target once. Each change of display manager runs once, because the tags use
+different ones: GDM for GNOME, greetd with the DMS greeter for Niri,
+cosmic-greeter for COSMIC, and greetd with gtkgreet for XFCE.
+
+The ring does not use Yellowfin. On its rolling Kitten 10 base, a fresh
+install cannot start D-Bus: SELinux denies dbus-broker its
+`dbus_contexts` file (tunaOS#2485). Every Yellowfin base therefore fails
+before the migration starts. The XFCE cell forwards the journal to the
+serial console, so an EL10 base with this problem shows the reason in
+`qemu.log`.
+
+Each cell sets `de_from` to the base desktop. The harness seeds one config
+file of that desktop and asserts that `--de-migrate` stashes it. After the
+reboot, it restores the file and requires the target's display manager.
+
+### Post-reboot health check (every mode)
+
+The per-mode assertions prove that user data survived. They do not prove that
+the system which carries the data works. The Dakota → Utah bugs (#267) broke
+D-Bus and left SSH working only by chance.
+
+After every reboot into a migrated system, `tests/e2e-health.sh` runs inside
+the VM and fails the cell when any of these is not true:
+
+- The boot completed. The system state is "running" or "degraded".
+- No unit failed, other than the globs in `E2E_ALLOWED_FAILED_UNITS`. Each
+  entry needs a reason next to it.
+- The system bus and logind answer.
+- When the default target is graphical, `graphical.target` is active and the
+  display manager runs. It must be the cell's `expect_dm` when set (`gdm`,
+  `sddm`).
+- Every user and group in the target's `sysusers.d` resolves.
+- On an enforcing SELinux target: no denial against an `unlabeled_t` file,
+  and `restorecon -n` finds no new path to relabel under `/etc` or
+  `/var/home`. Just before the migration, the harness records the paths
+  that the base already has mislabeled. Those paths are reported but do
+  not fail the cell. For example, tunaOS labels `/var/home/linuxbrew`
+  `home_root_t` on a fresh install.
+  A cell can also list path globs in `allowed_mislabeled` when the image's
+  own policy is not consistent. The cell must give the reason. The
+  `albacore:gnome` policy maps `/var/home` to `/home` but writes its home
+  contexts for `/var/home`, so the two ring cells that include it allow
+  `/var/home/*`.
+
+The composefs migration mode also asserts the other direction of the
+fresh-image comparison. Every file that the target image ships in `/etc` must
+exist after the migration. The list of paths that the migration removes on
+purpose is in `tests/run-e2e.sh`, with a reason for each.
+
 ### Boot entries (`E2E_BOOT_ENTRIES=1`) — live NVRAM coverage
 
 The gating `bluefin ostree re-base` cell now runs `boot-entries`: a read-only
@@ -170,7 +231,7 @@ implemented yet (issue #65)", so there is no flip to exercise.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
-- **M1**: dakota → dakota:other-tag (`ImageSwap`, `E2E_MODE=image-swap`)
+- **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`), active as the non-gating cell above
 - **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
   kernel update asserting ESP resync; `--undo` restores GRUB
 - **M3**: the cross-base cell above covers centos-family → fedora-family.

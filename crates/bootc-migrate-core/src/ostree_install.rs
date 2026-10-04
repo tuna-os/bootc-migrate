@@ -131,6 +131,36 @@ pub fn install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
     argv
 }
 
+/// Where [`seed_var_command`] mounts the stateroot `/var` inside the
+/// target image's container.
+const CONTAINER_VAR_TARGET: &str = "/target-var";
+
+/// The `podman run` argv that fills the stateroot `/var` with the target
+/// image's own `/var` skeleton, without overwriting anything the live copy
+/// put there (`cp -a --no-clobber`). The stateroot `/var` of an alongside
+/// install starts empty, so without this the target boots with the source's
+/// `/var` only, and a unit that expects a directory its package created at
+/// build time fails (fedora-bootc's chronyd: `/var/lib/chrony: No such file
+/// or directory`). Pure so it is table-tested.
+pub fn seed_var_command(target_image: &str) -> Vec<String> {
+    vec![
+        "podman".into(),
+        "run".into(),
+        "--rm".into(),
+        "--privileged".into(),
+        "--security-opt".into(),
+        "label=disable".into(),
+        "--mount".into(),
+        format!("type=bind,src={OSTREE_STATEROOT_VAR},dst={CONTAINER_VAR_TARGET}"),
+        target_image.into(),
+        "cp".into(),
+        "-a".into(),
+        "--no-clobber".into(),
+        "/var/.".into(),
+        format!("{CONTAINER_VAR_TARGET}/"),
+    ]
+}
+
 /// Whether an ESP-relative path (forward slashes) belongs to the composefs
 /// deployment or its loader — what alongside mode's ESP wipe would destroy
 /// and what must come back afterwards. Everything bootupd writes
@@ -391,6 +421,9 @@ impl OstreeInstallConfig<'_> {
         // ---- /var ----
         println!("=== /var: carrying the live tree into the stateroot ===");
         let var_copied = copy_var_into_stateroot()?;
+        if var_copied {
+            seed_var_from_target(self.target_image);
+        }
 
         if let Some(outcome) = cross.as_ref() {
             let source_passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
@@ -1007,7 +1040,17 @@ fn merge_etc_into(
         let states = mergetc::etc_path_states(old_default, current, &new_default)?;
         let etc_plan = cross_family::plan_etc(&states);
         manifest = Some(etc_plan.overrides());
-        let read = |n: &str| fs::read_to_string(new_default.join(n)).unwrap_or_default();
+        let read = |n: &str| {
+            let etc = fs::read_to_string(new_default.join(n)).unwrap_or_default();
+            let usr = fs::read_to_string(deploy_root.join("usr/lib").join(n)).unwrap_or_default();
+            if usr.is_empty() {
+                etc
+            } else if etc.is_empty() {
+                usr
+            } else {
+                mergetc::union_by_first_field(&etc, &usr)
+            }
+        };
         outcome = Some(cross_family::CrossFamilyEtcOutcome {
             plan: plan.clone(),
             etc_plan,
@@ -1039,6 +1082,14 @@ fn merge_etc_into(
         },
     )
     .context("3-way /etc merge into the new deployment failed")?;
+
+    let supplemented = supplement_identity_from_usr_lib(deploy_root, &out)?;
+    if supplemented > 0 {
+        println!(
+            "[etc] supplemented {supplemented} identity DB(s) with target's /usr/lib accounts"
+        );
+    }
+
     match mergetc::prune_dangling_symlinks(&out, deploy_root) {
         Ok(n) if n > 0 => println!("[etc] pruned {n} dangling symlink(s)"),
         Ok(_) => {}
@@ -1062,6 +1113,58 @@ fn merge_etc_into(
     Ok((summary, outcome))
 }
 
+/// Supplement the merged `/etc` identity databases (passwd, group, shadow, gshadow, subuid, subgid)
+/// with the target image's vendor accounts from `<deploy_root>/usr/lib/`.
+///
+/// Images using `nss-altfiles` or vendor-split user databases (such as Fedora bootc, CentOS,
+/// AlmaLinux, RHEL) store system accounts (`chrony`, `rpc`, `rpcuser`, `sssd`, `mail`, etc.) in
+/// `/usr/lib/passwd` and `/usr/lib/group` rather than `/usr/etc/passwd` and `/usr/etc/group`.
+/// When migrating from a host that does not define those accounts (e.g. Dakota on composefs),
+/// the 3-way /etc merge keeps the source's accounts and takes only `/usr/etc` from the target,
+/// leaving the target's system accounts missing from `/etc/passwd` and `/etc/group`.
+///
+/// Early in boot, `systemd-tmpfiles-setup.service` runs during `sysinit.target` before `systemd-userdbd`
+/// is active. If these accounts are not in `/etc/passwd` / `/etc/group`, `systemd-tmpfiles-setup` fails
+/// with "Unknown user 'chrony'" (exit 65), causing dependent services like `chronyd` and `gssproxy`
+/// to fail.
+///
+/// Appending the target's vendor accounts to the merged `/etc/passwd` and `/etc/group` (preserving the
+/// source's accounts first) ensures they resolve via standard NSS `files` from the earliest boot stage.
+pub fn supplement_identity_from_usr_lib(deploy_root: &Path, out_etc: &Path) -> Result<usize> {
+    let usr_lib = deploy_root.join("usr/lib");
+    if !usr_lib.is_dir() {
+        return Ok(0);
+    }
+    let names = [
+        "passwd", "passwd-", "group", "group-", "shadow", "shadow-", "gshadow", "gshadow-",
+        "subuid", "subuid-", "subgid", "subgid-",
+    ];
+    let mut supplemented = 0;
+    for name in &names {
+        let usr_file = usr_lib.join(name);
+        if !usr_file.is_file() {
+            continue;
+        }
+        let target_content = fs::read_to_string(&usr_file).unwrap_or_default();
+        if target_content.trim().is_empty() {
+            continue;
+        }
+        let etc_file = out_etc.join(name);
+        let cur_content = fs::read_to_string(&etc_file).unwrap_or_default();
+        let merged = mergetc::union_by_first_field(&cur_content, &target_content);
+        if merged != cur_content {
+            let perms = fs::metadata(&etc_file).ok().map(|m| m.permissions());
+            fs::write(&etc_file, merged.as_bytes())
+                .with_context(|| format!("failed to rewrite {}", etc_file.display()))?;
+            if let Some(p) = perms {
+                let _ = fs::set_permissions(&etc_file, p);
+            }
+            supplemented += 1;
+        }
+    }
+    Ok(supplemented)
+}
+
 /// Copy the live `/var` into the new stateroot's `/var` unless `/var` is a
 /// dedicated filesystem the deployment's fstab will mount itself.
 fn copy_var_into_stateroot() -> Result<bool> {
@@ -1079,6 +1182,25 @@ fn copy_var_into_stateroot() -> Result<bool> {
         .context("copying /var into the OSTree stateroot")?;
     println!("[var] live /var copied to {}", dst.display());
     Ok(true)
+}
+
+/// Fill the stateroot `/var` with the target's own `/var` skeleton (see
+/// [`seed_var_command`]). Best-effort: a path the source has as a different
+/// file type (a directory where the target ships a symlink) makes `cp`
+/// report an error for that path while still copying the rest, and the
+/// carried data must win there anyway.
+fn seed_var_from_target(target_image: &str) {
+    let argv = seed_var_command(target_image);
+    println!("[var] {}", argv.join(" "));
+    match Command::new(&argv[0]).args(&argv[1..]).status() {
+        Ok(s) if s.success() => println!("[var] target /var skeleton added"),
+        Ok(s) => eprintln!(
+            "Warning: filling /var from the target image reported errors (exit {:?}); \
+             paths the source already had are kept as carried.",
+            s.code()
+        ),
+        Err(e) => eprintln!("Warning: could not run the target image to fill /var: {e}"),
+    }
 }
 
 /// Put the shim/GRUB entry bootupd registered first in `BootOrder`, keeping
@@ -1118,6 +1240,25 @@ fn put_grub_first() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_var_command_never_overwrites_carried_data() {
+        let argv = seed_var_command("quay.io/fedora/fedora-bootc:44");
+        assert_eq!(argv[0], "podman");
+        assert!(argv.contains(&format!(
+            "type=bind,src={OSTREE_STATEROOT_VAR},dst={CONTAINER_VAR_TARGET}"
+        )));
+        let image_pos = argv
+            .iter()
+            .position(|a| a == "quay.io/fedora/fedora-bootc:44")
+            .unwrap();
+        // The copy runs in the target image, from its /var into the
+        // stateroot, and must not replace what the live copy carried.
+        assert_eq!(
+            &argv[image_pos + 1..],
+            &["cp", "-a", "--no-clobber", "/var/.", "/target-var/"]
+        );
+    }
 
     #[test]
     fn install_command_shape() {
@@ -1377,5 +1518,65 @@ mod tests {
         assert_eq!(r("EFI/BOOT/BOOTX64.EFI"), "shim-fallback");
         assert_eq!(r("loader/loader.conf"), "written-by-something-else");
         assert_eq!(r("EFI/fedora/shimx64.efi"), "shim");
+    }
+
+    #[test]
+    fn supplement_identity_from_usr_lib_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deploy = tmp.path().join("deploy");
+        let usr_lib = deploy.join("usr/lib");
+        let etc = deploy.join("etc");
+        fs::create_dir_all(&usr_lib).unwrap();
+        fs::create_dir_all(&etc).unwrap();
+
+        // 1. Initial state: host has root and realuser; target has root, chrony, rpc, sssd
+        fs::write(
+            etc.join("passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nrealuser:x:1000:1000:Real User:/var/home/realuser:/bin/bash\n",
+        )
+        .unwrap();
+        fs::write(etc.join("group"), "root:x:0:\nrealuser:x:1000:\n").unwrap();
+        fs::write(
+            usr_lib.join("passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nchrony:x:994:992::/var/lib/chrony:/usr/sbin/nologin\nrpc:x:32:32:Rpcbind Daemon:/var/lib/rpcbind:/usr/sbin/nologin\nsssd:x:993:991:User for sssd:/var/lib/sss:/usr/sbin/nologin\n",
+        )
+        .unwrap();
+        fs::write(
+            usr_lib.join("group"),
+            "root:x:0:\nmail:x:12:\nchrony:x:992:\nrpc:x:32:\nsssd:x:991:\n",
+        )
+        .unwrap();
+        fs::write(usr_lib.join("subuid"), "realuser:100000:65536\n").unwrap();
+
+        let count = supplement_identity_from_usr_lib(&deploy, &etc).unwrap();
+        assert_eq!(count, 3); // passwd, group, subuid
+
+        let passwd = fs::read_to_string(etc.join("passwd")).unwrap();
+        let group = fs::read_to_string(etc.join("group")).unwrap();
+        let subuid = fs::read_to_string(etc.join("subuid")).unwrap();
+
+        // Verify host accounts preserved first
+        assert!(passwd.starts_with("root:x:0:0:root:/root:/bin/bash\nrealuser:x:1000:1000:Real User:/var/home/realuser:/bin/bash\n"));
+        // Verify target accounts appended
+        assert!(passwd.contains("chrony:x:994:992::/var/lib/chrony:/usr/sbin/nologin\n"));
+        assert!(passwd.contains("rpc:x:32:32:Rpcbind Daemon:/var/lib/rpcbind:/usr/sbin/nologin\n"));
+        assert!(passwd.contains("sssd:x:993:991:User for sssd:/var/lib/sss:/usr/sbin/nologin\n"));
+
+        assert!(group.starts_with("root:x:0:\nrealuser:x:1000:\n"));
+        assert!(group.contains("mail:x:12:\n"));
+        assert!(group.contains("chrony:x:992:\n"));
+        assert!(group.contains("rpc:x:32:\n"));
+        assert!(group.contains("sssd:x:991:\n"));
+
+        assert_eq!(subuid, "realuser:100000:65536\n");
+
+        // Idempotent second run modifies nothing
+        let count2 = supplement_identity_from_usr_lib(&deploy, &etc).unwrap();
+        assert_eq!(count2, 0);
+
+        // Missing usr/lib returns 0 without error
+        let empty_deploy = tmp.path().join("empty_deploy");
+        let count_empty = supplement_identity_from_usr_lib(&empty_deploy, &etc).unwrap();
+        assert_eq!(count_empty, 0);
     }
 }

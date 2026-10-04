@@ -522,6 +522,52 @@ pub fn render_firstboot_unit(var_steps: &[RemapStep], relabel: bool) -> Option<S
     Some(unit)
 }
 
+/// Render the first-boot unit for a composefs image swap.
+///
+/// On composefs, `bootc switch` merges the running `/etc` into the new
+/// deployment at shutdown, after `bootc-rebase` has exited. When the host
+/// is from another distribution, its locally modified identity databases
+/// replace the target's. Dakota, for example, ships an empty `/etc/passwd`
+/// and creates its accounts at runtime, so Utah boots without its `dbus`
+/// user and D-Bus never starts. The unit therefore runs the target's own
+/// `systemd-sysusers` to add the system users and groups the target
+/// declares, and `ldconfig` to replace the host's library cache. Both only
+/// add or regenerate, so a same-family swap is unchanged. `relabel` adds
+/// `restorecon` over both writable trees before those steps, and over
+/// `/etc` again after them for the files they wrote.
+pub fn render_image_swap_firstboot_unit(relabel: bool) -> String {
+    let mut unit = String::new();
+    unit.push_str("[Unit]\n");
+    unit.push_str(
+        "Description=bootc-migrate image swap first boot (system users, library cache, SELinux relabel)\n",
+    );
+    unit.push_str(&format!("ConditionPathExists=/etc/{FIRSTBOOT_MARKER}\n"));
+    unit.push_str("DefaultDependencies=no\n");
+    unit.push_str("After=local-fs.target\n");
+    unit.push_str(
+        "Before=sysinit.target systemd-sysusers.service dbus-broker.service dbus.service\n",
+    );
+    unit.push('\n');
+    unit.push_str("[Service]\n");
+    unit.push_str("Type=oneshot\n");
+    unit.push_str("RemainAfterExit=no\n");
+    if relabel {
+        unit.push_str("ExecStart=-/usr/sbin/restorecon -RF /etc /var\n");
+    }
+    unit.push_str("ExecStart=-/usr/bin/systemd-sysusers\n");
+    unit.push_str("ExecStart=-/usr/sbin/ldconfig\n");
+    if relabel {
+        unit.push_str("ExecStart=-/usr/sbin/restorecon -RF /etc\n");
+    }
+    unit.push_str(&format!(
+        "ExecStart=/usr/bin/rm -f /etc/{FIRSTBOOT_MARKER}\n"
+    ));
+    unit.push('\n');
+    unit.push_str("[Install]\n");
+    unit.push_str("WantedBy=sysinit.target\n");
+    unit
+}
+
 /// Write the unit into the staged `/etc`, enable it, and arm its marker.
 pub fn install_firstboot_unit(etc_dir: &Path, unit: &str) -> Result<()> {
     let unit_dir = etc_dir.join("systemd/system");
@@ -1014,6 +1060,35 @@ mod tests {
         // Unreadable on either side: never a refusal, never a plan.
         assert!(decide(None, suse(), false).unwrap().is_none());
         assert!(decide(fedora(), None, true).unwrap().is_none());
+    }
+
+    /// The image-swap unit always restores the target's system users and
+    /// library cache, relabels around them only when asked, and disarms
+    /// itself last.
+    #[test]
+    fn image_swap_firstboot_unit_shape() {
+        let execs = |u: &str| -> Vec<String> {
+            u.lines()
+                .filter_map(|l| l.strip_prefix("ExecStart="))
+                .map(str::to_string)
+                .collect()
+        };
+        let plain = render_image_swap_firstboot_unit(false);
+        assert_eq!(
+            execs(&plain),
+            vec![
+                "-/usr/bin/systemd-sysusers".to_string(),
+                "-/usr/sbin/ldconfig".into(),
+                format!("/usr/bin/rm -f /etc/{FIRSTBOOT_MARKER}"),
+            ]
+        );
+        let relabel = render_image_swap_firstboot_unit(true);
+        let e = execs(&relabel);
+        assert_eq!(e.first().unwrap(), "-/usr/sbin/restorecon -RF /etc /var");
+        assert_eq!(e[e.len() - 2], "-/usr/sbin/restorecon -RF /etc");
+        assert!(e.last().unwrap().contains(FIRSTBOOT_MARKER));
+        assert!(relabel.contains(&format!("ConditionPathExists=/etc/{FIRSTBOOT_MARKER}")));
+        assert!(relabel.contains("Before=sysinit.target systemd-sysusers.service"));
     }
 
     #[test]
