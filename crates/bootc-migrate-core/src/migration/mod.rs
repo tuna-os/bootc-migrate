@@ -15,7 +15,7 @@ pub mod os_release;
 pub mod pull;
 pub mod rollback;
 pub mod seal;
-mod standalone_bootloader;
+pub mod standalone_bootloader;
 pub mod target_compat;
 pub mod var_layout;
 
