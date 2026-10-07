@@ -1,6 +1,6 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-09-24. Living document; the issue tracker is authoritative
+Status date: 2026-10-07. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 Caveat on that split, recorded because it has already misled readers: five
@@ -80,7 +80,7 @@ It allows the proven, renamed migrator to ship while making the newer engine's
 evidence level visible to adopters. After this release, cadence and the
 `bootc-rebase` graduation gate should be tracked separately.
 
-**Status of that gate, 2026-09-24: partially executed.** `v0.6.0` published
+**Status of that gate, 2026-10-07: partially executed.** `v0.6.0` published
 2026-09-04 (the day after this file's prior snapshot), and #241 landed the
 same week making releases fire automatically from the Cargo workspace version
 instead of a manual tag.
