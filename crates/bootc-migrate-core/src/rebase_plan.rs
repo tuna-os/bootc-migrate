@@ -19,6 +19,9 @@ pub enum Backend {
     Ostree,
     /// ComposeFS-sealed EROFS deployment.
     Composefs,
+    /// Not a bootc deployment: a writable root managed by a package manager
+    /// (rpm, dpkg, pacman). Only ever a source (issue #370).
+    Package,
 }
 
 impl fmt::Display for Backend {
@@ -26,6 +29,7 @@ impl fmt::Display for Backend {
         match self {
             Backend::Ostree => write!(f, "ostree"),
             Backend::Composefs => write!(f, "composefs"),
+            Backend::Package => write!(f, "package"),
         }
     }
 }
@@ -47,6 +51,11 @@ pub enum Strategy {
     /// `/etc` and `/var` over and keep the composefs entry as rollback
     /// (issue #260). composefs→ostree.
     OstreeInstall,
+    /// Install the target beside a package-managed root with the same
+    /// `bootc install to-existing-root` engine as `OstreeInstall`, keep the
+    /// old root bootable as "Previous system", and carry `/etc`, `/var` and
+    /// `/home` over (issue #373). package→ostree.
+    PackageInstall,
 }
 
 /// A phase selected by the re-base planner. Keeping this list independent of
@@ -137,6 +146,14 @@ const ROUTES: &[Route] = &[
         strategy: Strategy::OstreeInstall,
         implemented: true,
     },
+    // package→composefs is two steps by design (#370): this route, then
+    // ostree→composefs on the next run. It has no row of its own.
+    Route {
+        from: Backend::Package,
+        to: Backend::Ostree,
+        strategy: Strategy::PackageInstall,
+        implemented: false,
+    },
 ];
 
 /// Look up the route for a backend pair. `None` means the transition is not
@@ -173,7 +190,7 @@ pub fn plan(from: Backend, to: Backend) -> Option<RebasePlan> {
             vec![Phase::Preflight, Phase::Pull, Phase::Deploy],
             BootloaderPolicy::KeepSource,
         ),
-        (Backend::Composefs, Backend::Ostree) => (
+        (Backend::Composefs, Backend::Ostree) | (Backend::Package, Backend::Ostree) => (
             vec![
                 Phase::Preflight,
                 Phase::Pull,
@@ -182,6 +199,7 @@ pub fn plan(from: Backend, to: Backend) -> Option<RebasePlan> {
             ],
             BootloaderPolicy::Target,
         ),
+        (_, Backend::Package) | (Backend::Package, Backend::Composefs) => return None,
     };
     Some(RebasePlan {
         route,
@@ -285,6 +303,31 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn package_to_ostree_is_planned() {
+        let r = route(Backend::Package, Backend::Ostree).unwrap();
+        assert!(!r.implemented);
+        assert_eq!(r.strategy, Strategy::PackageInstall);
+        let p = plan(Backend::Package, Backend::Ostree).unwrap();
+        assert_eq!(p.phase_names(), "preflight -> pull -> deploy -> bootloader");
+        assert_eq!(p.bootloader, BootloaderPolicy::Target);
+    }
+
+    #[test]
+    fn package_is_never_a_target_and_composefs_takes_two_steps() {
+        for from in [Backend::Ostree, Backend::Composefs, Backend::Package] {
+            assert!(route(from, Backend::Package).is_none(), "{from} -> package");
+            assert!(plan(from, Backend::Package).is_none(), "{from} -> package");
+        }
+        assert!(route(Backend::Package, Backend::Composefs).is_none());
+        // The second step exists.
+        assert!(
+            route(Backend::Ostree, Backend::Composefs)
+                .unwrap()
+                .implemented
+        );
     }
 
     #[test]

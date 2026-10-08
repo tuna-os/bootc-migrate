@@ -362,6 +362,44 @@ the sole default with timeout 0.
 | `--skip-preflight`    | Bypass preflight checks (don't, unless you know exactly why)       |
 | `--force`             | Proceed past non-fatal warnings                                    |
 | `--accept-cross-base` | Migrate to a target from another OS family with the cross-family `/etc` policy (see below). `--force` does not imply it |
+| `--accept-hardware-gaps` | Migrate although the hardware check (see below) expects hardware that works today to stop working. `--force` does not imply it |
+
+### Hardware and firmware check
+
+The target image replaces your kernel, its modules and your firmware. Before
+the tool changes anything, it compares your hardware with the target. The
+`bootc-rebase scan <image>` command shows the same report.
+
+The tool examines the PCI, USB, SDIO, virtio and HID devices. It examines
+only the devices that use a loadable kernel module now. It does these checks:
+
+- **Drivers.** The target must ship the same module, or a module that
+  claims the device.
+- **Out-of-tree drivers.** These are drivers like NVIDIA, VirtualBox and
+  ZFS. The target can omit one of them. Then the report names the in-kernel
+  driver that replaces it (for NVIDIA, `nouveau`) and what you lose.
+- **Firmware.** For each module, the tool lists the firmware files that
+  your machine has. The target must ship at least one of them.
+- **CPU microcode.** Your machine can have microcode updates for its CPU.
+  Then the target must also have them.
+
+Each result has a level:
+
+- `[BLOCKING]`: the tool refuses to migrate. A storage, display, network,
+  wireless or USB controller loses its driver or all of its firmware. Or an
+  out-of-tree driver has no in-kernel replacement. To continue anyway, use
+  `--accept-hardware-gaps`. A better fix is an image variant that supports
+  the hardware, for example an `-nvidia` image.
+- `[WARNING]`: something can stop, but the migration continues. A display
+  controller without its driver is a warning when the target kernel has a
+  firmware framebuffer driver (`simpledrm`, `efifb`). The screen then works,
+  but without graphics acceleration and at the firmware resolution.
+- `[note]`: information only.
+
+When the tool cannot read the target image, it tells you and continues. In
+this case, it did not check your hardware. Some image layers can be
+unreadable. Then no result blocks the migration, because the missing data
+can hide what the image ships.
 
 ### Cross-family targets
 
@@ -507,6 +545,7 @@ What's intentionally *not* carried forward:
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
 | Phase 5 refuses because the target kernel has no module alias for a wireless device | The image omits the driver for Wi-Fi hardware present on the source system | Fix or update the target image. Use `--force` only when alternate networking is available and losing Wi-Fi is acceptable |
+| Refused with "hardware that works on this machine today is expected to stop working" | The target image does not ship a driver or firmware that your storage, display, network or wireless hardware uses, or an out-of-tree driver such as NVIDIA | Read the `[BLOCKING]` lines. Pick an image variant that supports the hardware, or re-run with `--accept-hardware-gaps` to accept the loss |
 | Refused with "Cross-family re-base detected" | The target's `ID_LIKE` shares nothing with the host's and its package manager differs | Re-run with `--accept-cross-base` to use the cross-family `/etc` policy, or pick a target from the same family |
 | The new image boots, but `/etc` still looks like the old distribution | A cross-family migration ran with a build that predates #256 | Update the tool, boot the OSTree entry, and migrate again with `--accept-cross-base` |
 | Phase 2 fails with "podman could not refresh" on your own image | The machine cannot pull the image, or podman rejects a plain-HTTP registry | Mark the registry insecure and confirm with a manual `podman pull` — see [docs/local-images.md](docs/local-images.md) |
@@ -609,13 +648,21 @@ cargo build --release -p bootc-rebase
 | `rebase --de-migrate` | Detects the desktop environment the target image ships (registry-streamed session files, session binaries, and display-manager default session — no `podman pull`) and the one this host runs. When they differ, stashes every human account's outgoing DE config before staging and re-exposes any stash a previous re-base in the other direction left behind, running the `pre-switch.d`/`post-switch.d` hooks around each. | Done, unit-tested; **off by default** — a re-base never touches per-user desktop state unless asked to. The non-gating Bluefin→Aurora E2E cell passes `--de-migrate`, seeds GNOME config, and asserts that the cross-DE plan and stash are created. Because target desktop detection uses the registry scan, this evidence depends on that exploratory cell completing successfully ([#68](https://github.com/tuna-os/bootc-migrate/issues/68), [#188](https://github.com/tuna-os/bootc-migrate/issues/188)) |
 | `migrate-bootloader --to systemd-boot` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Not implemented** — the subcommand exists and always refuses; only the pure BLS-entry/kernel-arg/entry-token logic it will use has landed. Live ESP populate + NVRAM cutover + the kernel-install resync hook (without which a flipped system would silently boot stale kernels) are deliberately deferred pending explicit sign-off and a dedicated E2E cell — see [#65](https://github.com/tuna-os/bootc-migrate/issues/65) for the full implementation plan |
 
-`rebase`'s routing table (`crates/bootc-rebase/src/routing.rs` is the single
+`rebase`'s routing table (`crates/bootc-migrate-core/src/rebase_plan.rs` is the single
 source of truth the CLI consults before touching anything):
 
 | From ↓ \ To → | ostree | composefs |
 |---|---|---|
 | **ostree** | `OstreeDeploy` (native `bootc switch`) | `CoreMigration` (this repo's proven phase 0–5 pipeline) |
 | **composefs** | `OstreeInstall` (the target's own `bootc install to-existing-root`, alongside; composefs entry kept as rollback — #260, exploratory) | `ImageSwap` |
+| **package** | `PackageInstall` (planned, #370) | Two steps: package → ostree, then ostree → composefs |
+
+A **package** source is a system that is not a bootc deployment: a regular
+Fedora, Ubuntu or Arch installation. `rebase` finds one by its rpm, dpkg or
+pacman database when `bootc status` names no deployment and the root has no
+ostree or composefs state. On such a system, `--target-backend auto` (the
+default) selects ostree. Today, `--plan` shows the route and the migration
+stops before it changes the system. Issue #370 tracks the work.
 
 ## Roadmap
 

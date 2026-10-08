@@ -12,6 +12,7 @@ use bootc_migrate_core::preflight;
 use bootc_migrate_core::rebase_controller::{
     CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig,
 };
+use bootc_migrate_core::source_host;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -197,12 +198,14 @@ struct Args {
     #[arg(short, long, default_value = "")]
     target_image: String,
 
-    /// Source backend: "auto" (detect), "ostree", or "composefs"
+    /// Source backend: "auto" (detect), "ostree", "composefs", or "package"
     #[arg(long, default_value = "auto")]
     source_backend: String,
 
-    /// Target backend: "ostree" or "composefs"
-    #[arg(long, default_value = "composefs")]
+    /// Target backend: "auto", "ostree" or "composefs". "auto" is composefs
+    /// from a bootc deployment and ostree from a package-managed host, whose
+    /// only route is to ostree (#370).
+    #[arg(long, default_value = "auto")]
     target_backend: String,
 
     /// Bootloader to use: "systemd-boot" (default, when UEFI), "grub2", or "auto"
@@ -244,6 +247,16 @@ struct Args {
     #[arg(long)]
     accept_cross_base: bool,
 
+    /// Proceed although the hardware compatibility check found hardware that
+    /// works on this machine today and is expected to stop working on the
+    /// target: a storage, display, network, wireless or USB controller with
+    /// no driver in the target kernel, an out-of-tree driver (NVIDIA,
+    /// VirtualBox, ZFS) with no in-kernel fallback, or a display/network
+    /// driver whose firmware the target does not ship. Without this, those
+    /// findings refuse the re-base. Not implied by --force.
+    #[arg(long)]
+    accept_hardware_gaps: bool,
+
     /// When the target image ships a different desktop environment than this
     /// host, move each human account's outgoing DE config into a stash and
     /// re-expose any stash left by a previous re-base in the other direction
@@ -274,22 +287,47 @@ fn parse_backend(s: &str) -> Result<Backend> {
     match s {
         "ostree" => Ok(Backend::Ostree),
         "composefs" => Ok(Backend::Composefs),
-        other => bail!("unknown backend '{other}' (expected 'ostree' or 'composefs')"),
+        "package" => Ok(Backend::Package),
+        other => bail!("unknown backend '{other}' (expected 'ostree', 'composefs' or 'package')"),
+    }
+}
+
+/// The target backend `--target-backend auto` selects for a source.
+fn default_target_backend(from: Backend) -> Backend {
+    match from {
+        Backend::Package => Backend::Ostree,
+        Backend::Ostree | Backend::Composefs => Backend::Composefs,
     }
 }
 
 fn detect_source_backend() -> Result<Backend> {
-    let sys = preflight::SystemInfo::gather()?;
     // Read from `bootc status`'s own `booted.composefs` key rather than
     // inferring composefs from "not ostree", which also matched a system that
     // is not a bootc deployment at all and re-based it as though it were.
-    sys.booted_backend.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Not booted into a bootc deployment (`bootc status` reports neither an \
-             ostree nor a composefs deployment). Pass --source-backend explicitly \
-             if you know better."
-        )
-    })
+    // `bootc` is often not installed on a package host, so a failed gather is
+    // not an error by itself.
+    if let Some(backend) = preflight::SystemInfo::gather()
+        .ok()
+        .and_then(|sys| sys.booted_backend)
+    {
+        return Ok(backend);
+    }
+    // Not a booted bootc deployment. Only a root with a package database and
+    // no deployment state is a package host (#371); anything else is refused.
+    match source_host::detect_host_kind(std::path::Path::new("/")) {
+        source_host::HostKind::Package(db) => {
+            println!("Source: package-managed host ({db} database), not a bootc deployment");
+            Ok(Backend::Package)
+        }
+        source_host::HostKind::Unknown => bail!(
+            "Not booted into a bootc deployment, and no rpm, dpkg or pacman database \
+             was found. Pass --source-backend explicitly if you know better."
+        ),
+        kind => bail!(
+            "This root has {kind:?} deployment state, but `bootc status` reports no \
+             booted deployment. Pass --source-backend explicitly if you know better."
+        ),
+    }
 }
 
 fn check_root_privilege() -> Result<()> {
@@ -322,9 +360,19 @@ fn execute_rebase(args: &Args) -> Result<()> {
     } else {
         parse_backend(&args.source_backend)?
     };
-    let to = parse_backend(&args.target_backend)?;
+    let to = match args.target_backend.as_str() {
+        "auto" => default_target_backend(from),
+        other => parse_backend(other)?,
+    };
 
     let Some(r) = route(from, to) else {
+        if from == Backend::Package && to == Backend::Composefs {
+            bail!(
+                "no direct route from package to composefs: migrate to ostree first \
+                 (--target-backend ostree), then run again from the new deployment \
+                 to convert to composefs"
+            );
+        }
         bail!("no route from {from} to {to}");
     };
     let phase_plan = plan(from, to).expect("every route has a phase plan");
@@ -359,9 +407,10 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 
     if !r.implemented {
+        let issue = if from == Backend::Package { 370 } else { 30 };
         bail!(
             "the {from} -> {to} route is not implemented yet; \
-             see https://github.com/tuna-os/bootc-migrate/issues/30"
+             see https://github.com/tuna-os/bootc-migrate/issues/{issue}"
         );
     }
 
@@ -378,11 +427,23 @@ fn execute_rebase(args: &Args) -> Result<()> {
         );
     }
 
+    // Every route replaces the kernel, its modules and the firmware with the
+    // target's, so every route is checked, after the plan is printed and
+    // before anything changes.
+    bootc_migrate_core::hardware::check_and_gate(
+        &args.target_image,
+        args.accept_hardware_gaps,
+        args.dry_run,
+    )?;
+
     match r.strategy {
         Strategy::CoreMigration => run_core_migration(args),
         Strategy::OstreeDeploy => run_ostree_deploy(args),
         Strategy::ImageSwap => run_image_swap(args),
         Strategy::OstreeInstall => run_ostree_install(args),
+        Strategy::PackageInstall => {
+            bail!("the package -> ostree route is not implemented yet (#373)")
+        }
     }
 }
 
@@ -470,6 +531,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accept_hardware_gaps_flag_parses_and_is_off_by_default() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--accept-hardware-gaps",
+        ]);
+        assert!(cli.rebase_args.accept_hardware_gaps);
+        let cli = Cli::parse_from(["bootc-rebase", "-t", "ghcr.io/projectbluefin/dakota:stable"]);
+        assert!(!cli.rebase_args.accept_hardware_gaps);
+        // --force does not imply it.
+        let cli = Cli::parse_from(["bootc-rebase", "-t", "img", "--force"]);
+        assert!(!cli.rebase_args.accept_hardware_gaps);
+    }
+
+    #[test]
     fn accept_cross_base_flag_parses() {
         let cli = Cli::parse_from([
             "bootc-rebase",
@@ -514,8 +591,23 @@ mod tests {
     fn parse_backend_accepts_known_and_rejects_unknown() {
         assert!(matches!(parse_backend("ostree"), Ok(Backend::Ostree)));
         assert!(matches!(parse_backend("composefs"), Ok(Backend::Composefs)));
+        assert!(matches!(parse_backend("package"), Ok(Backend::Package)));
         assert!(parse_backend("btrfs").is_err());
+        assert!(parse_backend("auto").is_err());
         assert!(parse_backend("").is_err());
+    }
+
+    #[test]
+    fn auto_target_backend_keeps_composefs_and_sends_package_hosts_to_ostree() {
+        assert_eq!(default_target_backend(Backend::Ostree), Backend::Composefs);
+        assert_eq!(
+            default_target_backend(Backend::Composefs),
+            Backend::Composefs
+        );
+        assert_eq!(default_target_backend(Backend::Package), Backend::Ostree);
+        let from = Backend::Package;
+        let p = plan(from, default_target_backend(from)).unwrap();
+        assert_eq!(p.route.strategy, Strategy::PackageInstall);
     }
 
     #[test]
