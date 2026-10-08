@@ -1549,7 +1549,7 @@ PREDIAG
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the ostree re-base reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the ostree re-base reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         exit 1
     fi
@@ -1780,7 +1780,7 @@ REVSSH
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the composefs -> ostree re-base reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the composefs -> ostree re-base reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
@@ -2033,7 +2033,7 @@ SWAPSSH
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the image-swap reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the image-swap reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
@@ -2516,7 +2516,7 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
 done
 
 if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-    echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the migration reboot (attempt $ATTEMPT/$MAX_ATTEMPTS)."
+    echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the migration reboot (after $MAX_ATTEMPTS attempts)."
     step "=== Post-reboot failure diagnostics ==="
     echo "--- All FAILED/DEPEND lines ---"
     serial_failure_lines | tail -80 || true
