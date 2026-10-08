@@ -1,6 +1,7 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-10-07. Living document; the issue tracker is authoritative
+Status date: 2026-10-07 for the release-gate section; other sections carry
+their own dates where they were refreshed. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
 
 Caveat on that split, recorded because it has already misled readers: five
@@ -106,8 +107,9 @@ instead of a manual tag.
   actually happen. This clause needs rewriting to match the automated
   contract, not just a name filled in.
 
-No release owner and no target date are recorded anywhere, which is the one
-gate clause that blocks all the others. Tracked as #236.
+With releases automatic on every Cargo version bump (#241), the clauses that
+still block the gate are validation and the safety boundary above. #236
+tracks that remaining work.
 
 ## Unvalidated paths (single list for release notes)
 
@@ -122,12 +124,12 @@ validation named in that issue's own scope never shipped.
 
 | Path | State | Validation gap | Tracking |
 |---|---|---|---|
-| `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
+| `migrate-bootloader` live GRUB2→sd-boot | `bootc-migrate migrate-bootloader` copies the kernels to the ESP, writes the BLS entries and registers NVRAM (#122); `bootc-rebase migrate-bootloader run` still refuses "not implemented". No trial boot, promote/undo or kernel-install resync hook (draft #115) | no cell installs a GRUB2 guest and flips it | #65, #189 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
 | Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
-| composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | one non-gating cell (dakota composefs-native → fedora-bootc 44) asserts the route, the fixtures and the preserved rollback entry; never executed on a real host before that cell | #260 |
+| composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | one non-gating cell (dakota composefs-native → fedora-bootc 44) asserts the route, the fixtures, the preserved rollback entry and the post-reboot health check; green on `main` since #322 (2026-10-02) | #260 |
 | composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) asserts the route, the fixtures, the booted identity and the kept rollback; it depends on a pre-alpha image and has not yet passed end to end | #66 |
 | Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | one non-gating cell (bluefin → bootcrew/opensuse-bootc) asserts the refusal, the staged `/etc` shape and the booted identity; it depends on a community image and has not yet passed end to end | #256 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
