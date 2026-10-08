@@ -56,6 +56,10 @@ enum Commands {
     /// PRETTY_NAME renames, `--apply` writes the result to NVRAM after
     /// taking a restorable snapshot, and `--undo` restores from it.
     BootEntries(BootEntriesArgs),
+    /// Show what migration happened here and what is left to do: the
+    /// staged route and target, the first-boot verify verdict, and whether
+    /// `commit` is available.
+    Status,
     /// Stash or restore a user's DE config around a cross-DE re-base (issue
     /// #68), for one explicitly-named DE and one explicitly-named home. The
     /// `rebase` flow does this automatically for every human account when
@@ -386,7 +390,21 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    // Persistent log, same mechanism as bootc-migrate: all output is tee'd
+    // here so a lost terminal (or a reboot question afterwards) loses nothing.
+    // The guard drains on plain returns via Drop; the error path below drops
+    // it explicitly before exiting, since process::exit skips destructors.
+    let tee_guard = bootc_migrate_core::tee_log::install("/var/log/bootc-rebase.log", "re-base");
+    if let Err(e) = run() {
+        // anyhow's own main-termination rendering, kept verbatim.
+        eprintln!("Error: {e:?}");
+        drop(tee_guard);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -401,6 +419,13 @@ fn main() -> Result<()> {
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::BootEntries(ref args)) => boot_entries::run_boot_entries(args),
         Some(Commands::DeMigrate(ref args)) => de_migrate_command::run(args),
+        Some(Commands::Status) => {
+            print!(
+                "{}",
+                bootc_migrate_core::status::render(&bootc_migrate_core::status::gather())
+            );
+            Ok(())
+        }
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {
                 bail!("--target-image (-t) is required for re-base.");

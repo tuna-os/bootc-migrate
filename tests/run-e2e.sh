@@ -148,6 +148,21 @@ assert_system_healthy() {
     fi
 }
 
+# assert_l2_present <label> <binary> <route>: post-reboot L2 assertions —
+# `status` runs and names the route, and the desktop cleanup prompt was
+# staged into what is now the live /etc.
+assert_l2_present() {
+    step "=== $1: L2 status + cleanup prompt ==="
+    STATUS_OUT=$(ssh $SSH_OPTS root@localhost "$2 status" 2>&1) || {
+        echo "FAIL: $2 status exited nonzero"; echo "$STATUS_OUT" | sed 's/^/  /'; exit 1; }
+    echo "$STATUS_OUT" | sed 's/^/  /'
+    echo "$STATUS_OUT" | grep -qF "$3" || { echo "FAIL: status does not name route '$3'"; exit 1; }
+    echo "$STATUS_OUT" | grep -q "First-boot verify:" || { echo "FAIL: status has no verify line"; exit 1; }
+    ssh $SSH_OPTS root@localhost "test -f /etc/xdg/autostart/bootc-migrate-cleanup.desktop" || {
+        echo "FAIL: the desktop cleanup prompt was not staged"; exit 1; }
+    echo "OK: status names the route and the cleanup prompt is staged."
+}
+
 # capture_health_baseline: just before a migration, record which paths under
 # /etc and /var/home the base itself already has mislabeled, so the
 # post-reboot health check fails only on mislabels the migration introduced
@@ -164,6 +179,40 @@ capture_health_baseline() {
         fi
         echo "health baseline: $(wc -l < /var/lib/e2e-health/label-baseline) path(s) already mislabeled on the base"' \
         2>&1 | sed 's/^/[health-baseline] /' || true
+}
+
+# seed_ownership_fixture: plant a small tree in /var whose owner, group, and
+# mtime the post-reboot health check re-verifies (e2e-health.sh section 7).
+# The migration carries /var to the new deployment file by file; a copy that
+# drops identity (live Dakota -> Utah landed every file root-owned with
+# fresh mtimes and broke the desktop, #308) fails loudly here. Numeric
+# 4242:4242 needs no account, so the fixture is independent of passwd
+# carrying; expect.tsv is generated from the planted tree, so the assertion
+# is "the migration changed nothing".
+seed_ownership_fixture() {
+    step "=== Seeding /var ownership fixture ==="
+    ssh $SSH_OPTS root@localhost bash <<'OWNFIX'
+set -e
+rm -rf /var/lib/e2e-ownership
+mkdir -p /var/lib/e2e-ownership/tree/subdir
+cd /var/lib/e2e-ownership/tree
+echo "owned-by-4242" > owned-by-4242.txt
+echo "root-file" > root-file.txt
+echo "nested" > subdir/nested.txt
+ln -s owned-by-4242.txt link-to-owned
+chown 4242:4242 owned-by-4242.txt subdir/nested.txt subdir
+chmod 640 owned-by-4242.txt
+chmod 750 subdir
+touch -h -d '@1600000000' owned-by-4242.txt root-file.txt subdir subdir/nested.txt link-to-owned
+{
+    for f in owned-by-4242.txt root-file.txt subdir subdir/nested.txt; do
+        if [ -d "$f" ]; then kind=d; else kind=f; fi
+        printf '%s\t%s\t%s\t%s\n' "$f" "$(stat -c '%u:%g' "$f")" "$(stat -c '%Y' "$f")" "$kind"
+    done
+    printf '%s\t%s\t%s\t%s\t%s\n' link-to-owned "" "" l "$(readlink link-to-owned)"
+} > /var/lib/e2e-ownership/expect.tsv
+cat /var/lib/e2e-ownership/expect.tsv
+OWNFIX
 }
 
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
@@ -1676,6 +1725,7 @@ REVFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> ostree via OstreeInstall (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
 
+    seed_ownership_fixture
     capture_health_baseline
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
@@ -1830,6 +1880,8 @@ ESPCHECK
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
+    assert_l2_present "composefs-to-ostree" "/var/tmp/bootc-rebase" "composefs -> ostree via OstreeInstall"
+
     # Diagnostic details for the composefs -> ostree deployment (/var mounts,
     # accounts, and vendor /usr/etc file presence).
     step "=== composefs-to-ostree: /var mount diagnostics ==="
@@ -1902,6 +1954,7 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    seed_ownership_fixture
     capture_health_baseline
     step "=== image-swap: running bootc-rebase --target-backend composefs ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
@@ -2073,6 +2126,8 @@ SWAPSSH
     ssh $SSH_OPTS root@localhost "getent passwd dbus; ls -Z /etc/passwd /etc/ld.so.cache 2>/dev/null" || true
     echo "OK: image-swap first-boot unit ran."
 
+    assert_l2_present "image-swap" "/var/tmp/bootc-rebase" "composefs -> composefs via ImageSwap"
+
     # The base deployment must remain as rollback: bootc reports it, or at
     # least its deployment directory is still on disk.
     ROLLBACK_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.rollback.image.image.image // empty')
@@ -2215,6 +2270,7 @@ echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' 
 CROSSFIX
 fi
 
+seed_ownership_fixture
 capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
@@ -2541,6 +2597,7 @@ fi
 echo "OK: Booted backend is ComposeFS."
 
 assert_system_healthy "post-migration"
+assert_l2_present "post-migration" "/var/tmp/bootc-migrate" "ostree -> composefs via CoreMigration"
 
 # #256: the whole point — the migrated system is the target's family.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then
