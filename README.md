@@ -664,6 +664,20 @@ ostree or composefs state. On such a system, `--target-backend auto` (the
 default) selects ostree. Today, `--plan` shows the route and the migration
 stops before it changes the system. Issue #370 tracks the work.
 
+`--dry-run` on a package host also prints a readiness report and the
+hardware report. The report refuses these systems and gives the reason for
+each refusal:
+
+- legacy BIOS boot (UEFI only for now);
+- a root filesystem other than btrfs, xfs or ext4;
+- a root, `/home` or `/boot` on LUKS or LVM;
+- a btrfs root that is not a subvolume;
+- too little free space for the image and the new deployment;
+- a read-only root, or an active package manager.
+
+SELinux disabled on the host gives a warning, because the first boot then
+relabels all carried files.
+
 ## Roadmap
 
 Full milestone plan, current status per issue, and design decisions live in

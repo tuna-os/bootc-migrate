@@ -43,6 +43,7 @@ pub mod migration;
 pub mod motd;
 pub mod ostree;
 pub mod ostree_install;
+pub mod package_host;
 pub mod preflight;
 pub mod rebase_controller;
 pub mod rebase_plan;
