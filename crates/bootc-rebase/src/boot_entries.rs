@@ -17,10 +17,10 @@ use crate::boot_entry_review;
 
 /// The only answer accepted at the destructive-apply prompt. A full word,
 /// not `y`, so a stray keypress cannot authorize an NVRAM mutation.
-const APPLY_CONFIRMATION: &str = "yes";
+pub(crate) const APPLY_CONFIRMATION: &str = "yes";
 
 /// Whether what the user typed at the apply prompt authorizes the change.
-fn confirmation_accepted(input: &str) -> bool {
+pub(crate) fn confirmation_accepted(input: &str) -> bool {
     input.trim().eq_ignore_ascii_case(APPLY_CONFIRMATION)
 }
 
