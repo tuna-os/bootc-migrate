@@ -173,6 +173,9 @@ pub struct ProbeFiles {
     pub bootc_install_config: Option<String>,
     /// The package-manager family found under `usr/bin` (#256).
     pub pkg_family: Option<PkgFamily>,
+    /// The target kernel's driver and firmware inventory, for the hardware
+    /// compatibility check ([`crate::hardware`]).
+    pub kernel: Option<crate::hardware::TargetKernel>,
 }
 
 /// What the target image supports, assembled from [`ProbeFiles`].
@@ -214,6 +217,12 @@ pub struct Capabilities {
     /// The filesystem `bootc install` expects for the root, parsed from
     /// `/usr/lib/bootc/install/*.toml`'s `root-fs` key, when present.
     pub filesystem_expectation: Option<String>,
+    /// The target kernel version, when the image ships kernel modules.
+    pub kernel_version: Option<String>,
+    /// The target kernel's driver and firmware inventory. Not serialized:
+    /// it is thousands of entries; [`crate::hardware`] reports on it.
+    #[serde(skip)]
+    pub kernel: Option<crate::hardware::TargetKernel>,
 }
 
 impl Capabilities {
@@ -410,6 +419,8 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
             .bootc_install_config
             .as_deref()
             .and_then(parse_bootc_install_filesystem),
+        kernel_version: probe.kernel.as_ref().map(|k| k.kver.clone()),
+        kernel: probe.kernel.clone(),
     }
 }
 
@@ -576,9 +587,25 @@ pub fn fetch_probe_files(image_ref: &str) -> anyhow::Result<ProbeFiles> {
 }
 
 /// Scan a target image via registry streaming and return its [`Capabilities`].
+///
+/// One run asks for the same image's capabilities several times (the
+/// composefs gate, the cross-base gate, the hardware check), and each scan
+/// streams every layer of the image. Successful scans are cached for the
+/// life of the process; failures are not, so a retry really retries.
 pub fn scan_target_image(image_ref: &str) -> anyhow::Result<Capabilities> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Capabilities>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(caps) = cache.lock().ok().and_then(|c| c.get(image_ref).cloned()) {
+        return Ok(caps);
+    }
     let probe = fetch_probe_files(image_ref)?;
-    Ok(assemble(&probe))
+    let caps = assemble(&probe);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(image_ref.to_string(), caps.clone());
+    }
+    Ok(caps)
 }
 
 #[cfg(test)]

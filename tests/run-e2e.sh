@@ -2307,6 +2307,19 @@ HB_PID=""
 MIGRATE_RC=$(cat /tmp/e2e-migrate.rc 2>/dev/null | cut -d= -f2)
 rm -f /tmp/e2e-migrate.rc
 step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=${MIGRATE_RC:-?})"
+# The hardware compatibility check runs before any change on every
+# migration. A finished migration without --accept-hardware-gaps means it
+# ran and found nothing BLOCKING on this VM; its report must be in the
+# output (the TUI run logs screens, not the migrator's own lines).
+if [ "$E2E_MODE" != "tui-migrate" ] && [ "${MIGRATE_RC:-1}" = "0" ]; then
+    if ! grep -q '^=== Hardware compatibility ===' /tmp/e2e-migrate.log; then
+        echo "FAIL: the migration finished without printing its hardware compatibility report."
+        exit 1
+    fi
+    echo "OK: hardware compatibility report:"
+    sed -n '/^=== Hardware compatibility ===/,/^\(OK:\|=== [^H]\)/p' /tmp/e2e-migrate.log \
+        | head -30 | sed 's/^/  [hardware] /'
+fi
 # Pull the TUI walkthrough artifacts out of the guest: the asciicast
 # recordings of both interactive flows (render a timelapse with
 # `asciinema play` or `agg … .gif` — CI does the latter) and the

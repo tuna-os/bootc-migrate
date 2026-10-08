@@ -244,6 +244,16 @@ struct Args {
     #[arg(long)]
     accept_cross_base: bool,
 
+    /// Proceed although the hardware compatibility check found hardware that
+    /// works on this machine today and is expected to stop working on the
+    /// target: a storage, display, network, wireless or USB controller with
+    /// no driver in the target kernel, an out-of-tree driver (NVIDIA,
+    /// VirtualBox, ZFS) with no in-kernel fallback, or a display/network
+    /// driver whose firmware the target does not ship. Without this, those
+    /// findings refuse the re-base. Not implied by --force.
+    #[arg(long)]
+    accept_hardware_gaps: bool,
+
     /// When the target image ships a different desktop environment than this
     /// host, move each human account's outgoing DE config into a stash and
     /// re-expose any stash left by a previous re-base in the other direction
@@ -378,6 +388,15 @@ fn execute_rebase(args: &Args) -> Result<()> {
         );
     }
 
+    // Every route replaces the kernel, its modules and the firmware with the
+    // target's, so every route is checked, after the plan is printed and
+    // before anything changes.
+    bootc_migrate_core::hardware::check_and_gate(
+        &args.target_image,
+        args.accept_hardware_gaps,
+        args.dry_run,
+    )?;
+
     match r.strategy {
         Strategy::CoreMigration => run_core_migration(args),
         Strategy::OstreeDeploy => run_ostree_deploy(args),
@@ -468,6 +487,22 @@ fn run_ostree_deploy(args: &Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_hardware_gaps_flag_parses_and_is_off_by_default() {
+        let cli = Cli::parse_from([
+            "bootc-rebase",
+            "-t",
+            "ghcr.io/projectbluefin/dakota:stable",
+            "--accept-hardware-gaps",
+        ]);
+        assert!(cli.rebase_args.accept_hardware_gaps);
+        let cli = Cli::parse_from(["bootc-rebase", "-t", "ghcr.io/projectbluefin/dakota:stable"]);
+        assert!(!cli.rebase_args.accept_hardware_gaps);
+        // --force does not imply it.
+        let cli = Cli::parse_from(["bootc-rebase", "-t", "img", "--force"]);
+        assert!(!cli.rebase_args.accept_hardware_gaps);
+    }
 
     #[test]
     fn accept_cross_base_flag_parses() {

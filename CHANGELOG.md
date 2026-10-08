@@ -26,6 +26,17 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Hardware and firmware check before every migration, on every route of
+  `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
+  compares the devices that work today, the out-of-tree drivers in use
+  (NVIDIA, VirtualBox, ZFS), their firmware and the CPU microcode with the
+  target image's kernel and `/usr/lib/firmware`. It refuses when a storage,
+  display, network, wireless or USB controller would lose its driver or
+  firmware, unless you add `--accept-hardware-gaps`. The registry scan
+  collects the target data in its single pass over the layers. Within a run,
+  the tool caches the scan, so it no longer downloads the image once for each
+  check.
+
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start

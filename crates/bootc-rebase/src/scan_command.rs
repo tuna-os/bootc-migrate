@@ -8,16 +8,34 @@
 
 use anyhow::Result;
 
+use bootc_migrate_core::hardware as hw;
+
 use crate::ScanArgs;
 
 /// Scan the target image and render the result as JSON or a table.
 pub fn run(args: &ScanArgs) -> Result<()> {
     println!("Scanning target image {}...", args.image);
     let caps = bootc_migrate_core::scan::scan_target_image(&args.image)?;
+    // The hardware check compares *this* machine with the image, so it is
+    // only meaningful where the scan runs on the machine to be migrated.
+    let hardware = caps
+        .kernel
+        .as_ref()
+        .map(|k| hw::assess(&hw::read_host_hardware(), k));
     if args.json {
-        println!("{}", caps.to_json());
+        let mut value = serde_json::to_value(&caps)?;
+        value["hardware"] = serde_json::to_value(&hardware)?;
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_capabilities_table(&args.image, &caps);
+        println!();
+        match &hardware {
+            Some(report) => print!("{}", hw::render(report, &args.image)),
+            None => print!(
+                "{}",
+                hw::render_unknown(&args.image, "the target image ships no kernel modules")
+            ),
+        }
     }
     Ok(())
 }
@@ -94,6 +112,12 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
     println!(
         "Filesystem expected:   {}",
         caps.filesystem_expectation.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "Kernel:                {}",
+        caps.kernel_version
+            .as_deref()
+            .unwrap_or("no kernel modules found")
     );
     let issues = bootc_migrate_core::scan::compatibility_issues(caps);
     println!(
