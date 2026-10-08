@@ -648,13 +648,21 @@ cargo build --release -p bootc-rebase
 | `rebase --de-migrate` | Detects the desktop environment the target image ships (registry-streamed session files, session binaries, and display-manager default session — no `podman pull`) and the one this host runs. When they differ, stashes every human account's outgoing DE config before staging and re-exposes any stash a previous re-base in the other direction left behind, running the `pre-switch.d`/`post-switch.d` hooks around each. | Done, unit-tested; **off by default** — a re-base never touches per-user desktop state unless asked to. The non-gating Bluefin→Aurora E2E cell passes `--de-migrate`, seeds GNOME config, and asserts that the cross-DE plan and stash are created. Because target desktop detection uses the registry scan, this evidence depends on that exploratory cell completing successfully ([#68](https://github.com/tuna-os/bootc-migrate/issues/68), [#188](https://github.com/tuna-os/bootc-migrate/issues/188)) |
 | `migrate-bootloader --to systemd-boot` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Not implemented** — the subcommand exists and always refuses; only the pure BLS-entry/kernel-arg/entry-token logic it will use has landed. Live ESP populate + NVRAM cutover + the kernel-install resync hook (without which a flipped system would silently boot stale kernels) are deliberately deferred pending explicit sign-off and a dedicated E2E cell — see [#65](https://github.com/tuna-os/bootc-migrate/issues/65) for the full implementation plan |
 
-`rebase`'s routing table (`crates/bootc-rebase/src/routing.rs` is the single
+`rebase`'s routing table (`crates/bootc-migrate-core/src/rebase_plan.rs` is the single
 source of truth the CLI consults before touching anything):
 
 | From ↓ \ To → | ostree | composefs |
 |---|---|---|
 | **ostree** | `OstreeDeploy` (native `bootc switch`) | `CoreMigration` (this repo's proven phase 0–5 pipeline) |
 | **composefs** | `OstreeInstall` (the target's own `bootc install to-existing-root`, alongside; composefs entry kept as rollback — #260, exploratory) | `ImageSwap` |
+| **package** | `PackageInstall` (planned, #370) | Two steps: package → ostree, then ostree → composefs |
+
+A **package** source is a system that is not a bootc deployment: a regular
+Fedora, Ubuntu or Arch installation. `rebase` finds one by its rpm, dpkg or
+pacman database when `bootc status` names no deployment and the root has no
+ostree or composefs state. On such a system, `--target-backend auto` (the
+default) selects ostree. Today, `--plan` shows the route and the migration
+stops before it changes the system. Issue #370 tracks the work.
 
 ## Roadmap
 
