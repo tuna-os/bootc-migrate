@@ -11,6 +11,8 @@
 //! - [`de_controller`] — read-only policy for planning cross-desktop config migration
 //! - [`de_migrate`] — cross-DE config stash/restore, portable-subset extraction, hook contract
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
+//! - [`firstboot_repair`] — first-boot auto-repair (L3) of known migration breakage:
+//!   identity manifest, ownership/mtime, machine-id, flatpak, SELinux labels
 //! - [`etc_conflict`] — cross-base /etc conflict policy applied to a deployment
 //!   already staged by `bootc switch` (target defaults win, `.rebase-old` sidecars)
 //! - [`rebase_plan`] — the backend-pair routing table: which re-bases are
@@ -37,6 +39,7 @@ pub mod de_controller;
 pub mod de_detect;
 pub mod de_migrate;
 pub mod etc_conflict;
+pub mod firstboot_repair;
 pub mod mergetc;
 pub mod migration;
 pub mod motd;

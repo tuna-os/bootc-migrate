@@ -469,6 +469,15 @@ After running `bootc-migrate commit`, the OSTree fallback is removed
 from the ESP and rollback becomes a fresh install. The E2E test exercises the
 full round-trip (composefs → OSTree → composefs) on every run.
 
+### First-boot repair
+
+The migration stages a unit that runs one time on the first boot. It fixes
+these known problems: carried home files with the wrong owner or time, a
+duplicated machine-id, broken Flatpak installations, and SELinux labels.
+Other findings stay as they are; the repair log reports them. To stop the
+repair, run `sudo bootc-migrate repair --disable` before the reboot. See
+[docs/first-boot-repair.md](docs/first-boot-repair.md).
+
 ### What's preserved
 
 Validated end-to-end (21+ assertions per run; see `tests/run-e2e.sh`):

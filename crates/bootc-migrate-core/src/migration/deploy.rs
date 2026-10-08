@@ -134,6 +134,17 @@ pub fn phase4_stage_deploy(
         .context("cross-family post-merge steps failed")?;
     }
 
+    // First-boot repair (L3, #309): record the live /var/home identity
+    // next to the /var the new deployment mounts, and arm the unit.
+    let staged_var = match var_staging {
+        VarStaging::Copied | VarStaging::PreviouslyCopied => {
+            std::path::Path::new(deploy_layout::STATEROOT_VAR)
+        }
+        VarStaging::InPlace => std::path::Path::new("/var"),
+    };
+    // The /etc merge keeps the machine-id here on purpose: not breakage.
+    crate::firstboot_repair::stage_repair(&layout.etc_dir, staged_var, false)?;
+
     layout.install_runtime_composefs_mount();
 
     Ok(layout.deploy_dir)
