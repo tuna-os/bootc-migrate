@@ -722,6 +722,9 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
+<<<<<<< HEAD
+        schedule_image_swap_firstboot(self.target_image)?;
+=======
         let deploy = staged_composefs_deployment()?;
         match ostree_install::relabel_composefs_deployment(self.target_image, &deploy) {
             Ok(Some(n)) => println!("[selinux] labelled {n} staged tree(s) before reboot"),
@@ -735,7 +738,8 @@ impl ImageSwapConfig<'_> {
             Err(e) => return Err(e).context("failed to label the staged image-swap deployment"),
         }
 
-        schedule_image_swap_firstboot(self.target_image)?;
+        schedule_image_swap_firstboot()?;
+>>>>>>> c377c8c (fix: relabel image swaps before first boot)
 
         finalize_staged_now()?;
 
