@@ -24,23 +24,27 @@ SHA="$(git rev-parse "$REF")"
 
 echo "Checking CI status for $SHA on $REPO..."
 
+# Query each workflow by its file, not the repository's run list: that list
+# returns 30 runs by default, and the daily "Image catalog" schedule alone
+# adds a run per day on an unchanged head, so after a few weeks CI and E2E
+# would fall off the first page and read as "missing" on a green commit.
 check_workflow() {
-  local workflow="$1"
+  local name="$1" file="$2"
   local conclusion
-  conclusion="$(gh api "repos/$REPO/actions/runs?head_sha=$SHA" \
-    --jq "[.workflow_runs[] | select(.name==\"$workflow\")] | sort_by(.created_at) | last | .conclusion // \"missing\"")"
+  conclusion="$(gh api "repos/$REPO/actions/workflows/$file/runs?head_sha=$SHA&per_page=100" \
+    --jq '.workflow_runs | sort_by(.created_at) | last | (.conclusion // .status // "missing")')"
 
   if [ "$conclusion" = "success" ]; then
-    echo "  $workflow: success"
+    echo "  $name: success"
   else
-    echo "  $workflow: $conclusion" >&2
+    echo "  $name: $conclusion" >&2
     return 1
   fi
 }
 
 status=0
-check_workflow "CI" || status=1
-check_workflow "E2E Migration Tests" || status=1
+check_workflow "CI" ci.yml || status=1
+check_workflow "E2E Migration Tests" e2e-tests.yml || status=1
 
 if [ "$status" -ne 0 ]; then
   echo
@@ -50,4 +54,4 @@ if [ "$status" -ne 0 ]; then
 fi
 
 echo
-echo "OK: CI and E2E Tests both green on $SHA."
+echo "OK: CI and E2E Migration Tests both green on $SHA."
