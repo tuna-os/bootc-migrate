@@ -32,8 +32,7 @@ ok() { echo "OK: $*"; }
 
 # Units that fail in the CI VM for reasons unrelated to any migration.
 # Each entry needs a reason.
-# geoclue.service: times out in headless/isolated CI VM without geolocation sources
-DEFAULT_ALLOWED_FAILED_UNITS="geoclue.service"
+DEFAULT_ALLOWED_FAILED_UNITS=""
 
 # ---- 1. Boot completed ------------------------------------------------------
 state=$(timeout 300 systemctl is-system-running --wait 2>/dev/null)
