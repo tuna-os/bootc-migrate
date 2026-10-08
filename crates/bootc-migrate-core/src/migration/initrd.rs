@@ -157,6 +157,72 @@ fn prepare_stateroot_var_include(var: &var_layout::VarMount) -> Result<tempfile:
     Ok(tmp)
 }
 
+/// Build a scratch tree (for `dracut --include`) carrying emergency diagnostic
+/// hooks that dump initrd journal and status to the serial console on failure.
+///
+/// When an initrd unit fails (e.g. sysroot.mount or bootc-root-setup), systemd
+/// transitions to emergency.target / rescue.target and dracut invokes emergency
+/// hooks. Without this hook, the system drops into an interactive emergency
+/// shell that waits silently on stdin until the harness SSH wait times out.
+/// This hook dumps `systemctl status sysroot.mount`, failed units, and `journalctl -b`
+/// to `/dev/console` so the exact failure reason appears in serial logs.
+fn prepare_emergency_diagnostic_include() -> Result<tempfile::TempDir> {
+    let tmp = tempfile::Builder::new()
+        .prefix("bootc-emergency-")
+        .tempdir_in("/var/tmp")
+        .context("failed to create scratch dir for emergency diagnostic include")?;
+    let unit_dir = tmp.path().join("etc/systemd/system");
+    fs::create_dir_all(&unit_dir)?;
+    let dump_service = "[Unit]\n\
+         Description=Emergency Console Diagnostic Dump\n\
+         DefaultDependencies=no\n\
+         Before=emergency.service rescue.service dracut-emergency.service\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart=-/bin/sh -c 'echo \"=== EMERGENCY CONSOLE DIAGNOSTIC DUMP ===\" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\n\
+         StandardOutput=journal+console\n\
+         StandardError=journal+console\n\
+         \n\
+         [Install]\n\
+         WantedBy=emergency.target rescue.target\n";
+    fs::write(unit_dir.join("emergency-dump.service"), dump_service)?;
+
+    let em_wants = unit_dir.join("emergency.target.wants");
+    fs::create_dir_all(&em_wants)?;
+    std::os::unix::fs::symlink(
+        "../emergency-dump.service",
+        em_wants.join("emergency-dump.service"),
+    )
+    .context("failed to link emergency-dump.service to emergency.target.wants")?;
+
+    let rescue_wants = unit_dir.join("rescue.target.wants");
+    fs::create_dir_all(&rescue_wants)?;
+    std::os::unix::fs::symlink(
+        "../emergency-dump.service",
+        rescue_wants.join("emergency-dump.service"),
+    )
+    .context("failed to link emergency-dump.service to rescue.target.wants")?;
+
+    // Also install dracut emergency hook script for dracut-native emergency mode
+    let dracut_hook_dir = tmp.path().join("usr/lib/dracut/hooks/emergency");
+    fs::create_dir_all(&dracut_hook_dir)?;
+    let hook_script = "#!/bin/sh\n\
+echo \"=== DRACUT EMERGENCY HOOK DIAGNOSTIC DUMP ===\" > /dev/console\n\
+systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true\n\
+systemctl --failed --no-pager > /dev/console 2>&1 || true\n\
+journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true\n";
+    let hook_file = dracut_hook_dir.join("99-emergency-dump.sh");
+    fs::write(&hook_file, hook_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&hook_file, fs::Permissions::from_mode(0o755));
+    }
+
+    Ok(tmp)
+}
+
 pub(crate) fn rebuild_initrd_with_lvm_if_needed(
     kver: &str,
     mount_path: &Path,
@@ -254,6 +320,14 @@ pub(crate) fn rebuild_initrd_with_lvm_if_needed(
         Some(ref var) => Some(prepare_stateroot_var_include(var)?),
         None => None,
     };
+    // Test diagnostics only: the E2E harness sets CI (the same gate as the
+    // debug kernel arguments in kernel_options.rs). A user's initrd gets no
+    // extra units.
+    let emergency_include = if std::env::var_os("CI").is_some() {
+        prepare_emergency_diagnostic_include().ok()
+    } else {
+        None
+    };
 
     let mut bound = false;
     let run_rebuild = |bound: &mut bool| -> Result<std::process::ExitStatus> {
@@ -315,6 +389,9 @@ pub(crate) fn rebuild_initrd_with_lvm_if_needed(
             // Ensure xfs/ext4 are present even when there's no composefs loopback
             // (the dedicated /var may be the only reason we rebuild).
             cmd.arg("--add-drivers").arg("xfs ext4");
+            cmd.arg("--include").arg(inc.path()).arg("/");
+        }
+        if let Some(ref inc) = emergency_include {
             cmd.arg("--include").arg(inc.path()).arg("/");
         }
         cmd.status().context("failed to run dracut --rebuild")
@@ -408,5 +485,33 @@ mod tests {
         let dropin_body = std::fs::read_to_string(&dropin).unwrap();
         assert!(dropin_body.contains("Requires=sysroot-composefs.mount"));
         assert!(dropin_body.contains("After=sysroot-composefs.mount"));
+    }
+
+    #[test]
+    fn initrd_emergency_diagnostic_include_renders_correctly() {
+        let tmp = prepare_emergency_diagnostic_include().unwrap();
+
+        let unit = tmp.path().join("etc/systemd/system/emergency-dump.service");
+        let body = std::fs::read_to_string(&unit).unwrap();
+        assert!(body.contains("Description=Emergency Console Diagnostic Dump"));
+        assert!(body.contains("systemctl status sysroot.mount"));
+        assert!(body.contains("journalctl -b"));
+
+        let link_em = tmp
+            .path()
+            .join("etc/systemd/system/emergency.target.wants/emergency-dump.service");
+        assert!(link_em.is_symlink());
+
+        let link_rescue = tmp
+            .path()
+            .join("etc/systemd/system/rescue.target.wants/emergency-dump.service");
+        assert!(link_rescue.is_symlink());
+
+        let hook = tmp
+            .path()
+            .join("usr/lib/dracut/hooks/emergency/99-emergency-dump.sh");
+        let hook_body = std::fs::read_to_string(&hook).unwrap();
+        assert!(hook_body.contains("DRACUT EMERGENCY HOOK DIAGNOSTIC DUMP"));
+        assert!(hook_body.contains("systemctl status sysroot.mount"));
     }
 }
