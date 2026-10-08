@@ -752,13 +752,15 @@ sudo tee "$ETC_SYSTEMD/emergency-dump.service" >/dev/null <<'DUMPEOF'
 Description=E2E Emergency Diagnostic Dump
 DefaultDependencies=no
 Before=emergency.service rescue.service dracut-emergency.service
-WantedBy=emergency.target rescue.target
 
 [Service]
 Type=oneshot
 ExecStart=-/bin/sh -c 'echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'
 StandardOutput=journal+console
 StandardError=journal+console
+
+[Install]
+WantedBy=emergency.target rescue.target
 DUMPEOF
 sudo ln -sf ../emergency-dump.service "$ETC_SYSTEMD/emergency.target.wants/emergency-dump.service"
 sudo ln -sf ../emergency-dump.service "$ETC_SYSTEMD/rescue.target.wants/emergency-dump.service"
@@ -1751,7 +1753,7 @@ printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'Li
 printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
-printf '%s\n' '[Unit]' 'Description=E2E Emergency Diagnostic Dump' 'DefaultDependencies=no' 'Before=emergency.service rescue.service dracut-emergency.service' 'WantedBy=emergency.target rescue.target' '' '[Service]' 'Type=oneshot' 'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' 'StandardOutput=journal+console' 'StandardError=journal+console' \
+printf '%s\n' '[Unit]' 'Description=E2E Emergency Diagnostic Dump' 'DefaultDependencies=no' 'Before=emergency.service rescue.service dracut-emergency.service' '' '[Service]' 'Type=oneshot' 'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' 'StandardOutput=journal+console' 'StandardError=journal+console' '' '[Install]' 'WantedBy=emergency.target rescue.target' \
     > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
@@ -1997,7 +1999,7 @@ printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'Li
 printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
-printf '%s\n' '[Unit]' 'Description=E2E Emergency Diagnostic Dump' 'DefaultDependencies=no' 'Before=emergency.service rescue.service dracut-emergency.service' 'WantedBy=emergency.target rescue.target' '' '[Service]' 'Type=oneshot' 'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' 'StandardOutput=journal+console' 'StandardError=journal+console' \
+printf '%s\n' '[Unit]' 'Description=E2E Emergency Diagnostic Dump' 'DefaultDependencies=no' 'Before=emergency.service rescue.service dracut-emergency.service' '' '[Service]' 'Type=oneshot' 'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' 'StandardOutput=journal+console' 'StandardError=journal+console' '' '[Install]' 'WantedBy=emergency.target rescue.target' \
     > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
@@ -2446,13 +2448,15 @@ printf '%s\n' \
     'Description=E2E Emergency Diagnostic Dump' \
     'DefaultDependencies=no' \
     'Before=emergency.service rescue.service dracut-emergency.service' \
-    'WantedBy=emergency.target rescue.target' \
     '' \
     '[Service]' \
     'Type=oneshot' \
     'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' \
     'StandardOutput=journal+console' \
     'StandardError=journal+console' \
+    '' \
+    '[Install]' \
+    'WantedBy=emergency.target rescue.target' \
     > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
