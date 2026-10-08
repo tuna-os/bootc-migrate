@@ -390,7 +390,10 @@ Each result has a level:
   out-of-tree driver has no in-kernel replacement. To continue anyway, use
   `--accept-hardware-gaps`. A better fix is an image variant that supports
   the hardware, for example an `-nvidia` image.
-- `[WARNING]`: something can stop, but the migration continues.
+- `[WARNING]`: something can stop, but the migration continues. A display
+  controller without its driver is a warning when the target kernel has a
+  firmware framebuffer driver (`simpledrm`, `efifb`). The screen then works,
+  but without graphics acceleration and at the firmware resolution.
 - `[note]`: information only.
 
 When the tool cannot read the target image, it tells you and continues. In

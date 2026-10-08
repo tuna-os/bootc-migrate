@@ -501,6 +501,25 @@ fn pci_kind(class: u32) -> (&'static str, bool) {
     }
 }
 
+/// Generic drivers for the framebuffer the firmware (UEFI GOP, VESA) set up
+/// before the kernel started. With one of these, a display controller whose
+/// own driver is missing still shows a picture: unaccelerated, at the
+/// firmware's resolution, on one output.
+const FIRMWARE_FB_DRIVERS: &[&str] = &["simpledrm", "efifb", "simplefb", "vesafb", "ofdrm"];
+
+fn is_display(class: Option<u32>) -> bool {
+    class.is_some_and(|c| c >> 16 == 0x03)
+}
+
+/// The firmware-framebuffer drivers the target kernel has, if any.
+fn firmware_fb_drivers(target: &TargetKernel) -> Vec<String> {
+    FIRMWARE_FB_DRIVERS
+        .iter()
+        .filter(|d| target.has_module(d))
+        .map(|d| d.to_string())
+        .collect()
+}
+
 /// Compare `host` with the target kernel inventory.
 pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
     let mut report = HardwareReport {
@@ -508,9 +527,12 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
         ..Default::default()
     };
 
+    let fb = firmware_fb_drivers(target);
     // Devices sharing a module and an outcome are reported once, naming
-    // each. Key: (module, fallback modules; empty = no driver at all).
-    let mut lost: BTreeMap<(String, Vec<String>), (Severity, Vec<String>)> = BTreeMap::new();
+    // each. Key: (module, fallback modules (empty = no driver at all),
+    // whether the fallback is only the firmware framebuffer).
+    type LostKey = (String, Vec<String>, bool);
+    let mut lost: BTreeMap<LostKey, (Severity, Vec<String>)> = BTreeMap::new();
     for dev in &host.devices {
         let Some(module) = &dev.module else {
             continue;
@@ -521,12 +543,20 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
         }
         let (kind, severe) = dev.pci_class.map_or(("device", false), pci_kind);
         let out_of_tree = host.modules.get(module).is_some_and(|m| m.out_of_tree);
-        let fallback = dev
+        let mut fallback = dev
             .modalias
             .as_deref()
             .map(|ma| target.alias_drivers(ma))
             .unwrap_or_default();
+        // A display controller with no driver of its own in the target still
+        // shows the firmware framebuffer (QEMU's `bochs` on a kernel that
+        // has only `simpledrm`): degraded, not lost.
+        let fb_only = fallback.is_empty() && is_display(dev.pci_class) && !fb.is_empty();
+        if fb_only {
+            fallback = fb.clone();
+        }
         let severity = match (fallback.is_empty(), severe || out_of_tree, out_of_tree) {
+            _ if fb_only => Severity::Warning,
             // Nothing in the target can drive it.
             (true, true, _) => Severity::Blocking,
             (true, false, _) => Severity::Warning,
@@ -536,14 +566,14 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
             (false, _, false) => Severity::Note,
         };
         let entry = lost
-            .entry((module.clone(), fallback))
+            .entry((module.clone(), fallback, fb_only))
             .or_insert((Severity::Note, Vec::new()));
         entry.0 = entry.0.max(severity);
         entry
             .1
             .push(format!("{} {} ({kind})", dev.bus.to_uppercase(), dev.id));
     }
-    for ((module, fallback), (severity, devices)) in lost {
+    for ((module, fallback, fb_only), (severity, devices)) in lost {
         let out_of_tree = host.modules.get(&module).is_some_and(|m| m.out_of_tree);
         let what = if out_of_tree {
             format!("the out-of-tree driver `{module}`")
@@ -551,6 +581,14 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
             format!("the driver `{module}`")
         };
         let detail = match (fallback.is_empty(), out_of_tree) {
+            _ if fb_only => format!(
+                "uses {what}, and no driver in the target kernel ({}) supports this display \
+                 controller. After the reboot the screen uses the firmware framebuffer \
+                 (`{}`): no graphics acceleration, the resolution the firmware set, and \
+                 one output only.",
+                target.kver,
+                fallback.join("`/`")
+            ),
             (true, true) => format!(
                 "uses {what}, which the target image does not ship, and no driver in the \
                  target kernel ({}) supports this hardware. Out-of-tree drivers (NVIDIA, \
@@ -600,9 +638,12 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
         if absent.is_empty() {
             continue;
         }
+        // A display controller that fails to start for lack of firmware
+        // still shows the firmware framebuffer, as above.
         let severe_device = host.devices.iter().any(|d| {
             d.module.as_deref() == Some(module.as_str())
                 && d.pci_class.is_some_and(|c| pci_kind(c).1)
+                && (fb.is_empty() || !is_display(d.pci_class))
         });
         let total = info.firmware_present.len();
         let sample: Vec<&str> = absent.iter().take(4).map(|s| s.as_str()).collect();
@@ -950,6 +991,74 @@ mod tests {
             module: Some(module.into()),
             pci_class: Some(class),
         }
+    }
+
+    /// The CI VM regression on #369: QEMU's `bochs` display on a target
+    /// kernel with only `simpledrm` (Dakota) refused the migration.
+    #[test]
+    fn display_without_driver_falls_back_to_firmware_framebuffer() {
+        let qemu_vga = || {
+            pci(
+                "0000:00:01.0",
+                "bochs",
+                0x030000,
+                "pci:v00001234d00001111sv00001AF4sd00001100bc03sc00i00",
+            )
+        };
+        let host = HostHardware {
+            devices: vec![qemu_vga()],
+            modules: [("bochs".to_string(), HostModule::default())].into(),
+            ..Default::default()
+        };
+        // Without a framebuffer driver in the target, nothing shows a picture.
+        assert!(assess(&host, &target()).has_blocking());
+
+        let mut with_fb = target();
+        with_fb.builtin.insert("simpledrm".into());
+        let r = assess(&host, &with_fb);
+        assert!(!r.has_blocking(), "{r:?}");
+        assert_eq!(r.findings.len(), 1, "{r:?}");
+        assert_eq!(r.findings[0].severity, Severity::Warning);
+        assert!(
+            r.findings[0]
+                .detail
+                .contains("firmware framebuffer (`simpledrm`)")
+        );
+
+        // A display driver whose firmware is all missing also falls back.
+        let host = HostHardware {
+            devices: vec![pci(
+                "0000:00:02.0",
+                "i915",
+                0x030000,
+                "pci:v00008086d00009A49",
+            )],
+            modules: [(
+                "i915".to_string(),
+                HostModule {
+                    out_of_tree: false,
+                    firmware_present: vec!["i915/adlp_dmc.bin".into()],
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        assert!(assess(&host, &target()).has_blocking());
+        let r = assess(&host, &with_fb);
+        assert!(!r.has_blocking(), "{r:?}");
+
+        // A non-display device gets no framebuffer fallback.
+        let host = HostHardware {
+            devices: vec![pci(
+                "0000:03:00.0",
+                "rtw89_8852be",
+                0x028000,
+                "pci:v000010ECd0000B852",
+            )],
+            modules: [("rtw89_8852be".to_string(), HostModule::default())].into(),
+            ..Default::default()
+        };
+        assert!(assess(&host, &with_fb).has_blocking());
     }
 
     #[test]
