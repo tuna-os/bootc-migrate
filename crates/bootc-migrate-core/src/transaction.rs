@@ -31,9 +31,10 @@ use std::path::{Component, Path, PathBuf};
 /// Boot-layout facts [`discover_commit_plan`] gathers before [`commit`]
 /// mutates anything.
 ///
-/// This is discovery only — no filesystem writes, no deletions, no mount
-/// calls beyond the read-only auto-mount [`migration::find_esp_or_mount`]
-/// already performs when the ESP isn't where `/etc/fstab` expects it. Naming
+/// This is discovery only — no deletions and no boot-entry writes. The one
+/// side effect is the ESP auto-mount [`migration::find_esp_or_mount`]
+/// already performs when the ESP isn't where `/etc/fstab` expects it: it
+/// creates a mount point and mounts the ESP read-write. Naming
 /// these facts here (rather than leaving them as local variables threaded
 /// through `commit`'s body) is the first step toward the plan/executor split
 /// this module's docs describe as still missing: a caller or test can now
@@ -53,14 +54,6 @@ pub struct CommitPlan {
     pub composefs_entries: Vec<String>,
 }
 
-/// Detect the bootloader layout and composefs BLS entries `commit` needs,
-/// without mutating anything.
-///
-/// Mirrors the precedence `commit` has always used: default `/boot` entries
-/// first, then each ESP candidate (`/boot/efi`, `/efi`), then — only if
-/// nothing was found yet — an auto-mount attempt via
-/// [`migration::find_esp_or_mount`] for the case where the ESP is mounted at
-/// a non-standard path and the boot-time fstab doesn't know about it.
 /// Detect the bootloader layout and composefs BLS entries `commit` needs,
 /// without mutating anything.
 ///
