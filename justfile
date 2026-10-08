@@ -119,7 +119,7 @@ e2e-dakota-utah: build test
       DISK_SIZE="40G" \
       FILESYSTEM="btrfs" \
       E2E_MODE="composefs-to-ostree" \
-      E2E_EXPECT_OS_ID="utah" \
+      E2E_EXPECT_OS_ID="hummingbird" \
       E2E_EXPECT_DM="gdm" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-dakota-utah.log
 

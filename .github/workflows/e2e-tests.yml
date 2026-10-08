@@ -212,7 +212,9 @@ jobs:
             target: ghcr.io/projectbluefin/utah:testing
             mode: composefs-to-ostree
             disk_size: 40G
-            expect_os_id: utah
+            # utah:testing reports ID=hummingbird since the 2026-10-01 image
+            # (run 36964331436), as the image-swap cell below records.
+            expect_os_id: hummingbird
             expect_dm: gdm
             allow_failure: true
           # composefs -> composefs image swap across distributions: Dakota
