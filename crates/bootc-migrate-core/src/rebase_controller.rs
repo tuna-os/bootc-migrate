@@ -722,24 +722,7 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
-<<<<<<< HEAD
         schedule_image_swap_firstboot(self.target_image)?;
-=======
-        let deploy = staged_composefs_deployment()?;
-        match ostree_install::relabel_composefs_deployment(self.target_image, &deploy) {
-            Ok(Some(n)) => println!("[selinux] labelled {n} staged tree(s) before reboot"),
-            Ok(None) => println!(
-                "[selinux] target does not enable SELinux; no pre-boot relabel needed"
-            ),
-            Err(e) if self.force => eprintln!(
-                "Warning: pre-boot target-policy relabel failed ({e:#}); --force given, "
-                    "the deployment may not boot enforcing."
-            ),
-            Err(e) => return Err(e).context("failed to label the staged image-swap deployment"),
-        }
-
-        schedule_image_swap_firstboot()?;
->>>>>>> c377c8c (fix: relabel image swaps before first boot)
 
         finalize_staged_now()?;
 
