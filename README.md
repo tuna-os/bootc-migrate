@@ -362,6 +362,41 @@ the sole default with timeout 0.
 | `--skip-preflight`    | Bypass preflight checks (don't, unless you know exactly why)       |
 | `--force`             | Proceed past non-fatal warnings                                    |
 | `--accept-cross-base` | Migrate to a target from another OS family with the cross-family `/etc` policy (see below). `--force` does not imply it |
+| `--accept-hardware-gaps` | Migrate although the hardware check (see below) expects hardware that works today to stop working. `--force` does not imply it |
+
+### Hardware and firmware check
+
+The target image replaces your kernel, its modules and your firmware. Before
+the tool changes anything, it compares your hardware with the target. The
+`bootc-rebase scan <image>` command shows the same report.
+
+The tool examines the PCI, USB, SDIO, virtio and HID devices. It examines
+only the devices that use a loadable kernel module now. It does these checks:
+
+- **Drivers.** The target must ship the same module, or a module that
+  claims the device.
+- **Out-of-tree drivers.** These are drivers like NVIDIA, VirtualBox and
+  ZFS. The target can omit one of them. Then the report names the in-kernel
+  driver that replaces it (for NVIDIA, `nouveau`) and what you lose.
+- **Firmware.** For each module, the tool lists the firmware files that
+  your machine has. The target must ship at least one of them.
+- **CPU microcode.** Your machine can have microcode updates for its CPU.
+  Then the target must also have them.
+
+Each result has a level:
+
+- `[BLOCKING]`: the tool refuses to migrate. A storage, display, network,
+  wireless or USB controller loses its driver or all of its firmware. Or an
+  out-of-tree driver has no in-kernel replacement. To continue anyway, use
+  `--accept-hardware-gaps`. A better fix is an image variant that supports
+  the hardware, for example an `-nvidia` image.
+- `[WARNING]`: something can stop, but the migration continues.
+- `[note]`: information only.
+
+When the tool cannot read the target image, it tells you and continues. In
+this case, it did not check your hardware. Some image layers can be
+unreadable. Then no result blocks the migration, because the missing data
+can hide what the image ships.
 
 ### Cross-family targets
 
@@ -507,6 +542,7 @@ What's intentionally *not* carried forward:
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
 | GNOME boots but session settings (wallpaper, accent) look wrong | dconf database needs recompile | `dconf update` as your user, or log out + back in |
 | Phase 5 refuses because the target kernel has no module alias for a wireless device | The image omits the driver for Wi-Fi hardware present on the source system | Fix or update the target image. Use `--force` only when alternate networking is available and losing Wi-Fi is acceptable |
+| Refused with "hardware that works on this machine today is expected to stop working" | The target image does not ship a driver or firmware that your storage, display, network or wireless hardware uses, or an out-of-tree driver such as NVIDIA | Read the `[BLOCKING]` lines. Pick an image variant that supports the hardware, or re-run with `--accept-hardware-gaps` to accept the loss |
 | Refused with "Cross-family re-base detected" | The target's `ID_LIKE` shares nothing with the host's and its package manager differs | Re-run with `--accept-cross-base` to use the cross-family `/etc` policy, or pick a target from the same family |
 | The new image boots, but `/etc` still looks like the old distribution | A cross-family migration ran with a build that predates #256 | Update the tool, boot the OSTree entry, and migrate again with `--accept-cross-base` |
 | Phase 2 fails with "podman could not refresh" on your own image | The machine cannot pull the image, or podman rejects a plain-HTTP registry | Mark the registry insecure and confirm with a manual `podman pull` — see [docs/local-images.md](docs/local-images.md) |

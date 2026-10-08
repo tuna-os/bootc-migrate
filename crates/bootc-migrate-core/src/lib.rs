@@ -37,6 +37,7 @@ pub mod de_controller;
 pub mod de_detect;
 pub mod de_migrate;
 pub mod etc_conflict;
+pub mod hardware;
 pub mod mergetc;
 pub mod migration;
 pub mod motd;
