@@ -2,6 +2,10 @@
 //!
 use super::*;
 
+/// The standalone bootloader migration moved to `standalone_bootloader`
+/// (#210). Re-exported here so the `migration::boot::` path keeps working.
+pub use super::standalone_bootloader::migrate_bootloader_standalone;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WirelessDevice {
     interface: String,
