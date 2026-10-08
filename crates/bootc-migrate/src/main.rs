@@ -425,14 +425,16 @@ fn main() {
     }
     println!("Checking system state...");
 
-    let report = match preflight::run_preflight_checks() {
-        Ok(r) => r,
+    // `measured` is false when preflight failed and --skip-preflight stood in
+    // a permissive placeholder: nothing below it was read from this host.
+    let (report, measured) = match preflight::run_preflight_checks() {
+        Ok(r) => (r, true),
         Err(e) => {
             eprintln!("Preflight failure: {}", e);
             if !args.skip_preflight {
                 exit_flushed!(1);
             }
-            preflight::PreflightReport {
+            let placeholder = preflight::PreflightReport {
                 booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
                 booted_image: None,
                 pending_transaction: preflight::PendingTransactionStatus::Clean,
@@ -457,19 +459,29 @@ fn main() {
                 grub_tools_available: true,
                 esp_detected: false,
                 sysroot_was_ro: false,
-            }
+            };
+            (placeholder, false)
         }
     };
 
     preflight::readiness::print_report(&report);
     // Best-effort JSON snapshot alongside the human-readable report
     // (bootc-migrate#229) — never blocks the migration on a write failure.
-    preflight::write_snapshot(
-        "bootc-migrate",
-        version,
-        &std::env::args().collect::<Vec<_>>(),
-        &report,
-    );
+    // A placeholder report is not written: the snapshot is diagnostic
+    // evidence, and invented values (btrfs, UEFI, a writable NVRAM) would
+    // mislead whoever reads it after a failed migration.
+    if measured {
+        preflight::write_snapshot(
+            "bootc-migrate",
+            version,
+            &std::env::args().collect::<Vec<_>>(),
+            &report,
+        );
+    } else {
+        eprintln!(
+            "Note: preflight failed and --skip-preflight is set; no preflight snapshot is written."
+        );
+    }
     preflight::readiness::print_readiness(&report);
 
     match preflight::readiness::gate(&report, args.force, args.skip_preflight) {
