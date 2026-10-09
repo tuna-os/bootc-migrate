@@ -84,7 +84,11 @@ jobs:
             # Display manager tests/e2e-health.sh requires after the reboot.
             expect_dm: gdm
             filesystem: xfs+crypt
-            disk_size: 40G
+            # 40G stopped being enough when dakota:stable grew (10-08): the
+            # phase-5 initrd rebuild hit ENOSPC under /var/tmp in 2 of 3 runs.
+            # The image sits in the composefs loopback and in podman storage
+            # (the overlay-mount fallback), both on this root.
+            disk_size: 60G
           - name: bluefin LTS -> dakota (LVM-on-LUKS, separate /var + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
