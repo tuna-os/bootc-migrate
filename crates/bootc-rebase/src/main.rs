@@ -406,11 +406,14 @@ fn execute_rebase(args: &Args) -> Result<()> {
         return Ok(());
     }
 
+    if from == Backend::Package {
+        return run_package_install_preflight(args);
+    }
+
     if !r.implemented {
-        let issue = if from == Backend::Package { 370 } else { 30 };
         bail!(
             "the {from} -> {to} route is not implemented yet; \
-             see https://github.com/tuna-os/bootc-migrate/issues/{issue}"
+             see https://github.com/tuna-os/bootc-migrate/issues/30"
         );
     }
 
@@ -441,10 +444,52 @@ fn execute_rebase(args: &Args) -> Result<()> {
         Strategy::OstreeDeploy => run_ostree_deploy(args),
         Strategy::ImageSwap => run_image_swap(args),
         Strategy::OstreeInstall => run_ostree_install(args),
-        Strategy::PackageInstall => {
-            bail!("the package -> ostree route is not implemented yet (#373)")
-        }
+        Strategy::PackageInstall => unreachable!("handled before the dispatch"),
     }
+}
+
+/// package -> ostree (#372): print the package-host readiness report and the
+/// hardware report, then the decision. The install step itself is #373, so a
+/// run that passes every check still stops here before changing anything.
+fn run_package_install_preflight(args: &Args) -> Result<()> {
+    use bootc_migrate_core::package_host::{self, Verdict};
+    let image_size = match bootc_migrate_core::registry::image_compressed_size(&args.target_image) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!(
+                "Warning: could not read the size of {}: {e:#}",
+                args.target_image
+            );
+            None
+        }
+    };
+    let checks = package_host::assess(&package_host::PackageHostFacts::gather(), image_size);
+    print!("{}", package_host::render(&checks));
+    // The hardware gate prints its own decision and, on a real run, refuses
+    // BLOCKING findings itself (unless --accept-hardware-gaps).
+    bootc_migrate_core::hardware::check_and_gate(
+        &args.target_image,
+        args.accept_hardware_gaps,
+        args.dry_run,
+    )?;
+    let decision = package_host::decision(&checks);
+    let verdict = match decision {
+        Verdict::Refused => "refused (see the REFUSED lines above)",
+        Verdict::Warning => "ready, with warnings",
+        Verdict::Ready => "ready",
+    };
+    println!("Package host decision: {verdict}");
+    if decision == Verdict::Refused && !args.dry_run {
+        bail!("this system is not ready for the package -> ostree migration (see above)");
+    }
+    if args.dry_run {
+        println!("Dry run: nothing was changed.");
+        return Ok(());
+    }
+    bail!(
+        "the package -> ostree install step is not implemented yet; see \
+         https://github.com/tuna-os/bootc-migrate/issues/373"
+    )
 }
 
 fn main() -> Result<()> {

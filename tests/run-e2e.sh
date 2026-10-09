@@ -3194,10 +3194,21 @@ step "=== Capturing post-commit vs fresh-Dakota diff ==="
 # File listing from the post-commit VM (key subtrees).
 ssh $SSH_OPTS root@localhost "find /etc /boot/loader/entries /boot/efi/loader/entries /sysroot/composefs/images /sysroot/state -type f -o -type l 2>/dev/null | sort" > /tmp/e2e-post-commit-files.txt 2>/dev/null
 
-# File listing from a fresh Dakota container (reference factory state).
-# Pull if not cached, then list factory /etc + /usr paths (not /var or /home — those are seeded empty).
-podman pull --quiet "$TARGET_IMAGE" 2>/dev/null || true
-podman run --rm "$TARGET_IMAGE" find /etc /usr -type f -o -type l 2>/dev/null | sort > /tmp/e2e-fresh-dakota-files.txt 2>/dev/null
+# File listing from a fresh Dakota container (reference factory state):
+# factory /etc + /usr paths (not /var or /home — those are seeded empty).
+# List the exact image the VM booted, not $TARGET_IMAGE: the tag can move
+# while the run is in flight, and a listing of a newer push reports that
+# push's new /etc files as "dropped by the migration".
+TARGET_DIGEST=$(echo "$BOOTC_JSON" | jq -r '.status.booted.image.imageDigest // empty')
+if [ -z "$TARGET_DIGEST" ]; then
+    echo "FAIL: bootc status reports no booted image digest; cannot pick the reference image"; exit 1
+fi
+TARGET_REPO=${TARGET_IMAGE%@*}
+case "${TARGET_REPO##*/}" in *:*) TARGET_REPO=${TARGET_REPO%:*} ;; esac
+REFERENCE_IMAGE="$TARGET_REPO@$TARGET_DIGEST"
+echo "Reference image (booted digest): $REFERENCE_IMAGE"
+podman pull --quiet "$REFERENCE_IMAGE" 2>/dev/null || true
+podman run --rm "$REFERENCE_IMAGE" find /etc /usr -type f -o -type l 2>/dev/null | sort > /tmp/e2e-fresh-dakota-files.txt 2>/dev/null
 
 # Diff: show paths in post-commit that are NOT in the fresh factory image.
 # These should be user-introduced files only.
@@ -3229,7 +3240,7 @@ LC_ALL=C sort -u -o /tmp/e2e-post-commit-files.txt /tmp/e2e-post-commit-files.tx
 grep '^/etc/' /tmp/e2e-fresh-dakota-files.txt | LC_ALL=C sort -u > /tmp/e2e-vendor-etc.txt || true
 VENDOR_ETC_COUNT=$(wc -l < /tmp/e2e-vendor-etc.txt)
 if [ "$VENDOR_ETC_COUNT" -eq 0 ]; then
-    echo "FAIL: the reference listing of $TARGET_IMAGE has no /etc files; the comparison would pass vacuously"
+    echo "FAIL: the reference listing of $REFERENCE_IMAGE has no /etc files; the comparison would pass vacuously"
     exit 1
 fi
 MISSING_VENDOR=$(LC_ALL=C comm -13 /tmp/e2e-post-commit-files.txt /tmp/e2e-vendor-etc.txt || true)
@@ -3237,7 +3248,7 @@ for allowed in $VENDOR_ETC_ALLOWED_MISSING; do
     MISSING_VENDOR=$(echo "$MISSING_VENDOR" | grep -vxF "$allowed" || true)
 done
 if [ -n "$MISSING_VENDOR" ]; then
-    echo "FAIL: $(echo "$MISSING_VENDOR" | wc -l) file(s) the target image ships in /etc are missing after the migration:"
+    echo "FAIL: $(echo "$MISSING_VENDOR" | wc -l) file(s) $REFERENCE_IMAGE ships in /etc are missing after the migration:"
     echo "$MISSING_VENDOR" | head -40 | sed 's/^/  /'
     exit 1
 fi

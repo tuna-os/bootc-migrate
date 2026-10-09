@@ -473,6 +473,25 @@ fn read_target_kernel(
 }
 
 /// Stream probe files for the target image from the registry without pulling full layers.
+/// The target image's compressed size: the sum of its layer sizes in the
+/// manifest for this machine's architecture. Reads the manifest only.
+pub fn image_compressed_size(image_ref: &str) -> Result<u64> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    layers_total_size(&endpoint.arch_layers_manifest(manifest_json)?)
+}
+
+fn layers_total_size(manifest: &serde_json::Value) -> Result<u64> {
+    let layers = manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+    Ok(layers
+        .iter()
+        .filter_map(|l| l.get("size").and_then(|v| v.as_u64()))
+        .sum())
+}
+
 pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::ProbeFiles> {
     let scratch = tempfile::Builder::new()
         .prefix("bootc-migrate-scan-")
@@ -1362,6 +1381,13 @@ lrwxrwxrwx root/root         0 2026-09-01 00:00 etc/os-release -> ../usr/lib/os-
     fn urlencode_reserved_and_unreserved() {
         assert_eq!(urlencode("repo/pull:read"), "repo%2Fpull%3Aread");
         assert_eq!(urlencode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
+    }
+
+    #[test]
+    fn layers_total_size_sums_layer_sizes() {
+        let m = serde_json::json!({"layers": [{"size": 10}, {"size": 32}, {"digest": "x"}]});
+        assert_eq!(layers_total_size(&m).unwrap(), 42);
+        assert!(layers_total_size(&serde_json::json!({})).is_err());
     }
 
     #[test]

@@ -26,6 +26,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Package host readiness report (#372): `bootc-rebase --dry-run` on a
+  package-managed system checks boot mode, root filesystem, LUKS and LVM,
+  the btrfs subvolume layout, `/boot` and `/home`, free space against the
+  target image's size, running package managers and SELinux. It prints a
+  reason for each refusal, then the hardware report.
 - `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
   database, no ostree or composefs state) as `Backend::Package` and plans
   the `package -> ostree` route (`PackageInstall`, not implemented yet).
