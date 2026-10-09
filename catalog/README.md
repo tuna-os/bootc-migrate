@@ -23,6 +23,6 @@ migration engine still perform their own checks.
 Source references:
 
 - [Project Bluefin images](https://docs.projectbluefin.io/images/)
-- [TunaOS variants and tags](https://github.com/tuna-os/tunaOS#images-and-variants)
+- [TunaOS variants and tags](https://github.com/tuna-os/tunaOS#choose-your-image)
 - [Zirconium repository](https://github.com/zirconium-dev/zirconium)
 - [Bazzite rebase guide](https://docs.bazzite.gg/Installing_and_Managing_Software/Updates_Rollbacks_and_Rebasing/rebase_guide/)

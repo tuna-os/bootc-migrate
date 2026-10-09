@@ -44,6 +44,25 @@ case "$state" in
 esac
 
 # ---- 2. Failed units ---------------------------------------------------------
+# describe_failed_unit <unit>: the evidence `systemctl status` leaves out. A
+# unit that timed out while starting (geoclue, #368) often logs nothing itself:
+# what it waited for shows up in the bus broker's activation messages and in
+# the warnings other units logged while it was starting.
+describe_failed_unit() {
+    local unit=$1 since
+    echo "    --- journal of $unit (this boot)"
+    journalctl -b --no-pager -o short-monotonic -n 40 -u "$unit" 2>&1 | sed 's/^/      /'
+    echo "    --- bus activation messages that name ${unit%.service}"
+    journalctl -b --no-pager -o short-monotonic -u dbus-broker.service -u dbus.service 2>&1 \
+        | grep -iF "${unit%.service}" | tail -15 | sed 's/^/      /'
+    since=$(systemctl show -p InactiveExitTimestamp --value "$unit" 2>/dev/null)
+    if [ -n "$since" ]; then
+        echo "    --- warnings from every unit while $unit was starting (since $since)"
+        journalctl -b --no-pager -o short-monotonic -p warning --since "$since" 2>&1 \
+            | head -40 | sed 's/^/      /'
+    fi
+}
+
 allowed="$DEFAULT_ALLOWED_FAILED_UNITS ${E2E_ALLOWED_FAILED_UNITS:-}"
 failed_units=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}')
 unexpected=0
@@ -62,6 +81,7 @@ for unit in $failed_units; do
         unexpected=1
         bad "unit failed: $unit"
         systemctl status --no-pager --lines 15 "$unit" 2>&1 | sed 's/^/    /'
+        describe_failed_unit "$unit"
     fi
 done
 [ "$unexpected" = 0 ] && ok "no unexpected failed units"

@@ -31,7 +31,7 @@ pub fn print_report(report: &PreflightReport) {
         match report.booted_backend {
             Some(Backend::Ostree) => "ostree",
             Some(Backend::Composefs) => "composefs (already converted)",
-            None => "none — not a bootc deployment",
+            Some(Backend::Package) | None => "none — not a bootc deployment",
         }
     );
     match report.pending_transaction {
