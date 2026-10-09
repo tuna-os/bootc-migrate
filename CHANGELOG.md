@@ -108,6 +108,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The migration stops when it cannot rebuild the composefs initrd for an XFS
+  root. The stock target initrd has no xfs driver, so the old warning let the
+  migration make an entry the default that then failed `sysroot.mount` and
+  dropped to the emergency shell. dracut ran out of space under `/var/tmp`
+  in the LUKS E2E cell after `dakota:stable` grew. The error now stops Phase
+  5 before it writes the boot entry or `loader.conf`, so the system still
+  boots its current deployment. A rebuild that only adds LVM/DM/crypt is
+  still a warning, because the stock initrd assembles those roots.
+
 - `bootc-rebase`'s cross-base gate now says when it has checked a pair and
   found one OS lineage. Before, that pass printed nothing, so it looked
   the same as a gate that had stopped gating. The #80 missing-accounts
