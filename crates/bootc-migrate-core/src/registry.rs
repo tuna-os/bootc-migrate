@@ -200,6 +200,25 @@ pub fn extract_subtree_via_registry(image_ref: &str, subtree: &str, dst_dir: &Pa
 /// should degrade the result, not sink the whole probe. The caller decides
 /// what a missing path means.
 pub fn extract_paths_into_dir(image_ref: &str, paths: &[&str], dst_root: &Path) -> Result<()> {
+    extract_paths_into_dir_with(image_ref, paths, dst_root, &mut |_| Vec::new()).map(|_| ())
+}
+
+/// [`extract_paths_into_dir`] with a per-layer hook. The hook receives each
+/// layer's `tar -tv` listing, oldest layer first, and returns extra paths to
+/// extract from that layer. The registry scan uses it to inventory the
+/// target kernel (its `modules.*` files and firmware names, see
+/// [`crate::hardware`]) during the same pass, without fetching any layer twice.
+///
+/// Returns how many layers were skipped (no digest, or the blob could not be
+/// fetched): an inventory built from a partial pass must not be read as
+/// "the image does not ship X".
+pub fn extract_paths_into_dir_with(
+    image_ref: &str,
+    paths: &[&str],
+    dst_root: &Path,
+    per_layer: &mut dyn FnMut(&str) -> Vec<String>,
+) -> Result<usize> {
+    let mut skipped = 0usize;
     let endpoint = RegistryEndpoint::resolve(image_ref)?;
     let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
     let layers_manifest = endpoint.arch_layers_manifest(manifest_json)?;
@@ -223,33 +242,152 @@ pub fn extract_paths_into_dir(image_ref: &str, paths: &[&str], dst_root: &Path) 
     for layer in layers.iter() {
         let Some(digest) = layer.get("digest").and_then(|v| v.as_str()) else {
             eprintln!("Warning: skipping a layer of {image_ref} with no digest in its manifest");
+            skipped += 1;
             continue;
         };
         if let Err(e) = endpoint.download_blob(digest, &blob_path) {
             eprintln!("Warning: skipping layer {digest} of {image_ref}: {e:#}");
+            skipped += 1;
             continue;
         }
 
+        // ostree-exported layers (fedora-bootc, the base layers of every
+        // rpm-ostree-built image) store each file once under
+        // sysroot/ostree/repo/objects and put its real path in the archive
+        // as a hard link to it. Extracting the path alone then fails ("Cannot
+        // hard link"), so the link targets are extracted alongside, into a
+        // per-layer staging directory that keeps them out of `dst_root`.
+        let listing = layer_listing(&blob_path);
+        let extra = per_layer(&listing);
+        let mut layer_paths: Vec<&str> = paths.to_vec();
+        layer_paths.extend(extra.iter().map(String::as_str));
+        let paths = layer_paths.as_slice();
+        let link_targets = hardlink_targets_from_listing(&listing, paths);
+        let staging = scratch.path().join("staging");
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)?;
+        let mut members: Vec<String> = Vec::new();
         for path in paths {
             // OCI layer tarballs store paths with or without a leading `./`;
-            // try both. tar exits non-zero when the member is absent from
-            // this layer, which is the common case, so its status is
-            // deliberately not checked here.
-            for candidate in [format!("./{path}"), (*path).to_string()] {
-                let _ = Command::new("tar")
-                    .arg("-xaf")
-                    .arg(&blob_path)
-                    .arg("-C")
-                    .arg(dst_root)
-                    .args(["--overwrite", "--no-same-owner"])
-                    .arg(&candidate)
-                    .stderr(std::process::Stdio::null())
-                    .status();
+            // ask for both.
+            members.push(format!("./{path}"));
+            members.push((*path).to_string());
+        }
+        members.extend(link_targets);
+        // tar exits non-zero when a member is absent from this layer, which
+        // is the common case, so its status is deliberately not checked.
+        let _ = Command::new("tar")
+            .arg("-xaf")
+            .arg(&blob_path)
+            .arg("-C")
+            .arg(&staging)
+            .args(["--overwrite", "--no-same-owner"])
+            .args(&members)
+            .stderr(std::process::Stdio::null())
+            .status();
+        for path in paths {
+            let src = staging.join(path);
+            if fs::symlink_metadata(&src).is_err() {
+                continue;
             }
+            let dst = dst_root.join(path);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            // Later layers overwrite earlier ones, whole files and whole
+            // directory contents alike (`-a` keeps links and modes).
+            let _ = Command::new("cp")
+                .args(["-a", "-f", "-T"])
+                .arg(&src)
+                .arg(&dst)
+                .stderr(std::process::Stdio::null())
+                .status();
         }
         let _ = fs::remove_file(&blob_path);
     }
-    Ok(())
+    Ok(skipped)
+}
+
+/// A layer's `tar -tv` listing. Empty when tar cannot list it; the
+/// extraction then proceeds without hard-link targets, as before.
+fn layer_listing(blob: &Path) -> String {
+    match Command::new("tar").arg("-tvf").arg(blob).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
+/// The member name of one `tar -tv` line: the text after the five
+/// `perms owner/group size date time` fields, without the ` -> target`
+/// (symlink) or ` link to target` (hard link) suffix.
+fn listing_line_name(line: &str) -> Option<&str> {
+    let mut rest = line;
+    for _ in 0..5 {
+        rest = rest.trim_start();
+        let end = rest.find(char::is_whitespace)?;
+        rest = &rest[end..];
+    }
+    let mut name = rest.trim_start();
+    if line.starts_with('l') {
+        name = name.rsplit_once(" -> ").map_or(name, |(n, _)| n);
+    } else if line.starts_with('h') {
+        name = name.rsplit_once(" link to ").map_or(name, |(n, _)| n);
+    }
+    let name = name.trim_start_matches("./");
+    (!name.is_empty()).then_some(name)
+}
+
+/// Every member name in a `tar -tv` listing.
+pub(crate) fn listing_names(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(listing_line_name)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The hard-link targets of every archive member under one of `paths`, read
+/// from a `tar -tv` listing, which prints a hard link as
+/// `h... <name> link to <target>`. Empty when the layer has none.
+fn hardlink_targets_from_listing(listing: &str, paths: &[&str]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for line in listing.lines() {
+        if !line.starts_with('h') {
+            continue;
+        }
+        let Some((left, target)) = line.rsplit_once(" link to ") else {
+            continue;
+        };
+        // perms owner/group size date time name: skip five
+        // whitespace-separated fields, the rest is the name.
+        let mut rest = left;
+        let mut ok = true;
+        for _ in 0..5 {
+            rest = rest.trim_start();
+            match rest.find(char::is_whitespace) {
+                Some(end) => rest = &rest[end..],
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let name = rest.trim_start().trim_start_matches("./");
+        let wanted = paths.iter().any(|p| {
+            let p = p.trim_end_matches('/');
+            name == p || name.starts_with(&format!("{p}/"))
+        });
+        if wanted {
+            let target = target.trim().to_string();
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    targets
 }
 
 /// Probe paths [`fetch_probe_files_via_registry`] pulls out of a target image.
@@ -263,19 +401,119 @@ const PROBE_PATHS: &[&str] = &[
     "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
     "usr/bin/bootc",
     "usr/lib/bootc",
+    "usr/bin/bootupctl",
+    "usr/lib/bootupd/updates",
     "usr/lib/dracut/modules.d",
     "usr/lib/bootc/install",
+    // Package-manager frontends, the second lineage signal (#256).
+    "usr/bin/dnf",
+    "usr/bin/dnf5",
+    "usr/bin/dnf-3",
+    "usr/bin/microdnf",
+    "usr/bin/yum",
+    "usr/bin/rpm-ostree",
+    "usr/bin/zypper",
+    "usr/bin/apt",
+    "usr/bin/apt-get",
+    "usr/bin/dpkg",
+    "usr/bin/pacman",
+    "usr/bin/apk",
 ];
 
+/// The kernel inventory files ([`crate::hardware::TargetKernel`]'s sources)
+/// among one layer's member names.
+fn kernel_inventory_paths(names: &[String]) -> Vec<String> {
+    const FILES: &[&str] = &[
+        "modules.dep",
+        "modules.builtin",
+        "modules.alias",
+        "modules.builtin.alias",
+    ];
+    names
+        .iter()
+        .filter(|n| {
+            n.strip_prefix("usr/lib/modules/")
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(kver, file)| !kver.is_empty() && FILES.contains(&file))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Build the target kernel inventory from the extracted `modules.*` files.
+/// The newest kernel with a `modules.dep` wins (images normally ship one).
+/// `None` when the image ships no kernel modules at all.
+fn read_target_kernel(
+    root: &Path,
+    firmware: std::collections::BTreeSet<String>,
+) -> Option<crate::hardware::TargetKernel> {
+    let modules_dir = root.join("usr/lib/modules");
+    let mut kvers: Vec<String> = fs::read_dir(&modules_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().join("modules.dep").is_file())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    kvers.sort();
+    let kver = kvers.pop()?;
+    let dir = modules_dir.join(&kver);
+    let read = |f: &str| fs::read_to_string(dir.join(f)).unwrap_or_default();
+    let mut aliases = crate::hardware::parse_module_aliases(&read("modules.alias"));
+    aliases.extend(crate::hardware::parse_module_aliases(&read(
+        "modules.builtin.alias",
+    )));
+    Some(crate::hardware::TargetKernel {
+        modules: crate::hardware::parse_module_list(&read("modules.dep")),
+        builtin: crate::hardware::parse_module_list(&read("modules.builtin")),
+        aliases,
+        firmware,
+        kver,
+        layers_skipped: 0,
+    })
+}
+
 /// Stream probe files for the target image from the registry without pulling full layers.
+/// The target image's compressed size: the sum of its layer sizes in the
+/// manifest for this machine's architecture. Reads the manifest only.
+pub fn image_compressed_size(image_ref: &str) -> Result<u64> {
+    let endpoint = RegistryEndpoint::resolve(image_ref)?;
+    let manifest_json = endpoint.fetch_manifest(&endpoint.reference)?;
+    layers_total_size(&endpoint.arch_layers_manifest(manifest_json)?)
+}
+
+fn layers_total_size(manifest: &serde_json::Value) -> Result<u64> {
+    let layers = manifest
+        .get("layers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("image manifest has no layers array"))?;
+    Ok(layers
+        .iter()
+        .filter_map(|l| l.get("size").and_then(|v| v.as_u64()))
+        .sum())
+}
+
 pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::ProbeFiles> {
     let scratch = tempfile::Builder::new()
         .prefix("bootc-migrate-scan-")
         .tempdir_in(LAYER_SCRATCH_DIR)
         .context("failed to create /var/tmp scratch dir for registry scan")?;
-    extract_paths_into_dir(image_ref, PROBE_PATHS, scratch.path())?;
+    let mut firmware = std::collections::BTreeSet::new();
+    let skipped =
+        extract_paths_into_dir_with(image_ref, PROBE_PATHS, scratch.path(), &mut |listing| {
+            let names = listing_names(listing);
+            crate::hardware::apply_firmware_listing(&mut firmware, &names);
+            kernel_inventory_paths(&names)
+        })?;
 
-    let mut probe = crate::scan::ProbeFiles::default();
+    let mut probe = crate::scan::ProbeFiles {
+        kernel: read_target_kernel(scratch.path(), firmware).map(|k| {
+            crate::hardware::TargetKernel {
+                layers_skipped: skipped,
+                ..k
+            }
+        }),
+        ..Default::default()
+    };
 
     let os_release_usr = scratch.path().join("usr/lib/os-release");
     let os_release_etc = scratch.path().join("etc/os-release");
@@ -325,6 +563,11 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .exists();
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
+    // bootc's own test (`supports_bootupd`): the binary on PATH and the
+    // updates directory in the deployment.
+    probe.has_bootupd = fs::symlink_metadata(scratch.path().join("usr/bin/bootupctl")).is_ok()
+        && scratch.path().join("usr/lib/bootupd/updates").is_dir();
+    probe.pkg_family = crate::scan::pkg_family_from_root(scratch.path());
 
     let dracut_modules_dir = scratch.path().join("usr/lib/dracut/modules.d");
     if dracut_modules_dir.is_dir()
@@ -830,6 +1073,132 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
+    /// ostree-exported layers: the real path is a hard link to the object.
+    #[test]
+    fn listing_names_strip_fields_and_link_suffixes() {
+        let listing = "\
+-rw-r--r-- root/root    1024 2026-09-01 00:00 ./usr/lib/firmware/iwlwifi-cc-a0-77.ucode.xz
+lrwxrwxrwx root/root       0 2026-09-01 00:00 usr/lib/firmware/nvidia/ad103 -> ad102
+hrw-r--r-- root/root       0 2026-09-01 00:00 usr/lib/modules/6.17.1/modules.dep link to sysroot/ostree/repo/objects/ab/cd.file
+drwxr-xr-x root/root       0 2026-09-01 00:00 usr/lib/firmware/
+-rw-r--r-- root/root      12 2026-09-01 00:00 usr/share/doc/a file with spaces
+garbage
+";
+        assert_eq!(
+            listing_names(listing),
+            vec![
+                "usr/lib/firmware/iwlwifi-cc-a0-77.ucode.xz",
+                "usr/lib/firmware/nvidia/ad103",
+                "usr/lib/modules/6.17.1/modules.dep",
+                "usr/lib/firmware/",
+                "usr/share/doc/a file with spaces",
+            ]
+        );
+    }
+
+    #[test]
+    fn kernel_inventory_paths_pick_only_the_modules_index_files() {
+        let names: Vec<String> = [
+            "usr/lib/modules/6.17.1/modules.dep",
+            "usr/lib/modules/6.17.1/modules.dep.bin",
+            "usr/lib/modules/6.17.1/modules.alias",
+            "usr/lib/modules/6.17.1/modules.builtin.alias",
+            "usr/lib/modules/6.17.1/modules.builtin",
+            "usr/lib/modules/6.17.1/kernel/fs/xfs/xfs.ko.xz",
+            "usr/lib/modules//modules.dep",
+            "usr/lib/firmware/modules.dep",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            kernel_inventory_paths(&names),
+            vec![
+                "usr/lib/modules/6.17.1/modules.dep",
+                "usr/lib/modules/6.17.1/modules.alias",
+                "usr/lib/modules/6.17.1/modules.builtin.alias",
+                "usr/lib/modules/6.17.1/modules.builtin",
+            ]
+        );
+    }
+
+    #[test]
+    fn target_kernel_built_from_extracted_index_files() {
+        let root = tempfile::tempdir().unwrap();
+        // No modules at all: no inventory, which the hardware check reports
+        // as "could not check", never as a pass.
+        assert_eq!(read_target_kernel(root.path(), Default::default()), None);
+
+        let old = root.path().join("usr/lib/modules/6.16.0");
+        let new = root.path().join("usr/lib/modules/6.17.1");
+        let half = root.path().join("usr/lib/modules/6.99.0");
+        for d in [&old, &new, &half] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(old.join("modules.dep"), "kernel/old.ko.xz:\n").unwrap();
+        // A newer directory without modules.dep (leftover) is not a kernel.
+        fs::write(half.join("modules.alias"), "alias x y\n").unwrap();
+        fs::write(
+            new.join("modules.dep"),
+            "kernel/drivers/net/wireless/intel/iwlwifi/iwlwifi.ko.xz: kernel/net/wireless/cfg80211.ko.xz\n",
+        )
+        .unwrap();
+        fs::write(
+            new.join("modules.builtin"),
+            "kernel/drivers/hid/hid-generic.ko\n",
+        )
+        .unwrap();
+        fs::write(
+            new.join("modules.alias"),
+            "alias pci:v00008086d0000A0F0sv*sd*bc*sc*i* iwlwifi\n",
+        )
+        .unwrap();
+        fs::write(
+            new.join("modules.builtin.alias"),
+            "alias hid:b*g0001v*p* hid_generic\n",
+        )
+        .unwrap();
+        let fw: std::collections::BTreeSet<String> = ["iwlwifi-cc-a0-77.ucode".to_string()].into();
+        let k = read_target_kernel(root.path(), fw.clone()).unwrap();
+        assert_eq!(k.kver, "6.17.1");
+        assert!(
+            k.modules.contains("iwlwifi") && k.modules.len() == 1,
+            "{:?}",
+            k.modules
+        );
+        assert!(k.builtin.contains("hid_generic"));
+        assert_eq!(k.aliases.len(), 2);
+        assert_eq!(k.firmware, fw);
+    }
+
+    #[test]
+    fn hardlink_targets_from_tar_listing() {
+        let listing = "\
+-rw-r--r-- root/root       197 2026-09-01 00:00 sysroot/ostree/repo/objects/ab/cdef.file
+hrw-r--r-- root/root         0 2026-09-01 00:00 usr/lib/os-release link to sysroot/ostree/repo/objects/ab/cdef.file
+hrwxr-xr-x root/root         0 2026-09-01 00:00 ./usr/bin/bootupctl link to sysroot/ostree/repo/objects/12/3456.file
+hrw-r--r-- root/root         0 2026-09-01 00:00 usr/lib/sysusers.d/basic.conf link to sysroot/ostree/repo/objects/78/9abc.file
+hrw-r--r-- root/root         0 2026-09-01 00:00 usr/share/doc/x link to sysroot/ostree/repo/objects/de/f012.file
+lrwxrwxrwx root/root         0 2026-09-01 00:00 etc/os-release -> ../usr/lib/os-release
+";
+        let got = hardlink_targets_from_listing(
+            listing,
+            &[
+                "usr/lib/os-release",
+                "usr/bin/bootupctl",
+                "usr/lib/sysusers.d",
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                "sysroot/ostree/repo/objects/ab/cdef.file",
+                "sysroot/ostree/repo/objects/12/3456.file",
+                "sysroot/ostree/repo/objects/78/9abc.file",
+            ]
+        );
+    }
+
     /// Through an HTTP proxy, `curl -D -` emits the CONNECT reply first:
     ///
     ///     HTTP/1.1 200 Connection Established
@@ -1012,6 +1381,13 @@ mod tests {
     fn urlencode_reserved_and_unreserved() {
         assert_eq!(urlencode("repo/pull:read"), "repo%2Fpull%3Aread");
         assert_eq!(urlencode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
+    }
+
+    #[test]
+    fn layers_total_size_sums_layer_sizes() {
+        let m = serde_json::json!({"layers": [{"size": 10}, {"size": 32}, {"digest": "x"}]});
+        assert_eq!(layers_total_size(&m).unwrap(), 42);
+        assert!(layers_total_size(&serde_json::json!({})).is_err());
     }
 
     #[test]

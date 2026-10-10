@@ -539,7 +539,7 @@ WIZARD_SCREENS = [
     ("System Preflight", ENTER),      # Preflight (entry ran the scan already)
     ("Select Target Image", ENTER),   # Select image (Enter advances when
                                       # the editor is closed & image set)
-    ("Configure Options", "n"),       # Options
+    ("Configure Options", ENTER),     # Enter accepts defaults; Space toggles
     ("Review & Run", None),           # Review (terminal for navigation)
 ]
 
@@ -574,23 +574,23 @@ def navigate_to_review(driver: TuiDriver, args, configure_live_run: bool) -> Non
     driver.expect("Step 1 of 5", 30, "welcome screen")
     goto_screen(driver, 2)  # through preflight to the select screen
 
-    # Step the ▶ marker down to the "Custom…" row (extra j's clamp at
-    # the last row), open the editor — the █ block cursor in the input
-    # box is the proof it is really open, without which the typed image
-    # would be interpreted as hotkeys — type the target, and confirm it
-    # landed.
-    driver.ensure_state(
-        lambda: True if driver.row_containing("Custom", "\u25b6") else None,
-        "j", "cursor to custom row", attempts=8)
-    driver.ensure_state(
-        lambda: True if driver.row_containing("\u2588") else None,
-        ENTER, "open custom image editor")
-    driver.send(args.target_image, "type target image")
-    driver.expect(args.target_image, 15, "typed image visible")
-    # Enter closes the editor, another advances; goto_screen presses and
-    # verifies until the options screen is truly current, backtracking if
-    # a late-processed duplicate ever overshoots.
-    goto_screen(driver, 3)
+    if args.catalog_index >= 0:
+        for _ in range(args.catalog_index):
+            driver.send("\x1b[B", "choose catalog target")
+        driver.expect(args.target_image, 15, "catalog target visible")
+        goto_screen(driver, 3)
+    else:
+        # End jumps to Custom. The block cursor proves the editor is open.
+        driver.ensure_state(
+            lambda: True if driver.row_containing("Custom", "\u25b6") else None,
+            "\x1b[4~", "cursor to custom row", attempts=4)
+        driver.ensure_state(
+            lambda: True if driver.row_containing("\u2588") else None,
+            ENTER, "open custom image editor")
+        driver.send(args.target_image, "type target image")
+        driver.expect(args.target_image, 15, "typed image visible")
+        # Enter closes the editor; goto_screen advances after it closes.
+        goto_screen(driver, 3)
 
     if configure_live_run:
         # Mirror the scripted invocation the four MVP cells use:
@@ -621,6 +621,8 @@ def run_wizard(args) -> None:
     navigate_to_review(driver, args, configure_live_run=True)
     if not args.dry_run:
         driver.expect("LIVE MIGRATION", 10, "live mode tag")
+        driver.send("CONFIRM", "type live migration confirmation")
+        driver.expect("Confirmation: CONFIRM", 10, "confirmation visible")
     # "Phase 2 · OCI pull" only exists on the running screen's phase
     # sidebar (the options screen also says "OSTree import", so that
     # label would false-positive before the repaint).
@@ -635,7 +637,8 @@ def run_wizard(args) -> None:
     # timed out watching for it).
     driver.expect(["Complete — press Enter", "MIGRATION COMPLETED"],
                   args.migration_timeout, "completion signal")
-    driver.press_until(ENTER, "Migration Complete!", 20, "running -> complete")
+    completed_title = "Dry-run Complete!" if args.dry_run else "Migration Complete!"
+    driver.press_until(ENTER, completed_title, 20, "running -> complete")
     driver.send("q", "exit TUI")
     rc = driver.wait_exit(30)
     driver.save_transcript()
@@ -686,6 +689,8 @@ def main() -> None:
                         help="target image typed into the wizard (wizard modes)")
     parser.add_argument("--dry-run", action="store_true",
                         help="leave the wizard's dry-run toggle on")
+    parser.add_argument("--catalog-index", type=int, default=-1,
+                        help="select a numbered catalog row instead of Custom")
     parser.add_argument("--migration-timeout", type=float, default=2100,
                         help="seconds to wait for the migration banner")
     parser.add_argument("--output", default="/var/tmp/bootc-migrate-etc-drift.json",

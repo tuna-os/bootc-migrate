@@ -28,6 +28,25 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
+    /// Proceed onto a target image from another OS family (no shared
+    /// ID_LIKE lineage with this host, e.g. Fedora -> openSUSE) using the
+    /// cross-family /etc policy: the target's defaults win, machine state
+    /// and your own additions are carried over, and every displaced file
+    /// you had changed is kept as a `.rebase-old` sidecar (#256). Without
+    /// this, such a target is refused. Not implied by --force.
+    #[arg(long)]
+    accept_cross_base: bool,
+
+    /// Proceed although the hardware compatibility check found hardware that
+    /// works on this machine today and is expected to stop working on the
+    /// target (a storage, display, network, wireless or USB controller with
+    /// no driver in the target kernel, an out-of-tree driver such as NVIDIA
+    /// with no in-kernel fallback, or display/network firmware the target
+    /// does not ship). Without this, those findings refuse the migration.
+    /// Not implied by --force.
+    #[arg(long)]
+    accept_hardware_gaps: bool,
+
     /// Bootloader to use: "systemd-boot" (default, when UEFI), "grub2", or "auto"
     #[arg(long, default_value = "systemd-boot")]
     bootloader: String,
@@ -156,6 +175,16 @@ enum Command {
         from_image: Option<String>,
     },
 }
+
+/// What the migrator says when it finds a composefs host and takes the swap.
+///
+/// A constant because `tests/run-e2e.sh` greps for "already composefs-backed"
+/// on the live guest to prove the composefs source path was taken, and a
+/// reworded `println!` would turn that into a three-hour E2E failure with no
+/// clue attached. `image_swap_notice_matches_the_e2e_assertion` below fails in
+/// seconds instead.
+const IMAGE_SWAP_NOTICE: &str = "System is already composefs-backed — no backend conversion \
+                                 needed.\nSwapping the deployment image instead.";
 
 fn check_root_privilege() -> Result<()> {
     if !rustix::process::getuid().is_root() {
@@ -336,7 +365,8 @@ fn main() {
                 exit_flushed!(1);
             }
             preflight::PreflightReport {
-                is_bootc_ostree: true,
+                booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
+                booted_image: None,
                 pending_transaction: preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
                 nvram_writable: true,
@@ -366,8 +396,50 @@ fn main() {
     preflight::readiness::print_report(&report);
     preflight::readiness::print_readiness(&report);
 
+    // ---- Hardware compatibility ----
+    // Read-only. The migration replaces the kernel, its modules and the
+    // firmware with the target's; refuse when hardware that works today is
+    // expected to stop working, unless --accept-hardware-gaps. Runs before
+    // the gate below so the image-swap branch is covered too.
+    if let Err(e) = bootc_migrate_core::hardware::check_and_gate(
+        &target_image,
+        args.accept_hardware_gaps,
+        args.dry_run,
+    ) {
+        eprintln!("Error: {e:#}");
+        exit_flushed!(1);
+    }
+
     match preflight::readiness::gate(&report, args.force, args.skip_preflight) {
         preflight::readiness::MigrationGate::Proceed => {}
+        // Already on composefs: there is no ostree repo to convert, so run the
+        // image swap instead of refusing. This is the same `bootc switch`
+        // route bootc-rebase takes for composefs→composefs, which the
+        // capability table has carried as implemented since #66; before this
+        // the migrator dead-ended here with "not booted into an OSTree
+        // deployment", which read as a hard blocker when it actually meant
+        // "the conversion is already done".
+        preflight::readiness::MigrationGate::ImageSwap => {
+            println!("\n{IMAGE_SWAP_NOTICE}");
+            let result = bootc_migrate_core::rebase_controller::ImageSwapConfig {
+                target_image: &target_image,
+                dry_run: args.dry_run,
+                force: args.force,
+                // The migrator has no --de-migrate flag; that is a
+                // bootc-rebase option. Keep the swap to what this binary
+                // already promises and leave the desktop alone.
+                de_migrate: false,
+                accept_cross_base: args.accept_cross_base,
+            }
+            .run();
+            match result {
+                Ok(()) => exit_flushed!(0),
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    exit_flushed!(1);
+                }
+            }
+        }
         preflight::readiness::MigrationGate::Refuse(reason) => {
             eprintln!("Error: {}", reason);
             exit_flushed!(1);
@@ -389,6 +461,16 @@ fn main() {
                 exit_flushed!(0);
             }
         }
+    }
+
+    // ---- Cross-family gate (#256) ----
+    // Still read-only: scans the target's identity and refuses a target from
+    // another OS family unless --accept-cross-base was given. Phase 4 decides
+    // again from the pulled image itself, so an unscannable target only
+    // warns here.
+    if let Err(e) = bootc_migrate_core::cross_family::gate(&target_image, args.accept_cross_base) {
+        eprintln!("Error: {e:#}");
+        exit_flushed!(1);
     }
 
     // ---- Phase 0.5: Config Drift Review (issue #15) ----
@@ -441,7 +523,10 @@ fn main() {
         args.skip_import,
         &args.bootloader,
         args.force,
-        etc_overrides.as_ref(),
+        migration::EtcPolicy {
+            overrides: etc_overrides.as_ref(),
+            accept_cross_base: args.accept_cross_base,
+        },
     ) {
         eprintln!("\nMigration Failed: {:#}", e);
         exit_flushed!(1);
@@ -593,4 +678,22 @@ fn run_system_to_flatpak_steam(dry_run: bool) -> Result<()> {
         println!("No changes made.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod image_swap_contract {
+    use super::IMAGE_SWAP_NOTICE;
+
+    /// `tests/run-e2e.sh` greps the live guest's output for these phrases to
+    /// prove a composefs host took the swap route. Rewording the notice
+    /// without updating the script would fail the E2E matrix hours later with
+    /// nothing pointing at the cause; this fails in seconds and says where.
+    #[test]
+    fn image_swap_notice_matches_the_e2e_assertion() {
+        assert!(
+            IMAGE_SWAP_NOTICE.contains("already composefs-backed"),
+            "tests/run-e2e.sh greps for \"already composefs-backed\"; update both \
+             together. Notice is: {IMAGE_SWAP_NOTICE}"
+        );
+    }
 }

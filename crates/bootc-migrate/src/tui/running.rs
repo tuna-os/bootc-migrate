@@ -35,7 +35,7 @@ fn render_phase_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .iter()
         .map(|p| {
             let (icon, fg) = match p.status {
-                PhaseStatus::Pending => ("○", SUBTLE),
+                PhaseStatus::Pending => ("○", MUTED),
                 PhaseStatus::Running => ("⟳", TEAL),
                 PhaseStatus::Done => ("✓", SUCCESS),
                 PhaseStatus::Failed => ("✗", DANGER),
@@ -97,7 +97,7 @@ fn render_log_panel(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(SUBTLE))
+        .border_style(Style::default().fg(BORDER))
         .style(Style::default().bg(DARK_BG));
 
     let inner = block.inner(area);
@@ -123,7 +123,7 @@ fn render_log_panel(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .map(|l| {
             let style = match l.kind {
                 LogKind::Header => Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
-                LogKind::Phase => Style::default().fg(SUBTLE),
+                LogKind::Phase => Style::default().fg(MUTED),
                 LogKind::Error => Style::default().fg(DANGER),
                 LogKind::Success => Style::default().fg(SUCCESS),
                 LogKind::Normal => Style::default().fg(TEXT),

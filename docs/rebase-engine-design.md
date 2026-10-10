@@ -118,7 +118,10 @@ The executable counterpart is `crates/bootc-rebase/src/routing.rs::plan`.
 `bootc-rebase --plan` prints the selected phases and bootloader policy without
 touching the host. The planner is pure and tested across all four backend
 pairs; strategy execution remains behind the existing protected paths until
-the phase trait extraction below lands.
+the phase trait extraction below lands. composefs→ostree executes as
+`Strategy::OstreeInstall` (#260): the target's own `bootc install
+to-existing-root` alongside the composefs root, with the ESP snapshot,
+`/etc` merge and `/var` copy owned by `bootc-migrate-core::ostree_install`.
 
 For frontends and orchestration, `bootc-rebase --plan-json` emits the same
 route as a single JSON object (`from`, `to`, `strategy`, `implemented`,

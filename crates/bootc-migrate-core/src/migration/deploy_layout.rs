@@ -164,9 +164,24 @@ fn write_runtime_composefs_loopback_mount(etc_dir: &Path) -> Result<()> {
 ///
 /// A dedicated `/var` filesystem stays in place; otherwise the live tree is
 /// copied once, and only the completion marker proves the copy finished.
-pub(crate) fn migrate_var_state() -> Result<()> {
+/// Where the stateroot `/var` came from, which decides whether it may be
+/// rewritten before the reboot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VarStaging {
+    /// The live `/var` was copied into the stateroot by this run.
+    Copied,
+    /// A dedicated filesystem is left in place; it is still the live `/var`.
+    InPlace,
+    /// A previous run already completed the copy (its marker is present).
+    PreviouslyCopied,
+}
+
+/// The stateroot `/var` the deployment's `var` symlink points at.
+pub(crate) const STATEROOT_VAR: &str = "/sysroot/state/os/default/var";
+
+pub(crate) fn migrate_var_state() -> Result<VarStaging> {
     println!("=== Migrating /var data to ComposeFS state ===");
-    let target_var = Path::new("/sysroot/state/os/default/var");
+    let target_var = Path::new(STATEROOT_VAR);
     let completion_marker =
         Path::new("/sysroot/state/os/default/.bootc-migrate-composefs-var-complete");
 
@@ -178,7 +193,7 @@ pub(crate) fn migrate_var_state() -> Result<()> {
             "[phase4] preserving /var in place ({}, UUID={}, options={}); Phase 5 will mount it at the composefs stateroot",
             var.fstype, var.uuid, var.options
         );
-        return Ok(());
+        return Ok(VarStaging::InPlace);
     }
 
     // A target /var can contain a directory skeleton before migration. Only our
@@ -188,7 +203,7 @@ pub(crate) fn migrate_var_state() -> Result<()> {
             "/var migration already completed at {}. Skipping.",
             target_var.display()
         );
-        return Ok(());
+        return Ok(VarStaging::PreviouslyCopied);
     }
 
     fs::create_dir_all(target_var)?;
@@ -205,7 +220,7 @@ pub(crate) fn migrate_var_state() -> Result<()> {
     .context("failed to write /var migration completion marker")?;
     println!("/var data migrated successfully.");
 
-    Ok(())
+    Ok(VarStaging::Copied)
 }
 
 #[cfg(test)]

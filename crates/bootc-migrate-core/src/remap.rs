@@ -332,6 +332,18 @@ pub fn render_report(plan: &RemapPlan) -> String {
 /// Executes each step in `plan.steps` sequentially (handling cycle-safe scratch renames).
 /// Returns the total number of files/directories whose ownership was updated.
 pub fn apply_remap_plan(staged_root: &std::path::Path, plan: &RemapPlan) -> anyhow::Result<usize> {
+    apply_remap_plan_to_dirs(&[&staged_root.join("var"), &staged_root.join("etc")], plan)
+}
+
+/// Apply `plan`'s chown steps, in order, to each of `dirs` (a missing
+/// directory is skipped). The composefs conversion route stages `/etc` and
+/// `/var` in two unrelated places, so it names them explicitly rather than
+/// through a deployment root. Every step runs over every directory before
+/// the next step starts — the steps are cycle-safe only in that order.
+pub fn apply_remap_plan_to_dirs(
+    dirs: &[&std::path::Path],
+    plan: &RemapPlan,
+) -> anyhow::Result<usize> {
     if plan.is_empty() || plan.steps.is_empty() {
         return Ok(0);
     }
@@ -339,8 +351,7 @@ pub fn apply_remap_plan(staged_root: &std::path::Path, plan: &RemapPlan) -> anyh
     let mut total_changed = 0usize;
 
     for step in &plan.steps {
-        let targets = [staged_root.join("var"), staged_root.join("etc")];
-        for target in &targets {
+        for target in dirs {
             if !target.exists() {
                 continue;
             }

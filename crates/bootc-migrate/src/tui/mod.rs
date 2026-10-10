@@ -29,6 +29,7 @@ use std::{
 };
 use tui_big_text::{BigText, PixelSize};
 
+mod catalog;
 mod preflight;
 mod welcome;
 
@@ -43,6 +44,8 @@ use self::running::render_running;
 use self::configure_options::render_configure_options;
 use self::select_image::render_select_image;
 
+use bootc_migrate_core::rebase_plan::Backend;
+
 mod configure_options;
 mod select_image;
 
@@ -52,39 +55,106 @@ mod review;
 mod running;
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
-const TEAL: Color = Color::Rgb(0, 180, 180);
-const AMBER: Color = Color::Rgb(220, 160, 0);
+//
+// Every foreground here clears WCAG AA (4.5:1) against BOTH backgrounds, and
+// `contrast_tests` below asserts it so a future tweak cannot quietly undo it.
+// The exception is `BORDER`, which only ever draws chrome and is held to the
+// 3:1 non-text minimum instead.
+//
+// The distinction that was missing before is `MUTED` vs `BORDER`. A single
+// "subtle" colour was doing both jobs, and because a border may be dim while
+// text may not, it ended up set for the border and dragged the text down with
+// it: 2.7:1 for the values, unselected rows and hints — below even the
+// large-text floor, which is what made the panels unreadable on a dark
+// terminal.
+const TEAL: Color = Color::Rgb(0, 190, 190);
+const AMBER: Color = Color::Rgb(230, 170, 20);
 const DARK_BG: Color = Color::Rgb(18, 20, 24);
 const SURFACE: Color = Color::Rgb(30, 34, 42);
-const SUBTLE: Color = Color::Rgb(90, 100, 115);
-const SUCCESS: Color = Color::Rgb(80, 200, 100);
-const DANGER: Color = Color::Rgb(220, 60, 60);
-const TEXT: Color = Color::Rgb(210, 215, 225);
+/// De-emphasised **text**: values, unselected rows, hints. Readable (>=4.5:1).
+const MUTED: Color = Color::Rgb(140, 149, 162);
+/// **Chrome only** — inactive borders and separators. Never put text in this.
+const BORDER: Color = Color::Rgb(100, 110, 124);
+/// The unfilled portion of a gauge, so a bar reads as a bar at 0%.
+const TRACK: Color = Color::Rgb(58, 64, 78);
+const SUCCESS: Color = Color::Rgb(90, 210, 110);
+/// Red **text** on a dark panel.
+const DANGER: Color = Color::Rgb(235, 105, 105);
+/// Red **fill** behind light text (the error banner). Separate from `DANGER`
+/// for the same reason `BORDER` is separate from `MUTED`: a red bright enough
+/// to read as text on a dark panel is too bright to sit behind white.
+const DANGER_BG: Color = Color::Rgb(160, 32, 32);
+const TEXT: Color = Color::Rgb(222, 226, 234);
 
 // ─── Spinner ──────────────────────────────────────────────────────────────────
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-// ─── Preset images ────────────────────────────────────────────────────────────
-/// (display_label, target_image, source_hint).
-/// The source_hint is matched against the detected OS to highlight the recommended preset.
-const PRESET_IMAGES: &[(&str, &str, &str)] = &[
-    (
-        "Dakota stable (default)",
-        "ghcr.io/projectbluefin/dakota:stable",
-        "bluefin",
-    ),
-    (
-        "Dakota stable (from LTS/XFS)",
-        "ghcr.io/projectbluefin/dakota:stable",
-        "lts",
-    ),
-    (
-        "Dakota stable (from Aurora)",
-        "ghcr.io/projectbluefin/dakota:stable",
-        "aurora",
-    ),
-    ("Custom…", "", ""),
-];
+// ─── Target image choices ─────────────────────────────────────────────────────
+
+/// The first bundled catalog target, for assertions only.
+#[cfg(test)]
+const DAKOTA_STABLE: &str = "ghcr.io/projectbluefin/dakota:stable";
+
+/// One row on the target-image screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageChoice {
+    /// What this target is.
+    pub label: String,
+    /// The image reference, or empty for the custom row.
+    pub image: String,
+    /// Short backend or availability hint.
+    pub note: String,
+    /// Whether this row takes a typed reference.
+    pub custom: bool,
+    pub backend: String,
+    pub published: bool,
+}
+
+/// Build the picker from the current JSON catalog and detected booted image.
+/// Dakota remains first on OSTree systems; a ComposeFS host leads with its
+/// current image so an image swap starts from a useful reference.
+pub(crate) fn image_choices(
+    backend: Option<Backend>,
+    booted_image: Option<&str>,
+    detected_os: &str,
+) -> Vec<ImageChoice> {
+    image_choices_from_catalog(backend, booted_image, detected_os, catalog::load().0)
+}
+
+fn image_choices_from_catalog(
+    backend: Option<Backend>,
+    booted_image: Option<&str>,
+    _detected_os: &str,
+    mut choices: Vec<ImageChoice>,
+) -> Vec<ImageChoice> {
+    // On an existing composefs system, keep the current image as the first
+    // one-click choice. Otherwise Dakota remains the known conversion path.
+    if backend == Some(Backend::Composefs)
+        && let Some(current) = booted_image
+    {
+        choices.retain(|c| c.image != current);
+        choices.insert(
+            0,
+            ImageChoice {
+                label: "Current image".into(),
+                image: current.into(),
+                note: "currently booted".into(),
+                custom: false,
+                backend: "composefs".into(),
+                published: true,
+            },
+        );
+    }
+    choices.push(ImageChoice {
+        label: "Custom…".into(),
+        image: String::new(),
+        note: "enter a ComposeFS-capable image".into(),
+        custom: true,
+        backend: "composefs".into(),
+        published: true,
+    });
+    choices
+}
 
 // ─── Source OS detection ──────────────────────────────────────────────────────
 
@@ -239,11 +309,20 @@ pub struct App {
     // Preflight
     preflight_state: Option<PreflightTuiState>,
     detected_os: String,
+    /// Target rows, rebuilt from the preflight report so the list reflects
+    /// this system rather than a fixed menu.
+    image_choices: Vec<ImageChoice>,
+    catalog_source: &'static str,
+    /// What preflight found booted, shown in the header so each row's note can
+    /// stay short enough not to be truncated.
+    booted_backend: Option<Backend>,
+    booted_image: Option<String>,
 
     // SelectImage
     image_list_state: ListState,
     custom_image: String,
     custom_image_editing: bool,
+    confirmation: String,
 
     // ConfigureOptions
     opt_dry_run: bool,
@@ -251,6 +330,7 @@ pub struct App {
     opt_bootloader: Bootloader,
     opt_skip_preflight: bool,
     opt_force: bool,
+    opt_accept_cross_base: bool,
     options_cursor: usize,
 
     // Running
@@ -285,18 +365,27 @@ impl App {
         let mut image_list_state = ListState::default();
         image_list_state.select(Some(0));
         let detected_os = detect_source_os();
+        // Preflight has not run yet; this is replaced the moment it does.
+        let (rows, catalog_source) = catalog::load();
+        let image_choices = image_choices_from_catalog(None, None, &detected_os, rows);
         Self {
             screen: Screen::Welcome,
             preflight_state: None,
             detected_os,
+            image_choices,
+            catalog_source,
+            booted_backend: None,
+            booted_image: None,
             image_list_state,
             custom_image: String::new(),
             custom_image_editing: false,
+            confirmation: String::new(),
             opt_dry_run: true,
             opt_skip_import: false,
             opt_bootloader: Bootloader::SystemdBoot,
             opt_skip_preflight: false,
             opt_force: false,
+            opt_accept_cross_base: false,
             options_cursor: 0,
             phases: default_phases(),
             log_lines: Vec::new(),
@@ -314,22 +403,62 @@ impl App {
 
     fn selected_image(&self) -> String {
         let idx = self.image_list_state.selected().unwrap_or(0);
-        if idx == PRESET_IMAGES.len() - 1 {
-            self.custom_image.clone()
-        } else {
-            PRESET_IMAGES[idx].1.to_owned()
+        match self.image_choices.get(idx) {
+            Some(c) if c.custom => self.custom_image.clone(),
+            Some(c) => c.image.clone(),
+            None => String::new(),
         }
     }
 
+    fn selected_choice(&self) -> Option<&ImageChoice> {
+        self.image_choices
+            .get(self.image_list_state.selected().unwrap_or(0))
+    }
+
+    fn is_image_swap(&self) -> bool {
+        self.booted_backend == Some(Backend::Composefs)
+            && self
+                .selected_choice()
+                .is_some_and(|c| c.backend == "composefs")
+    }
+
     fn is_custom_selected(&self) -> bool {
-        self.image_list_state.selected().unwrap_or(0) == PRESET_IMAGES.len() - 1
+        let idx = self.image_list_state.selected().unwrap_or(0);
+        self.image_choices.get(idx).is_some_and(|c| c.custom)
+    }
+
+    /// Rebuild the target list from a fresh preflight report, keeping the
+    /// cursor on the first row — the one the detection picked.
+    fn refresh_image_choices(&mut self, report: &bootc_migrate_core::preflight::PreflightReport) {
+        self.booted_backend = report.booted_backend;
+        self.booted_image = report.booted_image.clone();
+        self.image_choices = image_choices(
+            report.booted_backend,
+            report.booted_image.as_deref(),
+            &self.detected_os,
+        );
+        self.image_list_state.select(Some(0));
     }
 
     fn build_command_args(&self) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
-        let exe =
+        let mut exe =
             std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("bootc-migrate"));
+        let ostree_target = self
+            .selected_choice()
+            .is_some_and(|c| c.backend == "ostree");
+        if ostree_target {
+            exe.set_file_name("bootc-rebase");
+            if !exe.exists() {
+                exe = std::path::PathBuf::from("bootc-rebase");
+            }
+        }
         args.push(exe.display().to_string());
+        if ostree_target {
+            args.push("rebase".to_owned());
+            args.push("--target-backend".to_owned());
+            args.push("ostree".to_owned());
+        }
         args.push("--target-image".to_owned());
         args.push(self.selected_image());
         if self.opt_dry_run {
@@ -354,6 +483,9 @@ impl App {
         if self.opt_force {
             args.push("--force".to_owned());
         }
+        if self.opt_accept_cross_base {
+            args.push("--accept-cross-base".to_owned());
+        }
         args
     }
 
@@ -371,7 +503,22 @@ impl App {
 
         let (tx, rx) = mpsc::channel::<MigMsg>();
         self.rx = Some(rx);
-        self.phases = default_phases();
+        self.phases = if self.is_image_swap() {
+            vec![PhaseInfo {
+                label: "ComposeFS image swap",
+                status: PhaseStatus::Running,
+            }]
+        } else if self
+            .selected_choice()
+            .is_some_and(|c| c.backend == "ostree")
+        {
+            vec![PhaseInfo {
+                label: "OSTree image rebase",
+                status: PhaseStatus::Running,
+            }]
+        } else {
+            default_phases()
+        };
         self.log_lines.clear();
         self.log_scroll = 0;
         self.migration_done = false;
@@ -428,6 +575,13 @@ impl App {
 
     /// Parse a log line to update phase statuses.
     fn update_phases_from_line(&mut self, line: &str) {
+        if self.is_image_swap()
+            || self
+                .selected_choice()
+                .is_some_and(|c| c.backend == "ostree")
+        {
+            return;
+        }
         if line.contains("Phase 0") || line.contains("=== Phase 0") {
             self.set_phase_running(0);
         } else if line.contains("=== Phase 1: Skipped") {
@@ -560,6 +714,7 @@ impl App {
                 match bootc_migrate_core::preflight::run_preflight_checks() {
                     Ok(report) => {
                         self.preflight_state = Some(PreflightTuiState::from_report(&report));
+                        self.refresh_image_choices(&report);
                     }
                     Err(_) => {
                         // If preflight fails (e.g. not root), show a minimal state.
@@ -683,6 +838,7 @@ impl App {
                 // Re-run preflight
                 if let Ok(report) = bootc_migrate_core::preflight::run_preflight_checks() {
                     self.preflight_state = Some(PreflightTuiState::from_report(&report));
+                    self.refresh_image_choices(&report);
                 }
             }
             _ => {}
@@ -708,6 +864,20 @@ impl App {
         }
 
         match key {
+            KeyCode::Home => self.image_list_state.select(Some(0)),
+            KeyCode::End => self
+                .image_list_state
+                .select(Some(self.image_choices.len().saturating_sub(1))),
+            KeyCode::PageUp => {
+                let cur = self.image_list_state.selected().unwrap_or(0);
+                self.image_list_state.select(Some(cur.saturating_sub(10)));
+            }
+            KeyCode::PageDown => {
+                let cur = self.image_list_state.selected().unwrap_or(0);
+                self.image_list_state.select(Some(
+                    (cur + 10).min(self.image_choices.len().saturating_sub(1)),
+                ));
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 let cur = self.image_list_state.selected().unwrap_or(0);
                 if cur > 0 {
@@ -716,12 +886,18 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let cur = self.image_list_state.selected().unwrap_or(0);
-                if cur < PRESET_IMAGES.len() - 1 {
+                if cur + 1 < self.image_choices.len() {
                     self.image_list_state.select(Some(cur + 1));
                 }
             }
             KeyCode::Enter => {
-                if self.is_custom_selected() && self.custom_image.is_empty() {
+                if self.selected_choice().is_some_and(|c| {
+                    !c.published
+                        || (c.backend == "ostree"
+                            && self.booted_backend == Some(Backend::Composefs))
+                }) {
+                    // Listed for discovery, but no image has been released.
+                } else if self.is_custom_selected() && self.custom_image.is_empty() {
                     self.custom_image_editing = true;
                 } else {
                     self.next_screen();
@@ -739,14 +915,35 @@ impl App {
             }
             KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
             KeyCode::Char('q') => self.show_quit_dialog = true,
+            KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                let start = self.image_list_state.selected().unwrap_or(0);
+                let target = self
+                    .image_choices
+                    .iter()
+                    .enumerate()
+                    .cycle()
+                    .skip(start + 1)
+                    .take(self.image_choices.len())
+                    .find(|(_, choice)| {
+                        choice
+                            .label
+                            .to_ascii_lowercase()
+                            .starts_with(c.to_ascii_lowercase())
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = target {
+                    self.image_list_state.select(Some(index));
+                }
+            }
             _ => {}
         }
         false
     }
 
     fn handle_options_key(&mut self, key: KeyCode) -> bool {
-        // 5 options: dry_run(0), skip_import(1), bootloader(2), skip_preflight(3), force(4)
-        const NUM_OPTIONS: usize = 5;
+        // 6 options: dry_run(0), skip_import(1), bootloader(2),
+        // skip_preflight(3), force(4), accept_cross_base(5)
+        const NUM_OPTIONS: usize = 6;
         match key {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 if self.options_cursor > 0 {
@@ -758,12 +955,8 @@ impl App {
                     self.options_cursor += 1;
                 }
             }
-            KeyCode::Char(' ') | KeyCode::Enter => {
-                self.toggle_option(self.options_cursor);
-                if key == KeyCode::Enter && self.options_cursor == NUM_OPTIONS - 1 {
-                    self.next_screen();
-                }
-            }
+            KeyCode::Char(' ') => self.toggle_option(self.options_cursor),
+            KeyCode::Enter => self.next_screen(),
             KeyCode::Right | KeyCode::Char('l') => {
                 if self.options_cursor == 2 {
                     self.opt_bootloader = Bootloader::Grub2;
@@ -794,11 +987,41 @@ impl App {
             }
             3 => self.opt_skip_preflight = !self.opt_skip_preflight,
             4 => self.opt_force = !self.opt_force,
+            5 => self.opt_accept_cross_base = !self.opt_accept_cross_base,
             _ => {}
         }
     }
 
     fn handle_review_key(&mut self, key: KeyCode) -> bool {
+        if matches!(key, KeyCode::Esc | KeyCode::Char('b')) {
+            self.confirmation.clear();
+            self.prev_screen();
+            return false;
+        }
+        if key == KeyCode::Char('q') {
+            self.show_quit_dialog = true;
+            return false;
+        }
+        if !self.opt_dry_run {
+            match key {
+                KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                    if self.confirmation.len() < 7 {
+                        self.confirmation.push(c);
+                    }
+                    return false;
+                }
+                KeyCode::Backspace if !self.confirmation.is_empty() => {
+                    self.confirmation.pop();
+                    return false;
+                }
+                KeyCode::Enter if self.confirmation == "CONFIRM" => {
+                    self.next_screen();
+                    return false;
+                }
+                KeyCode::Enter => return false,
+                _ => {}
+            }
+        }
         match key {
             KeyCode::Enter | KeyCode::Char('r') => self.next_screen(),
             KeyCode::Backspace | KeyCode::Esc | KeyCode::Char('b') => self.prev_screen(),
@@ -910,8 +1133,11 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 App::total_wizard_steps()
             )
         }
+        Screen::Running if app.opt_dry_run => "  Dry-run running…".to_owned(),
         Screen::Running => "  Migration running…".to_owned(),
+        Screen::Complete if app.opt_dry_run => "  Dry-run complete".to_owned(),
         Screen::Complete => "  Migration complete".to_owned(),
+        Screen::Failed if app.opt_dry_run => "  Dry-run failed".to_owned(),
         Screen::Failed => "  Migration failed".to_owned(),
     };
 
@@ -920,7 +1146,7 @@ fn render_title(f: &mut ratatui::Frame, app: &App, area: Rect) {
             " 🚀 bootc-migrate",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(step_str, Style::default().fg(SUBTLE)),
+        Span::styled(step_str, Style::default().fg(MUTED)),
         Span::raw("  "),
         mode_tag,
     ]);
@@ -947,8 +1173,9 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ],
         Screen::SelectImage => &[
             ("↑↓", "Move"),
-            ("Enter", "Select / Next"),
-            ("e / Tab", "Edit custom"),
+            ("A-Z", "Jump"),
+            ("End", "Custom"),
+            ("Enter", "Select"),
             ("b", "Back"),
             ("q", "Quit"),
         ],
@@ -956,11 +1183,18 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("↑↓", "Move"),
             ("Space", "Toggle"),
             ("←→", "Bootloader"),
-            ("n", "Next"),
+            ("Enter", "Next"),
             ("b", "Back"),
             ("q", "Quit"),
         ],
-        Screen::Review => &[("Enter / r", "RUN"), ("b", "Back"), ("q", "Quit")],
+        Screen::Review if app.opt_dry_run => {
+            &[("Enter", "Run dry-run"), ("b", "Back"), ("q", "Quit")]
+        }
+        Screen::Review => &[
+            ("CONFIRM + Enter", "Run live"),
+            ("b", "Back"),
+            ("q", "Quit"),
+        ],
         Screen::Running => &[
             ("↑↓ / PgUp/Dn", "Scroll log"),
             ("Enter", "Continue (when done)"),
@@ -985,7 +1219,7 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(SUBTLE))
+                .border_style(Style::default().fg(BORDER))
                 .style(Style::default().bg(SURFACE)),
         )
         .alignment(Alignment::Left);
@@ -1000,7 +1234,7 @@ fn render_screen(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Screen::ConfigureOptions => render_configure_options(f, app, area),
         Screen::Review => render_review(f, app, area),
         Screen::Running => render_running(f, app, area),
-        Screen::Complete => render_complete(f, area),
+        Screen::Complete => render_complete(f, app, area),
         Screen::Failed => render_failed(f, app, area),
     }
 }
@@ -1082,7 +1316,7 @@ fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
         "    Quit    ",
         Style::default()
             .fg(Color::Rgb(255, 240, 240))
-            .bg(DANGER)
+            .bg(DANGER_BG)
             .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center);
@@ -1100,7 +1334,7 @@ fn render_quit_dialog(f: &mut ratatui::Frame, area: Rect) {
 
     let hint = Paragraph::new(Line::from(Span::styled(
         "  ← / → to select, Enter to confirm, Esc to cancel",
-        Style::default().fg(SUBTLE),
+        Style::default().fg(MUTED),
     )));
     f.render_widget(hint, chunks[4]);
 }
@@ -1150,9 +1384,26 @@ fn event_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            let old_screen = app.screen.clone();
             let should_quit = app.handle_key(key.code, key.modifiers);
             if should_quit {
                 break;
+            }
+            // Preflight may invoke host tools that write to the terminal
+            // while ratatui owns the alternate screen. Force a full redraw
+            // after a screen change or a manual re-check.
+            //
+            // Not `terminal.clear()`: it first asks the terminal for the
+            // cursor position (ESC [6n) and fails after 2 s when no answer
+            // comes, which ended the wizard on its first Enter under the
+            // E2E pty driver (and would on any terminal that does not
+            // answer). A resize to the current size clears the whole
+            // fullscreen viewport and resets the back buffer, with no query.
+            if app.screen != old_screen
+                || (old_screen == Screen::Preflight && key.code == KeyCode::Char('r'))
+            {
+                let size = terminal.size()?;
+                terminal.resize(Rect::new(0, 0, size.width, size.height))?;
             }
         }
     }
@@ -1242,29 +1493,48 @@ mod tests {
         // Defaults: first preset, dry-run on, systemd-boot.
         let args = app.build_command_args();
         assert!(args.contains(&"--target-image".to_string()));
-        assert!(args.contains(&PRESET_IMAGES[0].1.to_string()));
+        assert!(args.contains(&app.image_choices[0].image.clone()));
         assert!(args.contains(&"--dry-run".to_string()));
         assert!(args.contains(&"systemd-boot".to_string()));
         assert!(!args.contains(&"--force".to_string()));
+
+        assert!(!args.contains(&"--accept-cross-base".to_string()));
 
         app.opt_dry_run = false;
         app.opt_skip_import = true;
         app.opt_force = true;
         app.opt_skip_preflight = true;
+        app.opt_accept_cross_base = true;
         app.opt_bootloader = Bootloader::Grub2;
         let args = app.build_command_args();
         assert!(!args.contains(&"--dry-run".to_string()));
         assert!(args.contains(&"--skip-import".to_string()));
         assert!(args.contains(&"--force".to_string()));
         assert!(args.contains(&"--skip-preflight".to_string()));
+        assert!(args.contains(&"--accept-cross-base".to_string()));
         assert!(args.contains(&"grub2".to_string()));
+    }
+
+    #[test]
+    fn ostree_catalog_choice_uses_rebase_route() {
+        let mut app = app_on(Screen::SelectImage);
+        let index = app
+            .image_choices
+            .iter()
+            .position(|c| c.label == "Bluefin")
+            .unwrap();
+        app.image_list_state.select(Some(index));
+        let args = app.build_command_args();
+        assert!(args[0].ends_with("bootc-rebase"));
+        assert_eq!(args[1..4], ["rebase", "--target-backend", "ostree"]);
+        assert!(args.contains(&"ghcr.io/projectbluefin/bluefin:stable".to_owned()));
     }
 
     #[test]
     fn custom_image_entry_via_keys() {
         let mut app = app_on(Screen::SelectImage);
         // Move to the last row ("Custom…").
-        for _ in 0..PRESET_IMAGES.len() {
+        for _ in 0..app.image_choices.len() {
             app.handle_key(KeyCode::Down, KeyModifiers::NONE);
         }
         assert!(app.is_custom_selected());
@@ -1290,13 +1560,20 @@ mod tests {
         let mut app = app_on(Screen::SelectImage);
         app.handle_key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(app.image_list_state.selected(), Some(0));
-        for _ in 0..(PRESET_IMAGES.len() * 2) {
+        for _ in 0..(app.image_choices.len() * 2) {
             app.handle_key(KeyCode::Down, KeyModifiers::NONE);
         }
         assert_eq!(
             app.image_list_state.selected(),
-            Some(PRESET_IMAGES.len() - 1)
+            Some(app.image_choices.len() - 1)
         );
+    }
+
+    #[test]
+    fn picker_letter_jumps_to_matching_family() {
+        let mut app = app_on(Screen::SelectImage);
+        app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(app.selected_choice().unwrap().label.starts_with("Marlin"));
     }
 
     #[test]
@@ -1318,6 +1595,54 @@ mod tests {
         // 'b' goes back.
         app.handle_key(KeyCode::Char('b'), KeyModifiers::NONE);
         assert_eq!(app.screen, Screen::ConfigureOptions);
+    }
+
+    #[test]
+    fn live_review_blocks_enter_until_exact_confirmation() {
+        let mut app = app_on(Screen::Review);
+        app.opt_dry_run = false;
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        for c in "confirm".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        assert_eq!(app.confirmation, "confirm");
+        for _ in 0..7 {
+            app.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        for c in "CONFIRM".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.confirmation, "CONFIRM");
+    }
+
+    #[test]
+    fn composefs_swap_review_and_dry_run_result_describe_the_actual_route() {
+        let mut app = app_on(Screen::Review);
+        app.booted_backend = Some(Backend::Composefs);
+        let review = draw_to_text(&mut app);
+        assert!(review.contains("bootc switch"));
+        assert!(!review.contains("OSTree import"));
+        app.screen = Screen::Complete;
+        let result = draw_to_text(&mut app);
+        assert!(result.contains("No deployment was staged"));
+        assert!(!result.contains("sudo systemctl reboot"));
+        assert!(!result.contains("bootc-migrate commit"));
+    }
+
+    #[test]
+    fn unpublished_catalog_entry_cannot_advance() {
+        let mut app = app_on(Screen::SelectImage);
+        let index = app
+            .image_choices
+            .iter()
+            .position(|c| c.label == "Utah")
+            .unwrap();
+        app.image_list_state.select(Some(index));
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::SelectImage);
     }
 
     #[test]
@@ -1432,15 +1757,172 @@ mod tests {
     }
 
     #[test]
-    fn select_image_screen_lists_presets() {
+    fn select_image_screen_lists_targets() {
         let mut app = app_on(Screen::SelectImage);
         let text = draw_to_text(&mut app);
         assert!(text.contains("Step 3 of 5"), "missing step:\n{text}");
+        assert!(text.contains("Dakota stable"), "missing target:\n{text}");
         assert!(
-            text.contains("Dakota stable (default)"),
-            "missing preset:\n{text}"
+            app.image_choices.last().is_some_and(|c| c.custom),
+            "missing custom row"
         );
-        assert!(text.contains("Custom"), "missing custom row:\n{text}");
+    }
+
+    // ── Target-image detection ────────────────────────────────────────────
+    //
+    // The screen used to offer three rows — "Dakota stable (default)", "(from
+    // LTS/XFS)" and "(from Aurora)" — that all pointed at the same image and
+    // differed only in a hint matched against the detected OS. Picking one was
+    // a question the tool could already answer, and every answer was the same.
+
+    #[test]
+    fn ostree_host_sees_multiple_distinct_targets() {
+        let choices = image_choices(
+            Some(Backend::Ostree),
+            Some("ghcr.io/ublue-os/bluefin:gts"),
+            "Bluefin (gts)",
+        );
+        let targets: Vec<&str> = choices
+            .iter()
+            .filter(|c| !c.custom)
+            .map(|c| c.image.as_str())
+            .collect();
+        assert!(targets.len() > 10);
+        assert!(targets.contains(&DAKOTA_STABLE));
+        assert!(targets.contains(&"ghcr.io/ublue-os/aurora:stable"));
+        assert!(choices.last().is_some_and(|c| c.custom), "custom stays");
+    }
+
+    /// The detected image is what justifies the preselection, so it has to be
+    /// visible. It lives in the header rather than in each row's note, which
+    /// is what kept the notes short enough not to be truncated at 100 columns.
+    #[test]
+    fn the_screen_shows_what_was_detected() {
+        let mut app = app_on(Screen::SelectImage);
+        app.booted_backend = Some(Backend::Ostree);
+        app.booted_image = Some("ghcr.io/ublue-os/bluefin:gts".into());
+        app.image_choices = image_choices(
+            app.booted_backend,
+            app.booted_image.as_deref(),
+            &app.detected_os,
+        );
+        let text = draw_to_text(&mut app);
+        assert!(
+            text.contains("ghcr.io/ublue-os/bluefin:gts"),
+            "the booted image must be on screen:\n{text}"
+        );
+        assert!(text.contains("ostree"), "the backend too:\n{text}");
+    }
+
+    /// Aurora and LTS had their own rows purely to be recognised. They resolve
+    /// to the same single target as any other ostree host now.
+    #[test]
+    fn every_ostree_source_gets_a_catalog_with_dakota_first() {
+        for os in ["Bluefin (gts)", "Aurora", "Bluefin LTS", "Unknown OS"] {
+            let choices = image_choices(Some(Backend::Ostree), None, os);
+            assert_eq!(choices[0].image, DAKOTA_STABLE, "for {os}");
+            assert!(choices.len() > 10, "catalog + custom, for {os}");
+        }
+    }
+
+    /// On composefs the operation is a swap, so the booted image leads: the
+    /// user edits a tag rather than typing a reference from memory.
+    #[test]
+    fn composefs_host_leads_with_the_image_it_is_running() {
+        let choices = image_choices(
+            Some(Backend::Composefs),
+            Some("ghcr.io/projectbluefin/dakota:gts"),
+            "Dakota",
+        );
+        assert_eq!(choices[0].image, "ghcr.io/projectbluefin/dakota:gts");
+        assert!(!choices[0].custom, "the current image is a real target");
+        assert!(
+            choices.iter().any(|c| c.image == DAKOTA_STABLE),
+            "stable stays available: {choices:?}"
+        );
+    }
+
+    /// Already on the default: don't offer it twice.
+    #[test]
+    fn composefs_host_on_stable_is_not_offered_stable_again() {
+        let choices = image_choices(Some(Backend::Composefs), Some(DAKOTA_STABLE), "Dakota");
+        assert_eq!(
+            choices.iter().filter(|c| c.image == DAKOTA_STABLE).count(),
+            1,
+            "{choices:?}"
+        );
+    }
+
+    /// Preflight could not run (not root, or it failed). Still usable.
+    #[test]
+    fn unknown_backend_still_offers_a_target_and_custom() {
+        let choices = image_choices(None, None, "Unknown OS");
+        assert_eq!(choices[0].image, DAKOTA_STABLE);
+        assert!(choices.last().is_some_and(|c| c.custom));
+    }
+
+    /// Print the screen so a human can look at it. `cargo test -- --nocapture
+    /// select_image_screen_preview`.
+    #[test]
+    fn select_image_screen_preview() {
+        for (name, backend, image) in [
+            (
+                "ostree host",
+                Some(Backend::Ostree),
+                Some("ghcr.io/ublue-os/bluefin:gts"),
+            ),
+            (
+                "composefs host",
+                Some(Backend::Composefs),
+                Some("ghcr.io/projectbluefin/dakota:gts"),
+            ),
+        ] {
+            let mut app = app_on(Screen::SelectImage);
+            app.detected_os = "Bluefin (gts)".to_owned();
+            app.booted_backend = backend;
+            app.booted_image = image.map(str::to_owned);
+            app.image_choices = image_choices(backend, image, &app.detected_os);
+            app.image_list_state.select(Some(0));
+            println!("\n──────── {name} ────────");
+            for line in draw_to_text(&mut app).lines().take(12) {
+                println!("{}", line.trim_end());
+            }
+        }
+    }
+
+    /// The point of the whole change: row 0 is selected, so Enter is enough.
+    #[test]
+    fn the_detected_target_is_preselected() {
+        let mut app = app_on(Screen::SelectImage);
+        app.refresh_image_choices(&bootc_migrate_core::preflight::PreflightReport {
+            booted_backend: Some(Backend::Composefs),
+            booted_image: Some("ghcr.io/projectbluefin/dakota:gts".into()),
+            pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
+            is_uefi: true,
+            nvram_writable: true,
+            esp_path: Some("/boot/efi".into()),
+            esp_free_space_bytes: 386 * 1024 * 1024,
+            esp_fs_type: Some("vfat".into()),
+            esp_detected: true,
+            supports_reflink: true,
+            is_btrfs: true,
+            fs_type: Some("btrfs".into()),
+            ostree_repo_size_bytes: 0,
+            composefs_free_bytes: 40_600_000_000,
+            container_storage_free_bytes: 50 * 1024 * 1024 * 1024,
+            container_storage_path: "/var/lib/containers/storage".into(),
+            var_is_separate_mount: false,
+            esp_ready_for_systemd_boot: true,
+            systemd_boot_binaries_present: true,
+            grub_tools_available: true,
+            sysroot_was_ro: false,
+        });
+        assert_eq!(app.image_list_state.selected(), Some(0));
+        assert_eq!(
+            app.selected_image(),
+            "ghcr.io/projectbluefin/dakota:gts",
+            "pressing Enter must migrate to the detected target"
+        );
     }
 
     #[test]
@@ -1470,7 +1952,7 @@ mod tests {
         let text = draw_to_text(&mut app);
         assert!(text.contains("Preflight"), "missing phase:\n{text}");
         assert!(
-            text.contains("Migration running"),
+            text.contains("Dry-run running"),
             "missing running title:\n{text}"
         );
     }
@@ -1480,13 +1962,13 @@ mod tests {
         let mut app = app_on(Screen::Complete);
         let text = draw_to_text(&mut app);
         assert!(
-            text.contains("Migration complete"),
+            text.contains("Dry-run complete"),
             "missing complete title:\n{text}"
         );
         let mut app = app_on(Screen::Failed);
         let text = draw_to_text(&mut app);
         assert!(
-            text.contains("Migration failed"),
+            text.contains("Dry-run failed"),
             "missing failed title:\n{text}"
         );
     }
@@ -1510,5 +1992,248 @@ mod tests {
         app.preflight_state = None;
         let text = draw_to_text(&mut app);
         assert!(text.contains("Step 2 of 5"), "missing step:\n{text}");
+    }
+
+    // ── Palette contrast ──────────────────────────────────────────────────
+    //
+    // These lock in the fix for the unreadable dark theme. Every rule below
+    // corresponds to something that was actually wrong on screen, so a future
+    // palette tweak that reintroduces it fails here rather than shipping.
+
+    /// sRGB relative luminance (WCAG 2.1 §Relative luminance).
+    fn luminance(c: Color) -> f64 {
+        let Color::Rgb(r, g, b) = c else {
+            panic!("palette must be explicit Rgb, got {c:?}");
+        };
+        let ch = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    }
+
+    /// WCAG 2.1 contrast ratio, 1.0 (identical) to 21.0 (black on white).
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Text must clear AA (4.5:1) on both panel backgrounds.
+    #[test]
+    fn every_text_colour_is_readable_on_both_backgrounds() {
+        for (name, fg) in [
+            ("TEAL", TEAL),
+            ("AMBER", AMBER),
+            ("MUTED", MUTED),
+            ("SUCCESS", SUCCESS),
+            ("DANGER", DANGER),
+            ("TEXT", TEXT),
+        ] {
+            for (bg_name, bg) in [("DARK_BG", DARK_BG), ("SURFACE", SURFACE)] {
+                let ratio = contrast(fg, bg);
+                assert!(
+                    ratio >= 4.5,
+                    "{name} on {bg_name} is {ratio:.2}:1, below the 4.5:1 floor \
+                     for text. Pick a lighter {name} or stop using it for text."
+                );
+            }
+        }
+    }
+
+    /// `BORDER` is exempt from the text floor precisely because it must never
+    /// carry text — but it still has to be visible as chrome (3:1).
+    #[test]
+    fn border_is_visible_chrome_but_not_text_grade() {
+        for (bg_name, bg) in [("DARK_BG", DARK_BG), ("SURFACE", SURFACE)] {
+            let ratio = contrast(BORDER, bg);
+            assert!(
+                ratio >= 3.0,
+                "BORDER on {bg_name} is {ratio:.2}:1, below the 3:1 non-text floor"
+            );
+        }
+    }
+
+    /// Light-on-colour pairs: buttons and the error banner set their own
+    /// background, so they are checked against that, not against the panel.
+    #[test]
+    fn on_colour_pairs_are_readable() {
+        let button_green = Color::Rgb(40, 180, 70);
+        let banner_text = Color::Rgb(255, 240, 240);
+        for (name, fg, bg) in [
+            ("welcome/dry-run button", DARK_BG, TEAL),
+            ("run-migration button", DARK_BG, button_green),
+            ("quit button", banner_text, DANGER_BG),
+        ] {
+            let ratio = contrast(fg, bg);
+            assert!(ratio >= 4.5, "{name} is {ratio:.2}:1, below 4.5:1");
+        }
+    }
+
+    /// The gauge readout is drawn over the panel, never over the bar, so it is
+    /// held to the same floor as any other text. This is the regression that
+    /// made `0%` invisible: it used to be drawn `fg(DARK_BG)` on top of the
+    /// unfilled remainder, which `Gauge` leaves at the panel background.
+    #[test]
+    fn gauge_readout_never_lands_dark_on_dark() {
+        for (name, fill) in [("SUCCESS", SUCCESS), ("AMBER", AMBER), ("DANGER", DANGER)] {
+            for (bg_name, bg) in [("DARK_BG", DARK_BG), ("SURFACE", SURFACE)] {
+                let ratio = contrast(fill, bg);
+                assert!(
+                    ratio >= 4.5,
+                    "gauge readout {name} on {bg_name} is {ratio:.2}:1"
+                );
+            }
+            // And the bar itself has to be distinguishable from its track.
+            let ratio = contrast(fill, TRACK);
+            assert!(
+                ratio >= 3.0,
+                "{name} fill against TRACK is {ratio:.2}:1 — the bar would not read as full"
+            );
+        }
+    }
+
+    /// The readouts must actually be on screen — an audit that only checks
+    /// contrast would also pass if the text vanished entirely.
+    #[test]
+    fn preflight_gauges_show_their_readouts() {
+        let mut app = app_on(Screen::Preflight);
+        app.preflight_state = Some(preflight::PreflightTuiState::from_report(
+            &bootc_migrate_core::preflight::PreflightReport {
+                booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
+                booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
+                pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
+                is_uefi: true,
+                nvram_writable: true,
+                esp_path: Some("/boot/efi".into()),
+                esp_free_space_bytes: 386 * 1024 * 1024,
+                esp_fs_type: Some("vfat".into()),
+                esp_detected: true,
+                supports_reflink: true,
+                is_btrfs: true,
+                fs_type: Some("btrfs".into()),
+                ostree_repo_size_bytes: 0,
+                composefs_free_bytes: 40_600_000_000,
+                container_storage_free_bytes: 50 * 1024 * 1024 * 1024,
+                container_storage_path: "/var/lib/containers/storage".into(),
+                var_is_separate_mount: false,
+                esp_ready_for_systemd_boot: true,
+                systemd_boot_binaries_present: true,
+                grub_tools_available: true,
+                sysroot_was_ro: false,
+            },
+        ));
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("0%"), "gauge percentage missing:\n{text}");
+        assert!(
+            text.contains("GB used"),
+            "projected-usage readout missing:\n{text}"
+        );
+    }
+
+    /// Whether a glyph is chrome (borders, bars, block fills) rather than text.
+    /// Chrome is held to the 3:1 non-text floor, everything else to 4.5:1.
+    fn is_chrome(sym: &str) -> bool {
+        sym.chars()
+            .all(|c| matches!(c, '\u{2500}'..='\u{259f}' | '\u{2800}'..='\u{28ff}'))
+    }
+
+    /// Audit what is actually on screen, cell by cell, on every screen.
+    ///
+    /// The palette tests above check the colours we *intend* to pair. This
+    /// checks the ones that end up paired, which is a different thing and is
+    /// how the gauge bug survived: `DANGER`, `SURFACE` and `DARK_BG` were each
+    /// fine, and the defect was a readout drawn `fg(DARK_BG)` over a cell whose
+    /// background the gauge had left at the panel colour. No palette-level
+    /// assertion can see that; this one reads the rendered buffer.
+    #[test]
+    fn no_screen_renders_unreadable_cells() {
+        for screen in [
+            Screen::Welcome,
+            Screen::Preflight,
+            Screen::SelectImage,
+            Screen::ConfigureOptions,
+            Screen::Review,
+            Screen::Running,
+            Screen::Complete,
+            Screen::Failed,
+        ] {
+            let label = format!("{screen:?}");
+            let mut app = app_on(screen);
+            // Give preflight real numbers so the gauges and checklist draw.
+            app.preflight_state = Some(preflight::PreflightTuiState::from_report(
+                &bootc_migrate_core::preflight::PreflightReport {
+                    // No bootc deployment at all — the one genuine blocker,
+                    // so the red checklist path renders too.
+                    booted_backend: None,
+                    booted_image: None,
+                    pending_transaction:
+                        bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
+                    is_uefi: true,
+                    nvram_writable: true,
+                    esp_path: Some("/boot/efi".into()),
+                    esp_free_space_bytes: 386 * 1024 * 1024,
+                    esp_fs_type: Some("vfat".into()),
+                    esp_detected: true,
+                    supports_reflink: true,
+                    is_btrfs: true,
+                    fs_type: Some("btrfs".into()),
+                    // Zero repo size is the case from the bug report: it makes
+                    // every gauge 0%, which is exactly where the readout used
+                    // to disappear.
+                    ostree_repo_size_bytes: 0,
+                    composefs_free_bytes: 40_600_000_000,
+                    container_storage_free_bytes: 50 * 1024 * 1024 * 1024,
+                    container_storage_path: "/var/lib/containers/storage".into(),
+                    var_is_separate_mount: false,
+                    esp_ready_for_systemd_boot: true,
+                    systemd_boot_binaries_present: true,
+                    grub_tools_available: true,
+                    sysroot_was_ro: false,
+                },
+            ));
+            let backend = TestBackend::new(100, 40);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal.draw(|f| render(f, &mut app)).expect("draw");
+            let buf = terminal.backend().buffer();
+
+            let mut worst: Option<(f64, u16, u16, String)> = None;
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let cell = &buf[(x, y)];
+                    let sym = cell.symbol();
+                    if sym.trim().is_empty() {
+                        continue;
+                    }
+                    // The app paints a DARK_BG block over the whole frame, so
+                    // an unset background is that, not the terminal default.
+                    let bg = match cell.bg {
+                        Color::Reset => DARK_BG,
+                        other => other,
+                    };
+                    let fg = match cell.fg {
+                        Color::Reset => TEXT,
+                        other => other,
+                    };
+                    let floor = if is_chrome(sym) { 3.0 } else { 4.5 };
+                    let ratio = contrast(fg, bg);
+                    if ratio < floor && worst.as_ref().is_none_or(|(w, _, _, _)| ratio < *w) {
+                        worst = Some((ratio, x, y, sym.to_string()));
+                    }
+                }
+            }
+            assert!(
+                worst.is_none(),
+                "{label}: cell {:?} at ({}, {}) renders at {:.2}:1 — unreadable",
+                worst.as_ref().map(|w| w.3.clone()),
+                worst.as_ref().map(|w| w.1).unwrap_or(0),
+                worst.as_ref().map(|w| w.2).unwrap_or(0),
+                worst.as_ref().map(|w| w.0).unwrap_or(0.0),
+            );
+        }
     }
 }
