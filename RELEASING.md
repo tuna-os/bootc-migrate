@@ -80,7 +80,11 @@ runs only after both builds succeed, so a failed build leaves no orphan tag
 to clean up — re-running the job is the whole recovery.
 
 Pushing a `v*` tag by hand still works and is the escape hatch for releasing
-a commit that is not the head of `main`.
+a commit that is not the head of `main`. Because that commit did not just
+clear `required-checks`, run `./scripts/verify-release-ready.sh <sha-or-ref>`
+(`just verify-release-ready`) first — it queries the GitHub API for a green
+`CI` and `E2E Migration Tests` run on that exact commit and fails closed if
+either is missing, red, or the API call itself errors.
 
 ### What gates a release
 
