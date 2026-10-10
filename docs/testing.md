@@ -131,10 +131,12 @@ declares `ID_LIKE="rhel fedora"`. Neither the pessimism nor the premise
 survived contact: the existing pair qualifies.
 
 So #187 does not need a dedicated matrix cell. The gating `ostree-rebase`
-cell now asserts, after opting in with `--accept-cross-base`, that the remap
-report actually appears — the cross-base path executing under assertion,
-which is what the issue asks for. `E2E_CROSS_BASE=1` remains available for
-forcing the check on a pair chosen deliberately.
+cell now asserts, after opting in with `--accept-cross-base`, that both the
+remap report and `/etc` conflict policy report appear, that the staged deployment
+and post-reboot deployment preserve `.rebase-old` sidecars, exemptions, and report
+JSONs, and that `/var` ownership is valid — the cross-base path executing under
+full assertion, which is what the issue asks for. `E2E_CROSS_BASE=1` remains
+available for forcing the check on a pair chosen deliberately.
 
 ### Desktop migration (`E2E_DE_MIGRATE=1`) — active on the cross-DE cell
 
