@@ -7,7 +7,7 @@
 
 use crate::rebase_plan::Backend;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -87,7 +87,7 @@ impl BootedStatus {
 /// boot. Running the migration in this state can produce an incomplete
 /// composefs image — objects referenced by the EROFS may be missing or stale,
 /// causing switch-root failure on the next boot.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PendingTransactionStatus {
     /// No pending transaction detected — migration is safe to proceed.
     Clean,
