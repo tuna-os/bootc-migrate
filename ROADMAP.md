@@ -1,7 +1,9 @@
 # Roadmap — from single-purpose migrator to universal bootc re-base engine
 
-Status date: 2026-09-03. Living document; the issue tracker is authoritative
+Status date: 2026-10-11. Living document; the issue tracker is authoritative
 for day-to-day state, this file is authoritative for **shape and sequence**.
+
+**CRITICAL UPDATE (2026-10-11):** Release gate remains unexecuted for 69 days. README quick-start 404s on all documented install paths. See #236 (needs maintainer: release owner + target date).
 
 Caveat on that split, recorded because it has already misled readers: five
 milestone issues are closed as completed while their exit criteria here are
@@ -80,20 +82,18 @@ It allows the proven, renamed migrator to ship while making the newer engine's
 evidence level visible to adopters. After this release, cadence and the
 `bootc-rebase` graduation gate should be tracked separately.
 
-**Status of that gate, 2026-09-03: not started, and the cost is now
-user-visible.** The contract exists (RELEASING.md, #171) and no clause of it
+**Status of that gate, 2026-10-11: STILL NOT STARTED — 69 days stalled.** The contract exists (RELEASING.md, #171) and no clause of it
 has been executed. `Cargo.toml`'s workspace version is `0.5.0`; the newest
-GitHub Release is `v0.2.0` from 2026-07-04, carrying only pre-rename
+GitHub Release is `v0.2.0` from 2026-07-04 (100+ days ago), carrying only pre-rename
 `bootc-migrate-composefs-*` archives. So the README quick start's
 `releases/latest/download/bootc-migrate-x86_64-unknown-linux-gnu.tar.gz`
-returns 404, the same URL under the old asset name returns 200, and
+returns **404**, the same URL under the old asset name returns 200, and
 `ghcr.io/tuna-os/bootc-migrate:latest` refuses anonymous pulls while
 `ghcr.io/tuna-os/bootc-migrate-composefs` still serves them. Both documented
-install paths therefore fail for a new adopter, and the only artifact that
-does resolve is the pre-rename binary the README steers people away from.
+install paths therefore **fail for every new adopter**, and the only artifact that
+does resolve is the pre-rename binary the README tells them not to use.
 
-No release owner and no target date are recorded anywhere, which is the one
-gate clause that blocks all the others. Tracked as #236.
+**No release owner and no target date are recorded anywhere.** This single gate clause blocks all the others. Tracked as #236 (needs-decision: maintainer must name owner + date).
 
 ## Unvalidated paths (single list for release notes)
 
