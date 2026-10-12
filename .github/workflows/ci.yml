@@ -138,7 +138,7 @@ jobs:
     timeout-minutes: 310
     steps:
       - name: Wait for E2E workflow
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             // Wait for the E2E workflow to complete.
