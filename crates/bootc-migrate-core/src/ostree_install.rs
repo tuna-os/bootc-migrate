@@ -763,6 +763,20 @@ impl OstreeInstallConfig<'_> {
             "Report also staged at {} for post-boot inspection",
             carried.display()
         );
+        // A report.json from an earlier composefs run (ImageSwap or
+        // CoreMigration) rode along in the /var copy. `bootc-rebase status`
+        // prefers it over ours, so it would name the old route after the
+        // reboot. Keep it for reference, under a name status does not read.
+        let stale = Path::new(OSTREE_STATEROOT_VAR).join("lib/bootc-migrate/report.json");
+        if stale.exists() {
+            let kept = stale.with_extension("json.before-ostree-install");
+            fs::rename(&stale, &kept)
+                .with_context(|| format!("moving {} to {}", stale.display(), kept.display()))?;
+            println!(
+                "Earlier migration report in the carried /var moved to {}",
+                kept.display()
+            );
+        }
         if rollback_entry {
             println!(
                 "OSTree deployment staged. Reboot to enter it; the composefs deployment stays \
