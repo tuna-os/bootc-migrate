@@ -36,8 +36,8 @@ also when a repair fails.
 
 | Class | Check | Fix |
 |---|---|---|
-| `ownership` | An entry in the identity manifest has a different owner, group or modification time on disk | Set the owner, group and modification time from the manifest. If the change removes setuid or setgid bits, put them back. |
-| `machine-id` | `/etc/machine-id` is the same as the source machine-id | Make `/etc/machine-id` empty. The next boot makes a new ID. This class is active only on the `OstreeInstall` route. The `CoreMigration` merge keeps the machine-id on purpose. |
+| `ownership` | An entry in the identity manifest has a different owner, group or modification time on disk | Set the owner, group and modification time from the manifest. If the change removes setuid or setgid bits, put them back. This class is active only when the route copies `/var`. When the new deployment mounts the live `/var` in place, no manifest is written. |
+| `machine-id` | `/etc/machine-id` is the same as the source machine-id | Make `/etc/machine-id` empty. The next boot makes a new ID. No route arms this class at present: the `CoreMigration` and `OstreeInstall` `/etc` merges keep the machine-id on purpose. |
 | `flatpak` | The owner of a Flatpak installation, or of its `repo`, `app` or `runtime` directory, is not the correct user. For the system installation, the correct owner is root. | Run `flatpak repair --system`, or `flatpak repair --user` as the user. |
 | `selinux-label` | The verify report has a `selinux-label` finding for a path | Run `restorecon -F` on that path only. The command is not recursive. |
 

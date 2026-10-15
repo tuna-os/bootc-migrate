@@ -1178,13 +1178,46 @@ pub fn install_repair_unit(etc_dir: &Path, binary: &Path, config: &RepairConfig)
 /// of the live `/var/home` into `<staged_var>/lib/bootc-migrate`, then
 /// install the unit with the running binary into `etc_dir`.
 ///
+/// `staged_var` is `Some` only when the new deployment gets a copy of
+/// `/var`. When it mounts the live `/var` in place (`None`), no copy can
+/// break ownership, and a staging-time snapshot would revert any edit made
+/// between staging and reboot, so no manifest is recorded (and a stale one
+/// is removed): the ownership class then ends `NotApplicable`.
+///
 /// `machine_id_is_breakage` arms the machine-id class. Routes whose `/etc`
 /// merge keeps the machine-id on purpose (identity preservation in
 /// [`crate::mergetc`]) pass `false`, so the class stays clean there.
-pub fn stage_repair(etc_dir: &Path, staged_var: &Path, machine_id_is_breakage: bool) -> Result<()> {
-    let manifest = staged_var.join(STATE_DIR_REL).join(IDENTITY_MANIFEST);
-    let n = write_identity_manifest(Path::new("/var"), &manifest)
-        .context("failed to record the /var/home identity manifest")?;
+pub fn stage_repair(
+    etc_dir: &Path,
+    staged_var: Option<&Path>,
+    machine_id_is_breakage: bool,
+) -> Result<()> {
+    let recorded = match staged_var {
+        Some(staged_var) => {
+            let manifest = staged_var.join(STATE_DIR_REL).join(IDENTITY_MANIFEST);
+            let n = write_identity_manifest(Path::new("/var"), &manifest)
+                .context("failed to record the /var/home identity manifest")?;
+            format!("{n} /var/home identity record(s) in {}", manifest.display())
+        }
+        None => {
+            let stale = Path::new("/var")
+                .join(STATE_DIR_REL)
+                .join(IDENTITY_MANIFEST);
+            match std::fs::remove_file(&stale) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "failed to remove stale identity manifest {}",
+                            stale.display()
+                        )
+                    });
+                }
+            }
+            "/var is shared in place, ownership check not armed".to_string()
+        }
+    };
     let binary = std::env::current_exe().context("failed to locate the running binary")?;
     let config = RepairConfig {
         source_machine_id: if machine_id_is_breakage {
@@ -1198,9 +1231,8 @@ pub fn stage_repair(etc_dir: &Path, staged_var: &Path, machine_id_is_breakage: b
     install_repair_unit(etc_dir, &binary, &config)
         .context("failed to stage the first-boot repair unit")?;
     println!(
-        "[firstboot] repair staged: {n} /var/home identity record(s) in {}; \
-         opt out with 'repair --disable' or the kernel argument {CMDLINE_DISABLE}",
-        manifest.display()
+        "[firstboot] repair staged: {recorded}; \
+         opt out with 'repair --disable' or the kernel argument {CMDLINE_DISABLE}"
     );
     Ok(())
 }

@@ -135,12 +135,13 @@ pub fn phase4_stage_deploy(
     }
 
     // First-boot repair (L3, #309): record the live /var/home identity
-    // next to the /var the new deployment mounts, and arm the unit.
+    // next to the /var copy the new deployment mounts, and arm the unit.
+    // An in-place /var is the live one: nothing to compare against.
     let staged_var = match var_staging {
         VarStaging::Copied | VarStaging::PreviouslyCopied => {
-            std::path::Path::new(deploy_layout::STATEROOT_VAR)
+            Some(std::path::Path::new(deploy_layout::STATEROOT_VAR))
         }
-        VarStaging::InPlace => std::path::Path::new("/var"),
+        VarStaging::InPlace => None,
     };
     // The /etc merge keeps the machine-id here on purpose: not breakage.
     crate::firstboot_repair::stage_repair(&layout.etc_dir, staged_var, false)?;
