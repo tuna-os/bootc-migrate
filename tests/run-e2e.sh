@@ -2510,9 +2510,11 @@ rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 CFS_POSTMERGEFIX
 
 # #309: post-stage, pre-reboot sabotage. Break the canary tree in the /var
-# the new deployment mounts (the stateroot copy, or the live /var when it
-# stays in place), the way #308's identity-dropping copy did: root-owned,
-# fresh mtimes. The first-boot repair must restore it from the manifest.
+# copy the new deployment mounts, the way #308's identity-dropping copy did:
+# root-owned, fresh mtimes. The first-boot repair must restore it from the
+# manifest. When /var stays in place (a dedicated /var filesystem), the new
+# deployment mounts the live /var: no copy can break it and no manifest is
+# recorded, so the ownership class must stay unarmed and leave later edits.
 step "=== first-boot repair: sabotaging the canary tree (#309) ==="
 ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
 set -e
@@ -2524,6 +2526,14 @@ DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
 test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
 test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
 test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
+if [ "$V" = /var ]; then
+    test ! -e /var/lib/bootc-migrate/identity-manifest.tsv || { echo "FAIL: identity manifest recorded for an in-place /var"; exit 1; }
+    # Same filesystem after the reboot: tells the assertion which case ran.
+    mkdir -p /var/lib/bootc-migrate
+    touch /var/lib/bootc-migrate/e2e-repair-var-in-place
+    echo "in-place /var: ownership class not armed; canary left untouched"
+    exit 0
+fi
 grep -q "repair-canary/file" "$V/lib/bootc-migrate/identity-manifest.tsv" || { echo "FAIL: canary missing from $V/lib/bootc-migrate/identity-manifest.tsv"; exit 1; }
 chown -R root:root "$V/$CANARY_REL"
 touch "$V/$CANARY_REL/file" "$V/$CANARY_REL/sub/nested"
@@ -2663,15 +2673,20 @@ STATE=/var/lib/bootc-migrate
 journalctl -b -u bootc-migrate-repair-firstboot.service --no-pager | tail -20 || true
 test -f "$STATE/repair-log.json" || { echo "FAIL: no repair log at $STATE/repair-log.json"; exit 1; }
 echo "repair-result: $(cat "$STATE/repair-result")"
-grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "repaired"' || {
-    echo "FAIL: repair log does not show the ownership class repaired"; cat "$STATE/repair-log.json"; exit 1; }
+if [ -e "$STATE/e2e-repair-var-in-place" ]; then
+    grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "not-applicable"' || {
+        echo "FAIL: ownership class ran against an in-place /var"; cat "$STATE/repair-log.json"; exit 1; }
+else
+    grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "repaired"' || {
+        echo "FAIL: repair log does not show the ownership class repaired"; cat "$STATE/repair-log.json"; exit 1; }
+fi
 for f in file sub/nested sub; do
     got=$(stat -c '%U:%G %Y' "/var/home/realuser/repair-canary/$f")
     [ "$got" = "realuser:realuser 1600000000" ] || { echo "FAIL: canary $f is '$got', expected 'realuser:realuser 1600000000'"; exit 1; }
 done
 test ! -e /etc/bootc-migrate/repair-firstboot || { echo "FAIL: repair marker still armed after first boot"; exit 1; }
 test ! -e /etc/bootc-migrate/bootc-migrate-repair || { echo "FAIL: staged repair binary not removed"; exit 1; }
-echo "OK: canary owner and mtime restored by the first-boot repair."
+echo "OK: canary owner and mtime are as recorded after the first-boot repair."
 REPAIR_ASSERT
 
 # #256: the whole point — the migrated system is the target's family.
