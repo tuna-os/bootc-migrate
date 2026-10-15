@@ -26,6 +26,29 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Package host readiness report (#372): `bootc-rebase --dry-run` on a
+  package-managed system checks boot mode, root filesystem, LUKS and LVM,
+  the btrfs subvolume layout, `/boot` and `/home`, free space against the
+  target image's size, running package managers and SELinux. It prints a
+  reason for each refusal, then the hardware report.
+- `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
+  database, no ostree or composefs state) as `Backend::Package` and plans
+  the `package -> ostree` route (`PackageInstall`, not implemented yet).
+  `--target-backend` now defaults to `auto`: composefs from a bootc
+  deployment, as before, and ostree from a package host (#371, part of #370).
+- Hardware and firmware check before every migration, on every route of
+  `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
+  compares the devices that work today, the out-of-tree drivers in use
+  (NVIDIA, VirtualBox, ZFS), their firmware and the CPU microcode with the
+  target image's kernel and `/usr/lib/firmware`. It refuses when a storage,
+  display, network, wireless or USB controller would lose its driver or
+  firmware, unless you add `--accept-hardware-gaps`. A display controller
+  only gets a warning when the target kernel has a firmware framebuffer
+  driver (`simpledrm`, `efifb`). The registry scan
+  collects the target data in its single pass over the layers. Within a run,
+  the tool caches the scan, so it no longer downloads the image once for each
+  check.
+
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start
@@ -84,6 +107,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
+
+- The migration stops when it cannot rebuild the composefs initrd for an XFS
+  root. The stock target initrd has no xfs driver, so the old warning let the
+  migration make an entry the default that then failed `sysroot.mount` and
+  dropped to the emergency shell. dracut ran out of space under `/var/tmp`
+  in the LUKS E2E cell after `dakota:stable` grew. The error now stops Phase
+  5 before it writes the boot entry or `loader.conf`, so the system still
+  boots its current deployment. A rebuild that only adds LVM/DM/crypt is
+  still a warning, because the stock initrd assembles those roots.
 
 - `bootc-rebase`'s cross-base gate now says when it has checked a pair and
   found one OS lineage. Before, that pass printed nothing, so it looked

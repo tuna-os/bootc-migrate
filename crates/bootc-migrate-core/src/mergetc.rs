@@ -1364,6 +1364,65 @@ mod tests {
     }
 
     #[test]
+    fn merge_keeps_vendor_files_only_the_target_ships() {
+        // The dakota:stable push of 2026-10-08: three /etc paths the source
+        // never had, one of them a .wants symlink. Each must reach the
+        // merged /etc whether or not the source carries a similarly named
+        // unit of its own.
+        let dir = tempdir().unwrap();
+        let (old, cur, new, out) = (
+            dir.path().join("old"),
+            dir.path().join("cur"),
+            dir.path().join("new"),
+            dir.path().join("out"),
+        );
+        let wants = "systemd/system/timers.target.wants";
+        for root in [&old, &cur, &new] {
+            fs::create_dir_all(root.join(wants)).unwrap();
+            fs::create_dir_all(root.join("security")).unwrap();
+            fs::write(root.join("security/pwquality.conf"), b"x").unwrap();
+        }
+        let src_timer = "/usr/lib/systemd/system/bluefin-countme.timer";
+        std::os::unix::fs::symlink(src_timer, cur.join(wants).join("bluefin-countme.timer"))
+            .unwrap();
+        let vendor_timer = "/usr/lib/systemd/system/projectbluefin-countme.timer";
+        std::os::unix::fs::symlink(
+            vendor_timer,
+            new.join(wants).join("projectbluefin-countme.timer"),
+        )
+        .unwrap();
+        fs::create_dir_all(new.join("ld.so.conf.d")).unwrap();
+        fs::write(
+            new.join("ld.so.conf.d/intel-vaapi-driver.conf"),
+            b"/usr/lib64/x\n",
+        )
+        .unwrap();
+        fs::create_dir_all(new.join("security/pwquality.conf.d")).unwrap();
+        fs::write(
+            new.join("security/pwquality.conf.d/10-pwquality.conf"),
+            b"minlen = 8\n",
+        )
+        .unwrap();
+
+        merge_etc_files(&old, &cur, &new, &out).unwrap();
+
+        assert_eq!(
+            fs::read_link(out.join(wants).join("projectbluefin-countme.timer")).unwrap(),
+            Path::new(vendor_timer)
+        );
+        assert_eq!(
+            fs::read_link(out.join(wants).join("bluefin-countme.timer")).unwrap(),
+            Path::new(src_timer),
+            "the source's own unit link is user state and is kept too"
+        );
+        assert!(out.join("ld.so.conf.d/intel-vaapi-driver.conf").is_file());
+        assert!(
+            out.join("security/pwquality.conf.d/10-pwquality.conf")
+                .is_file()
+        );
+    }
+
+    #[test]
     fn merge_etc_files_integration() {
         let dir = tempdir().unwrap();
         let old = dir.path().join("old");

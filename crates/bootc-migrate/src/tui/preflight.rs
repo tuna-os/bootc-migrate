@@ -91,6 +91,10 @@ impl PreflightTuiState {
                 "Booted bootc backend: composefs — will swap image".to_string(),
                 Readiness::Pass,
             ),
+            Some(Backend::Package) => (
+                "Booted bootc backend: none (package-managed host, not supported yet)".to_string(),
+                Readiness::Fail,
+            ),
             None => ("Booted bootc backend: none".to_string(), Readiness::Fail),
         });
 
