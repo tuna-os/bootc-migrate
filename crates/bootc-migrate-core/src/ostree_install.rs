@@ -190,6 +190,12 @@ fn esp_fs_uuid(esp_mountpoint: &str) -> Option<String> {
     if uuid.is_empty() { None } else { Some(uuid) }
 }
 
+/// The fstab line that mounts the ESP at `/boot/efi`. `nofail`: a missing
+/// or renamed ESP must not stop the boot; only bootloader updates need it.
+fn esp_fstab_line(uuid: &str) -> String {
+    format!("UUID={uuid} /boot/efi vfat umask=0077,shortname=winnt,nofail 0 2\n")
+}
+
 /// Guarantee the deployed /etc/fstab mounts the ESP at /boot/efi. bootc's
 /// alongside install does not always write one — this host booted with no
 /// fstab at all — and without it the ESP never mounts: bootupd cannot stage
@@ -208,9 +214,7 @@ fn ensure_esp_fstab_entry(deploy_root: &Path, esp_mountpoint: &str) -> Result<()
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!(
-        "UUID={uuid} /boot/efi vfat umask=0077,shortname=winnt 0 2\n"
-    ));
+    out.push_str(&esp_fstab_line(&uuid));
     fs::write(&fstab, out).with_context(|| format!("writing {}", fstab.display()))?;
     println!(
         "[etc] added ESP mount to the deployed fstab ({})",
@@ -1885,6 +1889,20 @@ mod tests {
             "/boot/efi"
         ));
         assert!(!fstab_has_mount("", "/boot/efi"));
+    }
+
+    /// The ESP line must not block boot when the ESP is missing, and must
+    /// still be found by `fstab_has_mount` so a re-run does not append twice.
+    #[test]
+    fn esp_fstab_line_is_nofail() {
+        let line = esp_fstab_line("ABCD-1234");
+        assert_eq!(
+            line,
+            "UUID=ABCD-1234 /boot/efi vfat umask=0077,shortname=winnt,nofail 0 2\n"
+        );
+        let options = line.split_whitespace().nth(3).unwrap();
+        assert!(options.split(',').any(|o| o == "nofail"), "{line}");
+        assert!(fstab_has_mount(&line, "/boot/efi"));
     }
 
     #[test]
