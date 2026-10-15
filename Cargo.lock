@@ -212,7 +212,7 @@ name = "bootc-migrate-core"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "composefs 0.7.0",
+ "composefs",
  "composefs-oci",
  "rustix",
  "serde",
@@ -442,38 +442,12 @@ dependencies = [
 
 [[package]]
 name = "composefs"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b28fc8e1dc7429f1b73a0e06c5e07ded934db0a62940bf4cd0ebc9bebbe23cb0"
-dependencies = [
- "anyhow",
- "composefs-ioctls 0.7.0",
- "fn-error-context",
- "hex",
- "log",
- "once_cell",
- "rand 0.10.2",
- "rustix",
- "serde",
- "serde_json",
- "serde_repr",
- "sha2 0.11.0",
- "thiserror",
- "tokio",
- "tokio-stream",
- "xxhash-rust",
- "zerocopy",
- "zstd 0.13.3",
-]
-
-[[package]]
-name = "composefs"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7678ceb9ed3a1cd466aac8cae1d055d77336c7698fc3d7c8b8cbc5a3a3d33e42"
 dependencies = [
  "anyhow",
- "composefs-ioctls 0.9.4",
+ "composefs-ioctls",
  "fn-error-context",
  "hex",
  "log",
@@ -491,16 +465,6 @@ dependencies = [
  "zerocopy",
  "zlink-core",
  "zstd 0.14.2",
-]
-
-[[package]]
-name = "composefs-ioctls"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d53dc9a55dbef2a5d00e7468dab29b9f30aa6f6afccd2fda4f7d192c161b528"
-dependencies = [
- "rustix",
- "thiserror",
 ]
 
 [[package]]
@@ -524,7 +488,7 @@ dependencies = [
  "base64",
  "bytes",
  "cap-std-ext",
- "composefs 0.9.4",
+ "composefs",
  "composefs-splitdirfdstream",
  "composefs-storage",
  "containers-image-proxy",
