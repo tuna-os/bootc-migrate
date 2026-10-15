@@ -140,9 +140,10 @@ no package manager, GNOME) → Utah (ostree, GRUB via bootupd, GNOME).
 | DE (GNOME → GNOME) | same-DE path, proven on other routes only |
 
 Real-host evidence (2026-09-29/30) does not change the tags above. Only
-a green `main` run can change them. The route staged with exit 0 on a
-developer laptop (Dakota composefs/systemd-boot/btrfs-on-LUKS →
-Utah:testing), and the host booted Utah. Two manual steps were necessary,
+a green `main` run can change them. On a developer laptop, the route
+staged with exit 0 and the host booted Utah. The source was Dakota
+(composefs, systemd-boot, btrfs-on-LUKS). The target was `utah:testing`.
+Two manual steps were necessary,
 and issues track both:
 
 - GRUB cannot unlock the LUKS root. The boot used a manual ESP kernel and
