@@ -54,6 +54,7 @@ pub mod scan;
 pub mod selinux;
 pub mod source_host;
 pub mod steam_flatpak;
+pub mod sysroot;
 pub mod transaction;
 pub mod types;
 pub mod xattr;
