@@ -725,7 +725,7 @@ echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.con
 # This ensures the ComposeFS 3-way merge treats it as a user-created file and
 # preserves it across migration.
 ETC_SYSTEMD="$STATEROOT_VAR/etc/systemd/system"
-sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants"
+sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants" "$ETC_SYSTEMD/emergency.target.wants" "$ETC_SYSTEMD/rescue.target.wants"
 sudo tee "$ETC_SYSTEMD/e2e-sshd.socket" >/dev/null <<'SOCKETEOF'
 [Unit]
 Description=E2E SSH TCP Socket (port 22)
@@ -744,6 +744,26 @@ StandardInput=socket
 SERVICEEOF
 sudo ln -sf ../e2e-sshd.socket \
     "$ETC_SYSTEMD/sockets.target.wants/e2e-sshd.socket"
+
+# #266: Inject emergency console diagnostic dump service so any initrd/early-boot
+# failure (e.g. sysroot.mount) prints its status and journal to serial console.
+sudo tee "$ETC_SYSTEMD/emergency-dump.service" >/dev/null <<'DUMPEOF'
+[Unit]
+Description=E2E Emergency Diagnostic Dump
+DefaultDependencies=no
+Before=emergency.service rescue.service dracut-emergency.service
+
+[Service]
+Type=oneshot
+ExecStart=-/bin/sh -c 'echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=emergency.target rescue.target
+DUMPEOF
+sudo ln -sf ../emergency-dump.service "$ETC_SYSTEMD/emergency.target.wants/emergency-dump.service"
+sudo ln -sf ../emergency-dump.service "$ETC_SYSTEMD/rescue.target.wants/emergency-dump.service"
 
 # /var state-preservation fixtures are created live over SSH on the booted
 # source system (see the ETCFIX block below), not pre-staged here: bootc/ostree
@@ -1734,12 +1754,16 @@ REVDIAG
 set -e
 DEPLOY_ETC=$(ls -d /sysroot/ostree/deploy/default/deploy/*.0 | head -1)/etc
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: deployment etc dir not found"; exit 1; }
-mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
 printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'ListenStream=22' 'Accept=yes' '[Install]' 'WantedBy=sockets.target' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
 printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+printf '%s\n' '[Unit]' 'Description=E2E Emergency Diagnostic Dump' 'DefaultDependencies=no' 'Before=emergency.service rescue.service dracut-emergency.service' '' '[Service]' 'Type=oneshot' 'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' 'StandardOutput=journal+console' 'StandardError=journal+console' '' '[Install]' 'WantedBy=emergency.target rescue.target' \
+    > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
+ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
+ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
 echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
@@ -1965,7 +1989,7 @@ SWAPDIAG
     # deployment's /etc, post-merge, pre-reboot, and mask firewalld (the
     # base image build disabled it; the target's preset may enable it).
     step "=== image-swap: re-injecting e2e-sshd into the staged deployment ==="
-    ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' bash -s" <<'SWAPSSH'
+    ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' E2E_CONSOLE_JOURNAL='$E2E_CONSOLE_JOURNAL' bash -s" <<'SWAPSSH'
 set -e
 STAGED=""
 for d in /sysroot/state/deploy/*/; do
@@ -1976,16 +2000,31 @@ done
 [ -n "$STAGED" ] || { echo "FAIL: no staged deployment beside $BASE_VERITY under /sysroot/state/deploy"; exit 1; }
 DEPLOY_ETC="$STAGED/etc"
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: $DEPLOY_ETC not found"; exit 1; }
-mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
 printf '%s\n' '[Unit]' 'Description=E2E SSH TCP Socket (port 22)' '[Socket]' 'ListenStream=22' 'Accept=yes' '[Install]' 'WantedBy=sockets.target' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd.socket"
 printf '%s\n' '[Unit]' 'Description=E2E SSH per-connection service' '[Service]' 'ExecStart=-/usr/sbin/sshd -i' 'StandardInput=socket' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+printf '%s\n' '[Unit]' 'Description=E2E Emergency Diagnostic Dump' 'DefaultDependencies=no' 'Before=emergency.service rescue.service dracut-emergency.service' '' '[Service]' 'Type=oneshot' 'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' 'StandardOutput=journal+console' 'StandardError=journal+console' '' '[Install]' 'WantedBy=emergency.target rescue.target' \
+    > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
+ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
+ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 ln -sf /dev/null "$DEPLOY_ETC/systemd/system/firewalld.service"
 mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
 echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
+# The target boots a UKI whose command line the BLS patching above cannot
+# reach, so systemd.journald.forward_to_console never applies here (#383).
+# A journald drop-in in the staged /etc does the same: the first boot's
+# journal (the first-boot unit, gdm, sshd) then lands in qemu.log.
+JOURNAL_DROPIN=""
+if [ "${E2E_CONSOLE_JOURNAL:-0}" = "1" ]; then
+    mkdir -p "$DEPLOY_ETC/systemd/journald.conf.d"
+    JOURNAL_DROPIN="$DEPLOY_ETC/systemd/journald.conf.d/90-e2e-console.conf"
+    printf '%s\n' '[Journal]' 'ForwardToConsole=yes' 'TTYPath=/dev/ttyS0' 'MaxLevelConsole=info' > "$JOURNAL_DROPIN"
+    echo "forwarding the first boot's journal to ttyS0"
+fi
 # The target may boot with SELinux enforcing while the composefs host has
 # no policy of its own to label these files with. Write the two contexts
 # the target's policy gives them directly (unit files and an sshd drop-in);
@@ -2001,10 +2040,16 @@ if grep -qE '^SELINUX=(enforcing|permissive)' "$DEPLOY_ETC/selinux/config" 2>/de
     }
     U=system_u:object_r:systemd_unit_file_t:s0
     label "$U" "$DEPLOY_ETC/systemd/system/e2e-sshd.socket" "$DEPLOY_ETC/systemd/system/e2e-sshd@.service" \
+        "$DEPLOY_ETC/systemd/system/emergency-dump.service" \
         "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket" \
+        "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants" \
         "$DEPLOY_ETC/systemd/system/firewalld.service"
     label system_u:object_r:etc_t:s0 "$DEPLOY_ETC/ssh/sshd_config.d" "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf" \
         || { echo "FAIL: could not label the injected sshd files"; exit 1; }
+    if [ -n "$JOURNAL_DROPIN" ]; then
+        label system_u:object_r:etc_t:s0 "$(dirname "$JOURNAL_DROPIN")" "$JOURNAL_DROPIN" \
+            || { echo "FAIL: could not label the journald drop-in"; exit 1; }
+    fi
     echo "labelled the injected units for the target's SELinux policy"
 else
     echo "target does not enable SELinux; injected units left unlabelled"
@@ -2269,9 +2314,9 @@ fi
 # toggled on — the exact configuration of the CLI invocation), so the
 # `[migrate]` stream carries the driver's screen-by-screen progress.
 if [ "$E2E_MODE" = "tui-migrate" ]; then
-    MIGRATE_CMD="python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt --record /var/tmp/tui-migrate.cast --snapshot-dir /var/tmp/tui-snapshots"
+    MIGRATE_CMD="CI=true python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt --record /var/tmp/tui-migrate.cast --snapshot-dir /var/tmp/tui-snapshots"
 else
-    MIGRATE_CMD="/var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
+    MIGRATE_CMD="CI=true /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
 fi
 
 # #256: the gate must REFUSE a cross-family target without an explicit
@@ -2414,7 +2459,7 @@ set -e
 DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found (/sysroot/state/deploy/*/etc)"; exit 1; }
 
-mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants"
+mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
 printf '%s\n' \
     '[Unit]' \
     'Description=E2E SSH TCP Socket (port 22)' \
@@ -2432,6 +2477,24 @@ printf '%s\n' \
     'StandardInput=socket' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
+
+printf '%s\n' \
+    '[Unit]' \
+    'Description=E2E Emergency Diagnostic Dump' \
+    'DefaultDependencies=no' \
+    'Before=emergency.service rescue.service dracut-emergency.service' \
+    '' \
+    '[Service]' \
+    'Type=oneshot' \
+    'ExecStart=-/bin/sh -c '\''echo "=== SYSTEMD EMERGENCY DIAGNOSTIC DUMP ===" > /dev/console; systemctl status sysroot.mount --no-pager > /dev/console 2>&1 || true; systemctl --failed --no-pager > /dev/console 2>&1 || true; journalctl -b --no-pager | tail -100 > /dev/console 2>&1 || true'\''' \
+    'StandardOutput=journal+console' \
+    'StandardError=journal+console' \
+    '' \
+    '[Install]' \
+    'WantedBy=emergency.target rescue.target' \
+    > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
+ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
+ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
 
 # Belt and suspenders: having both sshd.service (sshd -D) and e2e-sshd.socket
 # bound to port 22 kills the daemon with 255/EXCEPTION.
@@ -2963,19 +3026,37 @@ step "=== Running OSTree rollback test ==="
 
 wait_for_ssh_with_msg() {
     local label="$1"
-    local max="$2"
+    local max="${2:-180}"
+    local tag="${3:-vm-reboot}"
     local start=$SECONDS
 
+    vm_tail "$tag" &
+    local tail_pid=$!
+
     local i=1
-    while [ $i -le "$max" ]; do
+    while [ $((SECONDS - start)) -le "$max" ]; do
         if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
             step "$label after $((SECONDS - start))s."
+            kill "$tail_pid" 2>/dev/null || true
             return 0
+        fi
+        if [ $((i % 5)) -eq 0 ]; then
+            step "still waiting for $label ($((SECONDS - start))s elapsed, max ${max}s)"
         fi
         sleep 3
         i=$((i + 1))
     done
+    kill "$tail_pid" 2>/dev/null || true
     echo "ERROR: $label timeout ($((SECONDS - start))s)" >&2
+    step "=== Post-reboot failure diagnostics ($label) ==="
+    echo "--- All FAILED/DEPEND lines ---"
+    serial_failure_lines | tail -80 || true
+    echo ""
+    echo "--- mount/overlay/emergency lines ---"
+    grep -iE 'mount|overlay|composefs|erofs|subvol|fstab|sysroot|dracut|emergency' qemu.log | tail -40 || true
+    echo ""
+    echo "--- Last 150 lines of full QEMU log ---"
+    tail -150 qemu.log
     return 1
 }
 
@@ -2998,9 +3079,8 @@ step "rollback: reordering BootOrder to $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM (was $OR
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM >/dev/null && systemctl reboot" || true
 
 sleep 3
-wait_for_ssh_with_msg "OSTree rollback boot SSH" 120 || {
+wait_for_ssh_with_msg "OSTree rollback boot SSH" 360 "vm-rollback" || {
     echo "FAIL: SSH did not answer after the OSTree rollback boot"
-    tail -100 qemu.log
     exit 1
 }
 
@@ -3023,13 +3103,25 @@ if [ -z "$WP_AFTER_ROLLBACK" ] || [ "$WP_AFTER_ROLLBACK" = "0" ]; then
 fi
 echo "OK: Bluefin /var preserved through rollback ($WP_AFTER_ROLLBACK bytes)."
 
+# #266: Inspect base system state on rollback before return trip
+step "rollback: inspecting OSTree base system state before return trip (#266)"
+ssh $SSH_OPTS root@localhost bash <<'ROLLBACK_DIAG'
+set +e
+echo "--- mounts during rollback boot ---"
+findmnt /sysroot /ostree /boot /var 2>&1
+echo "--- /sysroot/state status ---"
+ls -la /sysroot/state/ 2>&1
+ls -la /sysroot/state/deploy/ 2>&1
+echo "--- bootc/bootupd status on rollback ---"
+systemctl status bootc-unified-storage.service bootloader-update.service --no-pager 2>&1 | head -30
+ROLLBACK_DIAG
+
 # Restore the original BootOrder (systemd-boot first) before rebooting back.
 step "rollback: restoring BootOrder to $ORIG_BOOTORDER and returning to composefs"
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $ORIG_BOOTORDER >/dev/null && systemctl reboot" || true
 sleep 3
-wait_for_ssh_with_msg "Return-to-composefs SSH" 60 || {
+wait_for_ssh_with_msg "Return-to-composefs SSH" 300 "vm-return-cfs" || {
     echo "FAIL: SSH did not answer after the return-to-composefs reboot"
-    tail -100 qemu.log
     exit 1
 }
 

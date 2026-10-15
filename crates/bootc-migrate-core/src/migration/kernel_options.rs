@@ -92,10 +92,15 @@ pub fn get_kernel_options(composefs_digest: &str) -> Result<String> {
 /// environment (which would require `unsafe` in Rust 2024).
 fn ci_debug_kernel_args(ci: bool) -> Vec<String> {
     if ci {
+        // No systemd.log_level=debug: on the CI VM's 115200-baud serial
+        // console its output stalled the dakota -> utah image-swap boot
+        // (no SSH within 300 s, serial capture stopped ~6 s in; run
+        // 36977304344). The journal forwarded to the console is enough.
         vec![
-            "systemd.log_level=debug".into(),
             "systemd.log_target=console".into(),
             "systemd.journald.forward_to_console=1".into(),
+            "plymouth.enable=0".into(),
+            "systemd.show_status=1".into(),
         ]
     } else {
         vec![]
@@ -382,14 +387,16 @@ mod tests {
             let args = super::ci_debug_kernel_args(ci);
             if expect_debug {
                 assert!(
-                    args.iter().any(|a| a == "systemd.log_level=debug"),
-                    "ci={ci}: expected debug args, got {args:?}"
+                    !args.iter().any(|a| a.starts_with("systemd.log_level=")),
+                    "ci={ci}: debug log level floods the serial console: {args:?}"
                 );
                 assert!(args.iter().any(|a| a == "systemd.log_target=console"));
                 assert!(
                     args.iter()
                         .any(|a| a == "systemd.journald.forward_to_console=1")
                 );
+                assert!(args.iter().any(|a| a == "plymouth.enable=0"));
+                assert!(args.iter().any(|a| a == "systemd.show_status=1"));
             } else {
                 assert!(
                     args.is_empty(),

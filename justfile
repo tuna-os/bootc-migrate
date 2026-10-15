@@ -105,7 +105,7 @@ e2e-image-swap: build test
       DISK_SIZE="40G" \
       FILESYSTEM="btrfs" \
       E2E_MODE="image-swap" \
-      E2E_EXPECT_OS_ID="utah" \
+      E2E_EXPECT_OS_ID="hummingbird" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-image-swap.log
 
 e2e-debug: build
