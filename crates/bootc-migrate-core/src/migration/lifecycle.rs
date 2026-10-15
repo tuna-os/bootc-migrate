@@ -133,9 +133,16 @@ fn acquire_lock_at(path: &Path) -> Result<RunLock> {
     Ok(RunLock { file: lock })
 }
 
-/// A held run lock. Dropping it clears the holder record and closes the
-/// fd, which releases the `flock`; a killed holder skips the clear, and the
-/// next run reports the record it reclaims.
+/// A held run lock. Dropping it clears the holder record and releases the
+/// `flock` explicitly; a killed holder skips the clear, and the next run
+/// reports the record it reclaims.
+///
+/// Closing the fd alone does not release the lock at once. A `flock`
+/// belongs to the open file description, and a child that another thread
+/// is spawning holds a copy of every fd from its fork until its `exec`
+/// succeeds (`O_CLOEXEC` closes the copy only then). During that window
+/// the description, and so the lock, outlives our close. `LOCK_UN`
+/// releases the description's lock whatever copies still exist.
 #[derive(Debug)]
 pub(crate) struct RunLock {
     file: File,
@@ -144,6 +151,7 @@ pub(crate) struct RunLock {
 impl Drop for RunLock {
     fn drop(&mut self) {
         let _ = self.file.set_len(0);
+        let _ = flock(&self.file, FlockOperation::Unlock);
     }
 }
 
@@ -305,6 +313,29 @@ mod tests {
         drop(held);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         acquire_lock_at(&path).unwrap();
+    }
+
+    /// Releasing the lock must not depend on every copy of its fd being
+    /// closed. A child spawned by another thread holds such a copy until it
+    /// execs; here a child keeps one as its stdin for its whole life, and
+    /// the next acquisition must still succeed once the lock is dropped.
+    #[test]
+    fn release_frees_lock_while_a_child_holds_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.lock");
+        let held = acquire_lock_at(&path).unwrap();
+        let copy = held.file.try_clone().unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::from(copy))
+            .spawn()
+            .unwrap();
+
+        drop(held);
+        let reacquired = acquire_lock_at(&path);
+        let _ = child.kill();
+        let _ = child.wait();
+        reacquired.unwrap();
     }
 
     /// A record left by a killed run, with no fd holding the lock, must not
