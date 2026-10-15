@@ -1459,6 +1459,8 @@ mod tests {
             etc_transient: false,
             initramfs_has_composefs_module: false,
             filesystem_expectation: None,
+            kernel_version: None,
+            kernel: None,
         }
     }
 

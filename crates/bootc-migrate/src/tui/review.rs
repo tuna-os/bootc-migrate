@@ -96,7 +96,7 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let (btn_label, btn_bg) = if app.opt_dry_run {
         ("  ▶ Run Dry-Run     ", TEAL)
     } else {
-        ("  ⚡ Run Migration   ", Color::Rgb(40, 180, 70))
+        ("Type CONFIRM + Enter", Color::Rgb(40, 180, 70))
     };
     let btn = Paragraph::new(Line::from(Span::styled(
         btn_label,
@@ -107,15 +107,46 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     )))
     .alignment(Alignment::Center);
     f.render_widget(btn, btn_layout[1]);
+    if !app.opt_dry_run {
+        let typed = Paragraph::new(format!("Confirmation: {}", app.confirmation))
+            .style(Style::default().fg(AMBER));
+        f.render_widget(typed, btn_layout[2]);
+    }
 }
 
 fn build_review_summary(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let img = app.selected_image();
     lines.push(Line::from(Span::styled(
-        format!("  • Migrate to image: {img}"),
+        format!("  • Target image: {img}"),
         Style::default().fg(TEXT),
     )));
+    if app.is_image_swap() {
+        lines.push(Line::from(Span::styled(
+            if app.opt_dry_run {
+                "  • Preview the bootc switch to the new ComposeFS image"
+            } else {
+                "  • bootc switch will stage the new ComposeFS deployment"
+            },
+            Style::default().fg(TEXT),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  • Reboot after a live run; the previous deployment remains available",
+            Style::default().fg(TEXT),
+        )));
+        return lines;
+    }
+    if app.selected_choice().is_some_and(|c| c.backend == "ostree") {
+        lines.push(Line::from(Span::styled(
+            "  • Stage an OSTree deployment with bootc-rebase",
+            Style::default().fg(TEXT),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  • A cross-base rebase may require an additional UID/GID review",
+            Style::default().fg(AMBER),
+        )));
+        return lines;
+    }
     if app.opt_skip_import {
         lines.push(Line::from(Span::styled(
             "  • Phase 1 OSTree import will be skipped",
