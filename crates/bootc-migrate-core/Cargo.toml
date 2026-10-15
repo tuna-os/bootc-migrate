@@ -16,8 +16,8 @@ sha2.workspace = true
 rustix.workspace = true
 tempfile.workspace = true
 tini.workspace = true
-composefs = { version = "0.7", optional = true }
-composefs-oci = { version = "0.7", optional = true }
+composefs = { version = "0.9", optional = true }
+composefs-oci = { version = "0.9", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
 [lints]

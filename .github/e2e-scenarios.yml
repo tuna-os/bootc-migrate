@@ -148,6 +148,27 @@
   mode: composefs-to-ostree
   disk_size: 40G
   allow_failure: true
+- name: "dakota -> utah (composefs -> ostree, OstreeInstall)"
+  # #302: the pair a Dakota user migrates to. Utah (Bluefin on
+  # Fedora Hummingbird) ships bootupd and GRUB, and its initramfs
+  # has no composefs module, so OstreeInstall is its route. Same
+  # assertions as the fedora-bootc cell above (route, fixtures,
+  # GRUB first in BootOrder, "Linux Boot Manager" kept as
+  # rollback), plus the booted os-release ID and Utah's display
+  # manager. utah publishes only :testing (pre-alpha), about
+  # 2.3 GB in 128 layers, so this cell is non-gating.
+  base: ghcr.io/projectbluefin/dakota:stable
+  target: ghcr.io/projectbluefin/utah:testing
+  mode: composefs-to-ostree
+  # 40G ran out during the /var copy into the OSTree stateroot: the
+  # disk holds the Dakota composefs store, the pulled utah image in
+  # /var/lib/containers, the new OSTree deployment and a second /var.
+  disk_size: 80G
+  # utah:testing reports ID=hummingbird since the 2026-10-01 image
+  # (run 36964331436), as the image-swap cell below records.
+  expect_os_id: hummingbird
+  expect_dm: gdm
+  allow_failure: true
 # composefs -> composefs image swap across distributions: Dakota
 # (GNOME OS-based, systemd-boot) to Utah (Bluefin on Fedora
 # Hummingbird, composefs-enabled, GRUB via bootupd). Installs the

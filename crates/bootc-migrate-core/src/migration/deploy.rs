@@ -134,6 +134,30 @@ pub fn phase4_stage_deploy(
         .context("cross-family post-merge steps failed")?;
     }
 
+    // Migration report for `status` (L2). /var was already staged above,
+    // so a copied /var needs the report in the stateroot copy, or the
+    // migrated system has no report to read.
+    crate::status::write_report(
+        &deploy_layout::staged_var_path(
+            var_staging,
+            std::path::Path::new(crate::status::MIGRATE_REPORT),
+        ),
+        "ostree -> composefs via CoreMigration",
+        target_image,
+    )
+    .context("failed to write the migration report")?;
+
+    // First-boot verify probe (L1): every migrated deployment proves
+    // itself on first boot.
+    crate::firstboot_verify::install_verify_probe(&layout.etc_dir)
+        .context("failed to stage the first-boot verify probe")?;
+    println!(
+        "[firstboot] verify probe staged; it reports to {} on first boot",
+        crate::firstboot_verify::VERIFY_REPORT
+    );
+    crate::firstboot_verify::install_cleanup_prompt(&layout.etc_dir)
+        .context("failed to stage the desktop cleanup prompt")?;
+    println!("[firstboot] desktop cleanup prompt staged");
     // First-boot repair (L3, #309): record the live /var/home identity
     // next to the /var copy the new deployment mounts, and arm the unit.
     // An in-place /var is the live one: nothing to compare against.
