@@ -35,7 +35,43 @@ ok() { echo "OK: $*"; }
 DEFAULT_ALLOWED_FAILED_UNITS=""
 
 # ---- 1. Boot completed ------------------------------------------------------
+# While the boot settles, sample every unit that has been activating for 30 s
+# or more: what its threads wait on in the kernel, and what it holds open.
+# A unit that then times out (geoclue, #368) usually logs nothing itself, and
+# by the time `systemctl status` runs systemd has already killed it.
+SAMPLES=$(mktemp -d)
+trap 'rm -rf "$SAMPLES"' EXIT
+sample_slow_units() {
+    local u pid since now
+    while :; do
+        now=$(cut -d' ' -f1 /proc/uptime); now=${now%.*}
+        for u in $(systemctl list-units --state=activating --no-legend --plain 2>/dev/null | awk '{print $1}'); do
+            [ -e "$SAMPLES/$u" ] && continue
+            since=$(systemctl show -p InactiveExitTimestampMonotonic --value "$u" 2>/dev/null)
+            [ -n "$since" ] && [ "$since" != 0 ] || continue
+            [ $((now - since / 1000000)) -ge 30 ] || continue
+            pid=$(systemctl show -p MainPID --value "$u" 2>/dev/null)
+            [ -n "$pid" ] && [ "$pid" != 0 ] || continue
+            {
+                echo "sampled at ${now}s, activating for $((now - since / 1000000))s, MainPID $pid"
+                for t in /proc/"$pid"/task/*; do
+                    echo "thread ${t##*/} $(cat "$t/comm" 2>/dev/null): wchan=$(cat "$t/wchan" 2>/dev/null)"
+                done
+                echo "kernel stack:"; cat /proc/"$pid"/stack 2>/dev/null
+                echo "open files:"; ls -l /proc/"$pid"/fd 2>/dev/null | awk 'NR>1 {print $NF}' | sort | uniq -c
+                echo "queued bus activations:"
+                journalctl -b --no-pager -o cat -u dbus.service -u dbus-broker.service 2>/dev/null \
+                    | grep -iE 'activat' | tail -8
+            } > "$SAMPLES/$u" 2>&1
+        done
+        sleep 5
+    done
+}
+sample_slow_units </dev/null &
+sampler=$!
 state=$(timeout 300 systemctl is-system-running --wait 2>/dev/null)
+kill "$sampler" 2>/dev/null
+wait "$sampler" 2>/dev/null
 echo "  system state: ${state:-<none>}"
 case "$state" in
     running) ok "boot completed (running)" ;;
@@ -55,6 +91,18 @@ describe_failed_unit() {
     echo "    --- bus activation messages that name ${unit%.service}"
     journalctl -b --no-pager -o short-monotonic -u dbus-broker.service -u dbus.service 2>&1 \
         | grep -iF "${unit%.service}" | tail -15 | sed 's/^/      /'
+    if [ -s "$SAMPLES/$unit" ]; then
+        echo "    --- $unit while it was still starting"
+        sed 's/^/      /' "$SAMPLES/$unit"
+    fi
+    # geoclue starts its location sources before it takes its bus name, and
+    # each source waits on another service over the bus.
+    if [ "$unit" = geoclue.service ]; then
+        echo "    --- journals of geoclue's location back-ends"
+        journalctl -b --no-pager -o short-monotonic -n 30 \
+            -u ModemManager.service -u avahi-daemon.service -u wpa_supplicant.service 2>&1 \
+            | sed 's/^/      /'
+    fi
     since=$(systemctl show -p InactiveExitTimestamp --value "$unit" 2>/dev/null)
     if [ -n "$since" ]; then
         echo "    --- warnings from every unit while $unit was starting (since $since)"
