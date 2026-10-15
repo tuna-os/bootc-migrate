@@ -596,7 +596,7 @@ sudo ./tests/run-e2e.sh
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
 
-The full matrix has fourteen cells (see `.github/e2e-scenarios.yml`, which is
+The full matrix has seventeen cells (see `.github/e2e-scenarios.yml`, which is
 authoritative). It runs nightly; each PR and push to `main` runs a
 round-robin slice of the gating cells (see `docs/testing.md`):
 
@@ -610,6 +610,9 @@ round-robin slice of the gating cells (see `docs/testing.md`):
 | ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
 | TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
 | cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/debian-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/ubuntu-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/arch-bootc:latest | btrfs | 40G |
 | composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
 | composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |

@@ -53,8 +53,14 @@ on:
       expect_os_id:
         description: >-
           os-release ID the migrated system must report (cross_family and
-          image-swap, e.g. opensuse-tumbleweed or utah). Empty skips the
-          identity assertion.
+          image-swap, e.g. debian, ubuntu, arch, bluefin, opensuse-tumbleweed or utah).
+          Empty skips the identity assertion.
+        required: false
+        default: ""
+      allowed_mislabeled:
+        description: >-
+          Space-separated glob patterns of paths whose new mislabel is
+          reported, not failed (tests/e2e-health.sh).
         required: false
         default: ""
       de_migrate:
@@ -205,6 +211,7 @@ jobs:
             E2E_DE_MIGRATE="${{ inputs.de_migrate && '1' || '0' }}" \
             E2E_DE_FROM="${{ inputs.de_from }}" \
             E2E_ALLOWED_FAILED_UNITS="${{ inputs.allowed_failed_units }}" \
+            E2E_ALLOWED_MISLABELED="${{ inputs.allowed_mislabeled }}" \
             ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       # tui-migrate runs record both interactive flows as asciicast v2
