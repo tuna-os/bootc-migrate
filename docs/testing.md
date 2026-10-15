@@ -12,7 +12,7 @@ evidence-gathering method this strategy grew out of).
 | Unit | Pure logic: parsers, planners, mergetc tables, routing, digest handling, probe classification | `just test` / CI `validate`, every push | seconds |
 | Feature-matrix | Same, with every cargo feature on (`composefs-native` is invisible to the default build) | `just test-all-features` (part of `just check`) | seconds |
 | Integration (host) | Real repositories on loopback filesystems, real podman probes of real images — no VM | developer machines + scheduled canary | minutes |
-| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml matrix, PR-gated via `e2e-gate` | ~30 min/cell |
+| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml, called from ci.yml's `e2e` job: a round-robin slice of the gating cells per PR/push, the full matrix nightly | ~30 min/cell |
 
 Rules of thumb:
 
@@ -42,7 +42,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
 | bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
 | dakota stable (composefs-native) → fedora-bootc 44 (`composefs-to-ostree` mode) | the reverse backend switch (#260): `--plan` resolves `OstreeInstall`, the target's `bootc install to-existing-root` runs alongside, `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in the OSTree deployment, and the composefs "Linux Boot Manager" entry and ESP kernel remain as rollback | active, non-gating |
-| dakota stable (composefs-native) → utah testing (`composefs-to-ostree` mode) | the Dakota → Utah migration through `OstreeInstall` (#302): the same assertions as the fedora-bootc cell, plus the shim/GRUB entry first in `BootOrder`, the booted os-release `ID=utah` and GDM running | active, non-gating |
+| dakota stable (composefs-native) → utah testing (`composefs-to-ostree` mode) | the Dakota → Utah migration through `OstreeInstall` (#302): the same assertions as the fedora-bootc cell, plus the shim/GRUB entry first in `BootOrder`, the booted os-release `ID=hummingbird` and GDM running | active, non-gating |
 | dakota stable (composefs-native) → utah testing (`image-swap` mode) | a composefs image swap across distributions: `--plan` resolves `ImageSwap`, the host's `bootc switch` stages Utah (Bluefin on Fedora Hummingbird), `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in Utah and the Dakota deployment stays as rollback | active, non-gating |
 | bluefin stable → bootcrew/opensuse-bootc (`E2E_CROSS_FAMILY=1`) | the cross-family gate refuses without `--accept-cross-base`; with it, the cross-family `/etc` policy (#256): target defaults win, `.rebase-old` sidecars, carried machine state, target-first identity merge, first-boot unit | active, non-gating |
 
@@ -332,16 +332,26 @@ Runner selection, highest precedence first:
 3. **Neither** → `ubuntu-latest`.
 
 `KVM_E2E_ENABLED` is now a **kill switch, not an enable switch**: set it
-to `'false'` to stand the whole matrix down (`e2e-gate` treats a skipped
-run as a trivial pass); unset or `'true'` both run. Switching lanes is a
-variable change, never a workflow edit.
+to `'false'` to stand the whole matrix down (`required-checks` treats the
+skipped `e2e` job as a pass); unset or `'true'` both run. Switching lanes is
+a variable change, never a workflow edit.
+
+### Which cells run when
+
+The scenarios live in `.github/e2e-scenarios.yml`. Cells without
+`allow_failure: true` are gating. Pull requests and pushes to `main` run
+`E2E_ROUND_ROBIN_SIZE` gating cells (repo variable, default 2), starting at
+`(run_number × size) mod <gating cells>`, so consecutive CI runs walk the
+whole gating list. The nightly schedule and `workflow_dispatch` run every
+cell, exploratory ones included. A regression in a cell a PR did not draw
+surfaces on the next runs that draw it, or in the nightly run at the latest.
 
 ### Timeouts, and why they are what they are
 
 | Budget | Value | Reason |
 |---|---|---|
 | Per-cell job timeout | 90 min | The tui-migrate cell measured 65 min end to end (image bake + migration + reboot + rollback + commit, driven through the wizard). |
-| `e2e-gate` wait window (ci.yml) | 100 min | Must clear the job timeout plus queue time. It was 50 min while the matrix was gated off; leaving it there would have failed every PR the moment the matrix started gating. |
+| `e2e` job (ci.yml) | — | No wait window: ci.yml calls e2e-tests.yml as a reusable workflow, so `required-checks` depends on the matrix result directly. The old `e2e-gate` polled for a separately triggered run and held a runner for up to five hours per PR. |
 
 Measured cell runtimes on `ubuntu-latest` (2026-08-27): ostree-rebase-plan
 26 min, composefs-migrate 36 min, tui-migrate 65 min. The `Enable KVM
