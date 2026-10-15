@@ -58,8 +58,8 @@ $ just registry-cache   # pull Bluefin + Dakota; push to local registry
 
 These are the **local** recipes and they deliberately differ from the CI
 matrix — `just e2e-lts` runs XFS at 20 GB to exercise the ext4-loopback store
-on a small disk, while CI's LTS cell runs `ext4` at 40 GB. The seven-cell CI
-matrix lives in `.github/workflows/e2e-tests.yml`, which is authoritative;
+on a small disk, while CI's LTS cell runs `ext4` at 40 GB. The CI matrix
+lives in `.github/e2e-scenarios.yml`, which is authoritative;
 `README.md` reproduces it. Don't sync these two tables into one — they answer
 different questions.
 
@@ -179,8 +179,10 @@ $ just cleanup        # kill QEMU, prune podman, remove disk.raw and .log files
 ## Adding a new E2E scenario
 
 1. Add a new recipe in `justfile` modelled on `e2e-luks` or `e2e-lvm`.
-2. Add the scenario to the CI matrix in `.github/workflows/e2e-tests.yml`
-   (follow the existing `include:` pattern, set `name`, `filesystem`, `disk-size`, and any env overrides).
+2. Add the scenario to `.github/e2e-scenarios.yml` (set `name`, `base`,
+   `target`, `filesystem`, `disk_size`, and any overrides; add
+   `allow_failure: true` while it is exploratory, which keeps it out of the
+   per-PR round-robin and in the nightly run only).
 3. Update the CI matrix table in [AGENTS.md](AGENTS.md).
 4. Document the scenario in [docs/filesystem-support.md](docs/filesystem-support.md).
 
