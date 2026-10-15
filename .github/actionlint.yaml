@@ -4,3 +4,8 @@ self-hosted-runner:
   # that the matrix defaults to GitHub-hosted runners.
   labels:
     - kvm
+    # GitHub-hosted ubuntu-26.04 images (GA 2026-09-17) are unknown to the
+    # pinned actionlint v1.7.12. Support is in rhysd/actionlint@bfc8e29
+    # (unreleased); drop these once the pinned image includes it.
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
