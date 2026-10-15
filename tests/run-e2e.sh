@@ -1958,7 +1958,7 @@ SWAPDIAG
     # deployment's /etc, post-merge, pre-reboot, and mask firewalld (the
     # base image build disabled it; the target's preset may enable it).
     step "=== image-swap: re-injecting e2e-sshd into the staged deployment ==="
-    ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' bash -s" <<'SWAPSSH'
+    ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' E2E_CONSOLE_JOURNAL='$E2E_CONSOLE_JOURNAL' bash -s" <<'SWAPSSH'
 set -e
 STAGED=""
 for d in /sysroot/state/deploy/*/; do
@@ -1979,6 +1979,17 @@ rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 ln -sf /dev/null "$DEPLOY_ETC/systemd/system/firewalld.service"
 mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
 echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
+# The target boots a UKI whose command line the BLS patching above cannot
+# reach, so systemd.journald.forward_to_console never applies here (#383).
+# A journald drop-in in the staged /etc does the same: the first boot's
+# journal (the first-boot unit, gdm, sshd) then lands in qemu.log.
+JOURNAL_DROPIN=""
+if [ "${E2E_CONSOLE_JOURNAL:-0}" = "1" ]; then
+    mkdir -p "$DEPLOY_ETC/systemd/journald.conf.d"
+    JOURNAL_DROPIN="$DEPLOY_ETC/systemd/journald.conf.d/90-e2e-console.conf"
+    printf '%s\n' '[Journal]' 'ForwardToConsole=yes' 'TTYPath=/dev/ttyS0' 'MaxLevelConsole=info' > "$JOURNAL_DROPIN"
+    echo "forwarding the first boot's journal to ttyS0"
+fi
 # The target may boot with SELinux enforcing while the composefs host has
 # no policy of its own to label these files with. Write the two contexts
 # the target's policy gives them directly (unit files and an sshd drop-in);
@@ -1998,6 +2009,10 @@ if grep -qE '^SELINUX=(enforcing|permissive)' "$DEPLOY_ETC/selinux/config" 2>/de
         "$DEPLOY_ETC/systemd/system/firewalld.service"
     label system_u:object_r:etc_t:s0 "$DEPLOY_ETC/ssh/sshd_config.d" "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf" \
         || { echo "FAIL: could not label the injected sshd files"; exit 1; }
+    if [ -n "$JOURNAL_DROPIN" ]; then
+        label system_u:object_r:etc_t:s0 "$(dirname "$JOURNAL_DROPIN")" "$JOURNAL_DROPIN" \
+            || { echo "FAIL: could not label the journald drop-in"; exit 1; }
+    fi
     echo "labelled the injected units for the target's SELinux policy"
 else
     echo "target does not enable SELinux; injected units left unlabelled"
