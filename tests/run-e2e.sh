@@ -66,7 +66,8 @@ E2E_TEST_MODE="${E2E_TEST_MODE:-migrate}"
 # the first execution of an exploratory route, and its deliverable is the
 # policy under assertion, not Dakota's lifecycle on an openSUSE guest.
 E2E_CROSS_FAMILY="${E2E_CROSS_FAMILY:-0}"
-# os-release ID the migrated system must report (cross-family cells only).
+# os-release ID the migrated system must report (cross-family, image-swap
+# and composefs-to-ostree cells).
 E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
 # Display manager the migrated system must run (gdm, sddm, ...); empty
 # accepts any when the default target is graphical. Checked by
@@ -1845,6 +1846,11 @@ REVSSH
     [ "$HOME_MARKER" = "real-home-data" ] || { echo "FAIL: /var/home data not carried (got: $HOME_MARKER)"; exit 1; }
     REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
     [ "$REALUSER" != "MISSING" ] || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
+    BOOTED_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    echo "  os-release ID: $BOOTED_ID"
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"; exit 1
+    fi
     echo "OK: booted the OSTree deployment of $BOOTED_IMG with /etc, /var and /var/home carried over."
 
     # The composefs deployment must remain reachable: its firmware entry and
@@ -1853,6 +1859,16 @@ REVSSH
     echo "$NVRAM" | sed 's/^/  /'
     echo "$NVRAM" | grep -qi "Linux Boot Manager" || {
         echo "FAIL: the composefs deployment's 'Linux Boot Manager' firmware entry is gone"; exit 1; }
+    # The route puts the shim/GRUB entry bootupd registered first in
+    # BootOrder, so the next cold boot lands in the OSTree deployment
+    # again and systemd-boot stays one firmware pick away as rollback.
+    FIRST_BOOT=$(echo "$NVRAM" | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
+    FIRST_ENTRY=$(echo "$NVRAM" | grep -i "^Boot${FIRST_BOOT}" || true)
+    echo "  first in BootOrder: ${FIRST_ENTRY:-<none>}"
+    if [ -z "$FIRST_BOOT" ] || ! echo "$FIRST_ENTRY" | grep -qiE 'shim|grub' \
+        || echo "$FIRST_ENTRY" | grep -qi "Linux Boot Manager"; then
+        echo "FAIL: the shim/GRUB entry is not first in BootOrder"; exit 1
+    fi
     # The OSTree deployment mounts nothing at /boot/efi by itself (Bluefin's
     # own installs leave the ESP unmounted; gpt-auto may put it at /efi), so
     # look at every usual place and fall back to mounting the ESP partition
@@ -2551,9 +2567,11 @@ ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants
 CFS_POSTMERGEFIX
 
 # #309: post-stage, pre-reboot sabotage. Break the canary tree in the /var
-# the new deployment mounts (the stateroot copy, or the live /var when it
-# stays in place), the way #308's identity-dropping copy did: root-owned,
-# fresh mtimes. The first-boot repair must restore it from the manifest.
+# copy the new deployment mounts, the way #308's identity-dropping copy did:
+# root-owned, fresh mtimes. The first-boot repair must restore it from the
+# manifest. When /var stays in place (a dedicated /var filesystem), the new
+# deployment mounts the live /var: no copy can break it and no manifest is
+# recorded, so the ownership class must stay unarmed and leave later edits.
 step "=== first-boot repair: sabotaging the canary tree (#309) ==="
 ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
 set -e
@@ -2565,6 +2583,14 @@ DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
 test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
 test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
 test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
+if [ "$V" = /var ]; then
+    test ! -e /var/lib/bootc-migrate/identity-manifest.tsv || { echo "FAIL: identity manifest recorded for an in-place /var"; exit 1; }
+    # Same filesystem after the reboot: tells the assertion which case ran.
+    mkdir -p /var/lib/bootc-migrate
+    touch /var/lib/bootc-migrate/e2e-repair-var-in-place
+    echo "in-place /var: ownership class not armed; canary left untouched"
+    exit 0
+fi
 grep -q "repair-canary/file" "$V/lib/bootc-migrate/identity-manifest.tsv" || { echo "FAIL: canary missing from $V/lib/bootc-migrate/identity-manifest.tsv"; exit 1; }
 chown -R root:root "$V/$CANARY_REL"
 touch "$V/$CANARY_REL/file" "$V/$CANARY_REL/sub/nested"
@@ -2704,15 +2730,20 @@ STATE=/var/lib/bootc-migrate
 journalctl -b -u bootc-migrate-repair-firstboot.service --no-pager | tail -20 || true
 test -f "$STATE/repair-log.json" || { echo "FAIL: no repair log at $STATE/repair-log.json"; exit 1; }
 echo "repair-result: $(cat "$STATE/repair-result")"
-grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "repaired"' || {
-    echo "FAIL: repair log does not show the ownership class repaired"; cat "$STATE/repair-log.json"; exit 1; }
+if [ -e "$STATE/e2e-repair-var-in-place" ]; then
+    grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "not-applicable"' || {
+        echo "FAIL: ownership class ran against an in-place /var"; cat "$STATE/repair-log.json"; exit 1; }
+else
+    grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "repaired"' || {
+        echo "FAIL: repair log does not show the ownership class repaired"; cat "$STATE/repair-log.json"; exit 1; }
+fi
 for f in file sub/nested sub; do
     got=$(stat -c '%U:%G %Y' "/var/home/realuser/repair-canary/$f")
     [ "$got" = "realuser:realuser 1600000000" ] || { echo "FAIL: canary $f is '$got', expected 'realuser:realuser 1600000000'"; exit 1; }
 done
 test ! -e /etc/bootc-migrate/repair-firstboot || { echo "FAIL: repair marker still armed after first boot"; exit 1; }
 test ! -e /etc/bootc-migrate/bootc-migrate-repair || { echo "FAIL: staged repair binary not removed"; exit 1; }
-echo "OK: canary owner and mtime restored by the first-boot repair."
+echo "OK: canary owner and mtime are as recorded after the first-boot repair."
 REPAIR_ASSERT
 
 # #256: the whole point — the migrated system is the target's family.

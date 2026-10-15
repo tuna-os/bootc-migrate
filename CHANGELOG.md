@@ -113,6 +113,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `Strategy::OstreeInstall` (composefs → ostree) now holds the same run lock
+  as the forward migration (#303). Before, its check for an existing
+  deployment had no lock, so two runs started together both passed it and
+  then used the same ESP snapshot, install and `/var` copy at the same
+  time. A second run now stops before it changes anything and names the
+  holder (pid and start time). The lock is an
+  `flock`, so a crashed or killed run does not block the next one. A
+  refused run also no longer truncates the holder's pid out of the lock file.
+
 - The migration stops when it cannot rebuild the composefs initrd for an XFS
   root. The stock target initrd has no xfs driver, so the old warning let the
   migration make an entry the default that then failed `sysroot.mount` and

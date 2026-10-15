@@ -26,7 +26,7 @@ concurrency:
 jobs:
   # Linting, formatting, and unit tests — everything `just check` runs.
   validate:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -42,7 +42,7 @@ jobs:
   # that delete or bypass meaningful test coverage — it is NOT a target.
   # Raise the floor as milestones add tests; never lower it to merge.
   coverage:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -65,7 +65,7 @@ jobs:
   # Workflow-file lint: catches broken expressions/needs/inputs in the CI
   # definitions themselves before they bite at dispatch time.
   actionlint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Style-level shellcheck findings stay advisory, matching the repo's
     # `shellcheck --severity=warning` convention (justfile lint-shell).
     env:
@@ -88,7 +88,7 @@ jobs:
 
   # Dependency advisory, license, and source policy (deny.toml).
   cargo-deny:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -113,7 +113,7 @@ jobs:
   required-checks:
     if: always()
     needs: [validate, cargo-deny, coverage, actionlint, e2e]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Check all jobs succeeded
         env:
