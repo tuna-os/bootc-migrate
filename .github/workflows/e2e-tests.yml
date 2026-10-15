@@ -84,7 +84,11 @@ jobs:
             # Display manager tests/e2e-health.sh requires after the reboot.
             expect_dm: gdm
             filesystem: xfs+crypt
-            disk_size: 40G
+            # 40G stopped being enough when dakota:stable grew (10-08): the
+            # phase-5 initrd rebuild hit ENOSPC under /var/tmp in 2 of 3 runs.
+            # The image sits in the composefs loopback and in podman storage
+            # (the overlay-mount fallback), both on this root.
+            disk_size: 60G
           - name: bluefin LTS -> dakota (LVM-on-LUKS, separate /var + composefs)
             base: ghcr.io/projectbluefin/bluefin:lts
             target: ghcr.io/projectbluefin/dakota:stable
@@ -320,7 +324,11 @@ jobs:
             expect_dm: gdm
             mode: image-swap
             disk_size: 40G
-            expect_os_id: utah
+            # utah:testing is built on Fedora Hummingbird; since the
+            # 2026-10-01 image its os-release says ID=hummingbird (run
+            # 36964331436). The booted-image check above already proves the
+            # target booted; this proves the target /etc/os-release won.
+            expect_os_id: hummingbird
             allow_failure: true
           # fedora-bootc self-migration is the simpler sanity case; revisit once
           # the bluefin scenario is green end-to-end.
@@ -329,7 +337,7 @@ jobs:
           #   target: quay.io/fedora/fedora-bootc:44
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Bluefin + Dakota are ~5 GB each. The default ubuntu-latest runner has
       # ~14 GB free; that plus a 20-60 GB disk.raw (a sparse file that grows
@@ -468,7 +476,7 @@ jobs:
 
       - name: Upload TUI walkthrough artifacts
         if: ${{ always() && matrix.scenario.mode == 'tui-migrate' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tui-walkthrough-${{ strategy.job-index }}
           path: |
@@ -491,11 +499,15 @@ jobs:
             if [ -f e2e-run.log ]; then
               echo '### Last phase reached'
               echo '```'
-              grep -aE '^=== |\[e2e [0-9:]+\] ===' e2e-run.log | tail -5
+              # step() wraps the timestamp in ANSI colour, so the reset lands
+              # between "]" and " ===" and an unescaped pattern never matches.
+              sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' e2e-run.log \
+                | grep -aE '^=== |\[e2e [0-9:]+\] ===' | tail -5
               echo '```'
               echo '### Assertions and errors'
               echo '```'
-              grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' e2e-run.log | tail -20
+              sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' e2e-run.log \
+                | grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' | tail -20
               echo '```'
               echo '### Log tail'
               echo '```'
@@ -508,7 +520,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs-${{ strategy.job-index }}
           path: |
