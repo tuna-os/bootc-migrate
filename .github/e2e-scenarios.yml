@@ -148,14 +148,6 @@
   mode: composefs-to-ostree
   disk_size: 40G
   allow_failure: true
-# composefs -> composefs image swap across distributions: Dakota
-# (GNOME OS-based, systemd-boot) to Utah (Bluefin on Fedora
-# Hummingbird, composefs-enabled, GRUB via bootupd). Installs the
-# base composefs-native, runs the ImageSwap route (the host's own
-# `bootc switch`), and asserts the reboot lands in Utah with /etc,
-# /var and /var/home carried and the Dakota deployment kept as
-# rollback. utah publishes only :testing (pre-alpha), so this
-# cell is non-gating.
 - name: "dakota -> utah (composefs -> ostree, OstreeInstall)"
   # #302: the pair a Dakota user migrates to. Utah (Bluefin on
   # Fedora Hummingbird) ships bootupd and GRUB, and its initramfs
@@ -177,6 +169,14 @@
   expect_os_id: hummingbird
   expect_dm: gdm
   allow_failure: true
+# composefs -> composefs image swap across distributions: Dakota
+# (GNOME OS-based, systemd-boot) to Utah (Bluefin on Fedora
+# Hummingbird, composefs-enabled, GRUB via bootupd). Installs the
+# base composefs-native, runs the ImageSwap route (the host's own
+# `bootc switch`), and asserts the reboot lands in Utah with /etc,
+# /var and /var/home carried and the Dakota deployment kept as
+# rollback. utah publishes only :testing (pre-alpha), so this
+# cell is non-gating.
 # tunaOS desktop ring (Albacore, AlmaLinux 10): every
 # desktop is both a source and a target once, and every
 # display-manager hand-off runs (gdm -> greetd/DMS -> cosmic-greeter
