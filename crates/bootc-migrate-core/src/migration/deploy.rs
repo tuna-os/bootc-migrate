@@ -134,10 +134,14 @@ pub fn phase4_stage_deploy(
         .context("cross-family post-merge steps failed")?;
     }
 
-    // Migration report for `status` (L2): carried with /var into the
-    // new deployment.
+    // Migration report for `status` (L2). /var was already staged above,
+    // so a copied /var needs the report in the stateroot copy, or the
+    // migrated system has no report to read.
     crate::status::write_report(
-        std::path::Path::new(crate::status::MIGRATE_REPORT),
+        &deploy_layout::staged_var_path(
+            var_staging,
+            std::path::Path::new(crate::status::MIGRATE_REPORT),
+        ),
         "ostree -> composefs via CoreMigration",
         target_image,
     )

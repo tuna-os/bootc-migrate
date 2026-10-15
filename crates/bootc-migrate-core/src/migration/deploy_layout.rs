@@ -179,6 +179,24 @@ pub(crate) enum VarStaging {
 /// The stateroot `/var` the deployment's `var` symlink points at.
 pub(crate) const STATEROOT_VAR: &str = "/sysroot/state/os/default/var";
 
+/// Where a file for the live `/var` must be written so the migrated system
+/// sees it after the reboot.
+///
+/// A copied stateroot `/var` is a snapshot: a write to the live `/var` after
+/// the copy never reaches the new deployment, so the path moves under
+/// [`STATEROOT_VAR`]. A dedicated `/var` filesystem stays in place and is
+/// mounted on the stateroot by the initrd, so the live path is correct.
+/// A path outside `/var` is returned unchanged.
+pub(crate) fn staged_var_path(staging: VarStaging, live: &Path) -> PathBuf {
+    match staging {
+        VarStaging::Copied | VarStaging::PreviouslyCopied => match live.strip_prefix("/var") {
+            Ok(rel) => Path::new(STATEROOT_VAR).join(rel),
+            Err(_) => live.to_path_buf(),
+        },
+        VarStaging::InPlace => live.to_path_buf(),
+    }
+}
+
 pub(crate) fn migrate_var_state() -> Result<VarStaging> {
     println!("=== Migrating /var data to ComposeFS state ===");
     let target_var = Path::new(STATEROOT_VAR);
@@ -226,6 +244,26 @@ pub(crate) fn migrate_var_state() -> Result<VarStaging> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copied stateroot /var gets the file; a /var kept in place keeps it
+    /// at the live path (#306: `status` found no report after CoreMigration).
+    #[test]
+    fn staged_var_path_follows_var_staging() {
+        let live = Path::new("/var/lib/bootc-migrate/report.json");
+        let staged = Path::new("/sysroot/state/os/default/var/lib/bootc-migrate/report.json");
+        for (staging, want) in [
+            (VarStaging::Copied, staged),
+            (VarStaging::PreviouslyCopied, staged),
+            (VarStaging::InPlace, live),
+        ] {
+            assert_eq!(staged_var_path(staging, live), want, "{staging:?}");
+        }
+        let outside = Path::new("/etc/foo");
+        assert_eq!(staged_var_path(VarStaging::Copied, outside), outside);
+        // A sibling prefix such as /variant is not under /var.
+        let sibling = Path::new("/variant/x");
+        assert_eq!(staged_var_path(VarStaging::Copied, sibling), sibling);
+    }
 
     /// The composefs store must be mounted rw: day-2 updates write into it,
     /// and a `ro` store makes `bootc upgrade` fail with "Repository is not
