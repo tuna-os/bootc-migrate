@@ -37,6 +37,16 @@ struct Args {
     #[arg(long)]
     accept_cross_base: bool,
 
+    /// Proceed although the hardware compatibility check found hardware that
+    /// works on this machine today and is expected to stop working on the
+    /// target (a storage, display, network, wireless or USB controller with
+    /// no driver in the target kernel, an out-of-tree driver such as NVIDIA
+    /// with no in-kernel fallback, or display/network firmware the target
+    /// does not ship). Without this, those findings refuse the migration.
+    /// Not implied by --force.
+    #[arg(long)]
+    accept_hardware_gaps: bool,
+
     /// Bootloader to use: "systemd-boot" (default, when UEFI), "grub2", or "auto"
     #[arg(long, default_value = "systemd-boot")]
     bootloader: String,
@@ -463,6 +473,20 @@ fn main() {
 
     preflight::readiness::print_report(&report);
     preflight::readiness::print_readiness(&report);
+
+    // ---- Hardware compatibility ----
+    // Read-only. The migration replaces the kernel, its modules and the
+    // firmware with the target's; refuse when hardware that works today is
+    // expected to stop working, unless --accept-hardware-gaps. Runs before
+    // the gate below so the image-swap branch is covered too.
+    if let Err(e) = bootc_migrate_core::hardware::check_and_gate(
+        &target_image,
+        args.accept_hardware_gaps,
+        args.dry_run,
+    ) {
+        eprintln!("Error: {e:#}");
+        exit_flushed!(1);
+    }
 
     match preflight::readiness::gate(&report, args.force, args.skip_preflight) {
         preflight::readiness::MigrationGate::Proceed => {}
