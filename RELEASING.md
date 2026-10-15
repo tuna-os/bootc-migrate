@@ -86,10 +86,11 @@ a commit that is not the head of `main`.
 
 Nothing in `release.yml`. The gate is `required-checks` in `ci.yml` — the
 single context branch protection watches — and every other gate feeds into
-it, `e2e-gate` included. No pull request reaches `main` without CI *and* the
-full E2E matrix green on its head commit, so by the time a version bump is on
-`main` it has already cleared the checklist below. `docs/testing.md` records
-the incident that established that rule.
+it, the `e2e` job included. No pull request reaches `main` without CI *and*
+its round-robin slice of the gating E2E cells green on its head commit; the
+nightly run covers the full matrix. `docs/testing.md` records the incident
+that established the "everything feeds required-checks" rule and the
+round-robin schedule.
 
 Two consequences worth knowing:
 
@@ -103,7 +104,7 @@ Two consequences worth knowing:
   own E2E run they had watched go green.
 
 `release.yml` deliberately does not re-check CI or E2E itself. A second gate
-would have to poll for the same multi-hour matrix `e2e-gate` already polls for
+would have to wait for the same multi-hour matrix the `e2e` job already runs
 (see #235), occupying a runner for hours per release and giving releases a new
 way to fail that has nothing to do with releasing.
 
@@ -114,9 +115,10 @@ what is standing between the bump and a publish. Items 4 and 5 are yours: no
 check can tell whether the changelog describes what is about to ship.
 
 1. `just check` — clippy, rustfmt, unit tests, shellcheck. *(CI: `validate`.)*
-2. The **full E2E matrix green on the commit being merged.** Not a previous
-   commit, and not "green last week": these binaries change boot state, and
-   the matrix is the only coverage the live paths have. *(CI: `e2e-gate`.)*
+2. The **E2E matrix green on the commit being merged.** CI runs a round-robin
+   slice of the gating cells; before a version bump, dispatch
+   `E2E Migration Tests` on `main` (or check the latest nightly run) so every
+   cell is green on the commit being released. *(CI: `e2e`.)*
 3. `cargo deny check advisories bans sources licenses` clean. Run
    `cargo update` first — a stale registry index silently hides yanked
    crates, which is exactly how a yanked `chacha20` sat in the lockfile
