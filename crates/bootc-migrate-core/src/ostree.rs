@@ -22,7 +22,7 @@ pub fn compute_sha512<P: AsRef<Path>>(path: P) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
     let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(result.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[derive(Debug)]
