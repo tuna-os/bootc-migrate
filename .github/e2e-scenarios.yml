@@ -256,6 +256,10 @@
   # 36964331436). The booted-image check above already proves the
   # target booted; this proves the target /etc/os-release won.
   expect_os_id: hummingbird
+  # After the swap reboot the target boots but never answers SSH,
+  # and serial goes quiet after ~7 s (#383). Forward the first
+  # boot's journal to serial so the stalling unit shows in qemu.log.
+  console_journal: true
   allow_failure: true
 # fedora-bootc self-migration is the simpler sanity case; revisit once
 # the bluefin scenario is green end-to-end.

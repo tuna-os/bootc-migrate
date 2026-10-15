@@ -174,6 +174,29 @@ enum Command {
         #[arg(long)]
         from_image: Option<String>,
     },
+    /// First-boot repair of known migration breakage (L3, issue #309).
+    ///
+    /// Every migration stages a oneshot unit that runs `repair --firstboot`
+    /// once on the new system: it restores carried home-tree ownership and
+    /// mtimes from the identity manifest, regenerates a duplicated
+    /// machine-id, runs `flatpak repair` on installations that fail the
+    /// ownership self-check, and relabels SELinux paths the verify probe
+    /// names. With no flag, prints what a pass would change.
+    #[command(name = "repair")]
+    Repair {
+        /// Run the first-boot pass and write the repair log (the unit's mode).
+        #[arg(long)]
+        firstboot: bool,
+        /// Print what a pass would change; change nothing (the default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Stop the staged unit from running on the next boot.
+        #[arg(long)]
+        disable: bool,
+        /// Undo --disable.
+        #[arg(long)]
+        enable: bool,
+    },
 }
 
 /// What the migrator says when it finds a composefs host and takes the swap.
@@ -262,6 +285,25 @@ fn tee_stdio_to_log(log_file: std::fs::File) -> rustix::io::Result<TeeGuard> {
 
 fn main() {
     let args = Args::parse();
+
+    // The first-boot repair runs from a unit: its output goes to the
+    // journal, not the migration log.
+    if let Some(Command::Repair {
+        firstboot,
+        dry_run,
+        disable,
+        enable,
+    }) = args.command
+    {
+        let result =
+            bootc_migrate_core::firstboot_repair::cli_action(firstboot, dry_run, disable, enable)
+                .and_then(bootc_migrate_core::firstboot_repair::cli);
+        if let Err(e) = result {
+            eprintln!("Error: {e:#}");
+            process::exit(1);
+        }
+        return;
+    }
 
     // Open persistent log file — all migration output is tee'd here so the
     // user can inspect results even if the terminal session is lost.
@@ -435,14 +477,16 @@ fn main() {
     }
     println!("Checking system state...");
 
-    let report = match preflight::run_preflight_checks() {
-        Ok(r) => r,
+    // `measured` is false when preflight failed and --skip-preflight stood in
+    // a permissive placeholder: nothing below it was read from this host.
+    let (report, measured) = match preflight::run_preflight_checks() {
+        Ok(r) => (r, true),
         Err(e) => {
             eprintln!("Preflight failure: {}", e);
             if !args.skip_preflight {
                 exit_flushed!(1);
             }
-            preflight::PreflightReport {
+            let placeholder = preflight::PreflightReport {
                 booted_backend: Some(bootc_migrate_core::rebase_plan::Backend::Ostree),
                 booted_image: None,
                 pending_transaction: preflight::PendingTransactionStatus::Clean,
@@ -467,11 +511,29 @@ fn main() {
                 grub_tools_available: true,
                 esp_detected: false,
                 sysroot_was_ro: false,
-            }
+            };
+            (placeholder, false)
         }
     };
 
     preflight::readiness::print_report(&report);
+    // Best-effort JSON snapshot alongside the human-readable report
+    // (bootc-migrate#229) — never blocks the migration on a write failure.
+    // A placeholder report is not written: the snapshot is diagnostic
+    // evidence, and invented values (btrfs, UEFI, a writable NVRAM) would
+    // mislead whoever reads it after a failed migration.
+    if measured {
+        preflight::write_snapshot(
+            "bootc-migrate",
+            version,
+            &std::env::args().collect::<Vec<_>>(),
+            &report,
+        );
+    } else {
+        eprintln!(
+            "Note: preflight failed and --skip-preflight is set; no preflight snapshot is written."
+        );
+    }
     preflight::readiness::print_readiness(&report);
 
     // ---- Hardware compatibility ----

@@ -7,7 +7,7 @@
 
 use crate::rebase_plan::Backend;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -87,7 +87,7 @@ impl BootedStatus {
 /// boot. Running the migration in this state can produce an incomplete
 /// composefs image — objects referenced by the EROFS may be missing or stale,
 /// causing switch-root failure on the next boot.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PendingTransactionStatus {
     /// No pending transaction detected — migration is safe to proceed.
     Clean,
@@ -431,19 +431,22 @@ impl SystemInfo {
                 {
                     let device = format!("/dev/{}", parts[0]);
                     // Temporarily mount to check free space.
-                    let tmp_mount = "/var/tmp/esp-preflight";
-                    let _ = fs::create_dir_all(tmp_mount);
+                    let Ok(tmp_mount) =
+                        crate::migration::boot::private_mount_point("esp-preflight")
+                    else {
+                        continue;
+                    };
                     let mount_status = Command::new("mount")
-                        .args(["-t", "vfat", &device, tmp_mount])
+                        .args(["-t", "vfat", &device, &tmp_mount])
                         .status();
                     if let Ok(s) = mount_status
                         && s.success()
                     {
-                        if let Ok(free_space) = get_free_space(tmp_mount) {
+                        if let Ok(free_space) = get_free_space(&tmp_mount) {
                             esp_free_space_bytes = free_space;
                         }
                         esp_fs_type = Some("vfat".to_string());
-                        esp_path = Some(tmp_mount.to_string());
+                        esp_path = Some(tmp_mount);
                         esp_tmp_mounted = true;
                         break;
                     }
