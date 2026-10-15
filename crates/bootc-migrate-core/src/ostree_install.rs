@@ -236,7 +236,9 @@ pub struct OstreeInstallReport {
     pub cross_family: bool,
     pub grub_boot_entry: Option<String>,
     /// `/boot` has no partition of its own and the root is encrypted, so
-    /// GRUB cannot read the new deployment's kernels (#305).
+    /// GRUB cannot read the new deployment's kernels (#305). Defaulted so
+    /// reports written before #328 still load in the commit step.
+    #[serde(default)]
     pub boot_on_encrypted_root: bool,
     /// The ESP-resident BLS entry written for that layout.
     pub esp_resident_entry: Option<String>,
