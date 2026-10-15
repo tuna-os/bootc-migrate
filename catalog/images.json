@@ -1,0 +1,587 @@
+{
+  "version": 1,
+  "images": [
+    {
+      "name": "Dakota stable",
+      "image": "ghcr.io/projectbluefin/dakota:stable",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Dakota NVIDIA",
+      "image": "ghcr.io/projectbluefin/dakota-nvidia:stable",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Bluefin",
+      "image": "ghcr.io/projectbluefin/bluefin:stable",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bluefin LTS",
+      "image": "ghcr.io/projectbluefin/bluefin-lts:stable",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Aurora",
+      "image": "ghcr.io/ublue-os/aurora:stable",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bazzite",
+      "image": "ghcr.io/ublue-os/bazzite:stable",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Utah",
+      "image": "",
+      "backend": "composefs",
+      "published": false
+    },
+    {
+      "name": "Skipjack GNOME",
+      "image": "ghcr.io/tuna-os/skipjack:gnome",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack KDE",
+      "image": "ghcr.io/tuna-os/skipjack:kde",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Marlin GNOME",
+      "image": "ghcr.io/tuna-os/marlin:gnome",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Marlin KDE",
+      "image": "ghcr.io/tuna-os/marlin:kde",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Sailfin GNOME",
+      "image": "ghcr.io/tuna-os/sailfin:gnome",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Sailfin KDE",
+      "image": "ghcr.io/tuna-os/sailfin:kde",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Bonito GNOME",
+      "image": "ghcr.io/tuna-os/bonito:gnome",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito KDE",
+      "image": "ghcr.io/tuna-os/bonito:kde",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Flounder GNOME",
+      "image": "ghcr.io/tuna-os/flounder:gnome",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Grouper GNOME",
+      "image": "ghcr.io/tuna-os/grouper:gnome",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Guppy GNOME",
+      "image": "ghcr.io/tuna-os/guppy:gnome",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Albacore GNOME",
+      "image": "ghcr.io/tuna-os/albacore:gnome",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore KDE",
+      "image": "ghcr.io/tuna-os/albacore:kde",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin GNOME",
+      "image": "ghcr.io/tuna-os/yellowfin:gnome",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin KDE",
+      "image": "ghcr.io/tuna-os/yellowfin:kde",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Zirconium",
+      "image": "ghcr.io/zirconium-dev/zirconium:latest",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin base",
+      "image": "ghcr.io/tuna-os/yellowfin:base",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin base-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:base-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin base-nvidia",
+      "image": "ghcr.io/tuna-os/yellowfin:base-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin gnome-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:gnome-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin gnome-nvidia",
+      "image": "ghcr.io/tuna-os/yellowfin:gnome-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin gnome-nvidia-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:gnome-nvidia-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin kde-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:kde-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin kde-nvidia",
+      "image": "ghcr.io/tuna-os/yellowfin:kde-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin cosmic",
+      "image": "ghcr.io/tuna-os/yellowfin:cosmic",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin cosmic-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:cosmic-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin cosmic-nvidia",
+      "image": "ghcr.io/tuna-os/yellowfin:cosmic-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin niri",
+      "image": "ghcr.io/tuna-os/yellowfin:niri",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin niri-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:niri-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin niri-nvidia",
+      "image": "ghcr.io/tuna-os/yellowfin:niri-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin xfce",
+      "image": "ghcr.io/tuna-os/yellowfin:xfce",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin xfce-hwe",
+      "image": "ghcr.io/tuna-os/yellowfin:xfce-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Yellowfin xfce-nvidia",
+      "image": "ghcr.io/tuna-os/yellowfin:xfce-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore base",
+      "image": "ghcr.io/tuna-os/albacore:base",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore base-hwe",
+      "image": "ghcr.io/tuna-os/albacore:base-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore base-nvidia",
+      "image": "ghcr.io/tuna-os/albacore:base-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore gnome-hwe",
+      "image": "ghcr.io/tuna-os/albacore:gnome-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore gnome-nvidia",
+      "image": "ghcr.io/tuna-os/albacore:gnome-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore gnome-nvidia-hwe",
+      "image": "ghcr.io/tuna-os/albacore:gnome-nvidia-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore kde-hwe",
+      "image": "ghcr.io/tuna-os/albacore:kde-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore kde-nvidia",
+      "image": "ghcr.io/tuna-os/albacore:kde-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore cosmic",
+      "image": "ghcr.io/tuna-os/albacore:cosmic",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore cosmic-hwe",
+      "image": "ghcr.io/tuna-os/albacore:cosmic-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore cosmic-nvidia",
+      "image": "ghcr.io/tuna-os/albacore:cosmic-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore niri",
+      "image": "ghcr.io/tuna-os/albacore:niri",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore niri-hwe",
+      "image": "ghcr.io/tuna-os/albacore:niri-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore niri-nvidia",
+      "image": "ghcr.io/tuna-os/albacore:niri-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore xfce",
+      "image": "ghcr.io/tuna-os/albacore:xfce",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore xfce-hwe",
+      "image": "ghcr.io/tuna-os/albacore:xfce-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Albacore xfce-nvidia",
+      "image": "ghcr.io/tuna-os/albacore:xfce-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack base",
+      "image": "ghcr.io/tuna-os/skipjack:base",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack base-hwe",
+      "image": "ghcr.io/tuna-os/skipjack:base-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack base-nvidia",
+      "image": "ghcr.io/tuna-os/skipjack:base-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack gnome-hwe",
+      "image": "ghcr.io/tuna-os/skipjack:gnome-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack gnome-nvidia",
+      "image": "ghcr.io/tuna-os/skipjack:gnome-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack gnome-nvidia-hwe",
+      "image": "ghcr.io/tuna-os/skipjack:gnome-nvidia-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack kde-hwe",
+      "image": "ghcr.io/tuna-os/skipjack:kde-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack kde-nvidia",
+      "image": "ghcr.io/tuna-os/skipjack:kde-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack cosmic",
+      "image": "ghcr.io/tuna-os/skipjack:cosmic",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack cosmic-hwe",
+      "image": "ghcr.io/tuna-os/skipjack:cosmic-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack cosmic-nvidia",
+      "image": "ghcr.io/tuna-os/skipjack:cosmic-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack niri",
+      "image": "ghcr.io/tuna-os/skipjack:niri",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack niri-hwe",
+      "image": "ghcr.io/tuna-os/skipjack:niri-hwe",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack niri-nvidia",
+      "image": "ghcr.io/tuna-os/skipjack:niri-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Skipjack xfce",
+      "image": "ghcr.io/tuna-os/skipjack:xfce",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito base",
+      "image": "ghcr.io/tuna-os/bonito:base",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito base-nvidia",
+      "image": "ghcr.io/tuna-os/bonito:base-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito gnome-nvidia",
+      "image": "ghcr.io/tuna-os/bonito:gnome-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito kde-nvidia",
+      "image": "ghcr.io/tuna-os/bonito:kde-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito cosmic",
+      "image": "ghcr.io/tuna-os/bonito:cosmic",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito cosmic-nvidia",
+      "image": "ghcr.io/tuna-os/bonito:cosmic-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito niri",
+      "image": "ghcr.io/tuna-os/bonito:niri",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito niri-nvidia",
+      "image": "ghcr.io/tuna-os/bonito:niri-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito xfce",
+      "image": "ghcr.io/tuna-os/bonito:xfce",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Bonito xfce-nvidia",
+      "image": "ghcr.io/tuna-os/bonito:xfce-nvidia",
+      "backend": "ostree",
+      "published": true
+    },
+    {
+      "name": "Marlin base",
+      "image": "ghcr.io/tuna-os/marlin:base",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Marlin cosmic",
+      "image": "ghcr.io/tuna-os/marlin:cosmic",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Marlin niri",
+      "image": "ghcr.io/tuna-os/marlin:niri",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Marlin xfce",
+      "image": "ghcr.io/tuna-os/marlin:xfce",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Flounder base",
+      "image": "ghcr.io/tuna-os/flounder:base",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Flounder kde",
+      "image": "ghcr.io/tuna-os/flounder:kde",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Flounder cosmic",
+      "image": "ghcr.io/tuna-os/flounder:cosmic",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Flounder xfce",
+      "image": "ghcr.io/tuna-os/flounder:xfce",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Grouper base",
+      "image": "ghcr.io/tuna-os/grouper:base",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Grouper kde",
+      "image": "ghcr.io/tuna-os/grouper:kde",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Grouper niri",
+      "image": "ghcr.io/tuna-os/grouper:niri",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Grouper xfce",
+      "image": "ghcr.io/tuna-os/grouper:xfce",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Sailfin niri",
+      "image": "ghcr.io/tuna-os/sailfin:niri",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Sailfin xfce",
+      "image": "ghcr.io/tuna-os/sailfin:xfce",
+      "backend": "composefs",
+      "published": true
+    },
+    {
+      "name": "Guppy kde",
+      "image": "ghcr.io/tuna-os/guppy:kde",
+      "backend": "composefs",
+      "published": true
+    }
+  ]
+}

@@ -7,10 +7,13 @@
 
 use anyhow::{Context, Result, bail};
 
+use std::path::Path;
+
 use crate::cross_base;
 use crate::cross_family;
 use crate::de_controller::DesktopMigrationController;
 use crate::migration;
+use crate::ostree_install;
 use crate::preflight::{self, readiness};
 use crate::selinux;
 
@@ -146,10 +149,15 @@ impl CoreMigrationConfig<'_> {
 /// leaves the previous deployment as the rollback entry.
 pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
     println!("Staging deployment of {target_image} via `bootc switch`...");
-    let status = std::process::Command::new("bootc")
+    let mut child = std::process::Command::new("bootc")
         .args(["switch", target_image])
-        .status()
+        .spawn()
         .map_err(|e| anyhow::anyhow!("failed to execute bootc switch: {e}"))?;
+    let status = wait_with_stage_progress(
+        &mut child,
+        std::time::Duration::from_secs(15),
+        &mut std::io::stdout(),
+    )?;
     if !status.success() {
         bail!("bootc switch {target_image} failed (exit {status})");
     }
@@ -244,11 +252,54 @@ fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
     Ok(std::path::Path::new(COMPOSEFS_DEPLOY_ROOT).join(verity))
 }
 
+/// The `setfiles` relabel command for the staged composefs deployment's `/etc`.
+pub fn composefs_relabel_command(
+    target_image: &str,
+    deploy_root: &Path,
+    policy_type: &str,
+) -> Vec<String> {
+    let etc = deploy_root.join("etc");
+    let mut cmds = ostree_install::relabel_command(target_image, &[(deploy_root, etc.as_path())]);
+    if let Some(argv) = cmds.first_mut()
+        && let Some(fc) = argv
+            .iter_mut()
+            .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
+    {
+        *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
+    }
+    cmds.into_iter().next().unwrap_or_default()
+}
+
+/// Relabel the staged composefs deployment's `/etc` with the target's policy.
+fn relabel_staged_composefs_etc(
+    target_image: &str,
+    deploy_root: &Path,
+    target: Option<&selinux::SelinuxConfig>,
+) -> Result<()> {
+    let policy_type = target
+        .and_then(|t| t.selinux_type.as_deref())
+        .unwrap_or("targeted");
+    let argv = composefs_relabel_command(target_image, deploy_root, policy_type);
+    if argv.is_empty() {
+        return Ok(());
+    }
+    println!("[selinux] {}", argv.join(" "));
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .with_context(|| "failed to execute setfiles in the target image")?;
+    if !status.success() {
+        bail!("setfiles in the target image failed with exit code {status}");
+    }
+    println!("[selinux] labelled merged /etc with the target's SELinux policy");
+    Ok(())
+}
+
 /// Arm the image-swap first-boot unit in the staged deployment.
 ///
 /// On composefs, `bootc switch` merges the host's `/etc` into the new
-/// deployment at shutdown. Two things break when the host is another
-/// distribution (Dakota to Utah):
+/// deployment. Two things break when the host is another distribution
+/// (Dakota to Utah):
 ///
 /// - The host's locally created account databases replace the target's,
 ///   so the target's system users (`dbus`) are missing. The unit runs the
@@ -256,11 +307,13 @@ fn staged_composefs_deployment() -> Result<std::path::PathBuf> {
 /// - A host with no SELinux policy writes the merged files unlabeled, and
 ///   a target that boots enforcing then denies its own services every file
 ///   in `/etc` and `/var`. When the target enforces a policy the host did
-///   not label for, the unit also runs the target's `restorecon`.
+///   not label for, the merged `/etc` is labelled here before first boot
+///   with `setfiles` from the target image, and the unit runs the target's
+///   `restorecon` over `/var` and `/etc` on first boot.
 ///
 /// The unit runs before `sysinit.target`. Its own files are labelled here
 /// so the booting system can read them.
-fn schedule_image_swap_firstboot() -> Result<()> {
+fn schedule_image_swap_firstboot(target_image: &str) -> Result<()> {
     let deploy = staged_composefs_deployment()?;
     let host = selinux::read_host_selinux_config();
     let target = selinux::read_deployment_selinux_config(&deploy);
@@ -309,10 +362,82 @@ fn schedule_image_swap_firstboot() -> Result<()> {
     if relabel {
         println!(
             "[selinux] the target enforces SELinux and the host labelled nothing for it: \
-             {} will relabel /etc and /var on first boot",
+             labelling merged /etc before first boot; {} will relabel /var",
             cross_family::FIRSTBOOT_UNIT
         );
+        // bootc merges the running /etc into the staged one from the
+        // ExecStop= of bootc-finalize-staged.service, at shutdown. A label
+        // set now would cover only the target's own files: everything the
+        // shutdown merge copies from this unlabelled host (machine-id,
+        // passwd, ...) would still boot unlabelled, and PID 1 and journald
+        // are denied it before any first-boot unit can run (#275). So do
+        // the merge now, then label its result.
+        // Fetch the image whose setfiles labels /etc before the boot entries
+        // are swapped, so a missing podman or registry fails here with the
+        // old deployment still the default.
+        println!("[selinux] pulling {target_image} with podman for its setfiles and policy...");
+        let pulled = std::process::Command::new("podman")
+            .args(["pull", target_image])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !pulled {
+            bail!(
+                "could not pull {target_image} with podman to label the merged /etc for the \
+                 target's SELinux policy. The deployment is staged but would boot unlabelled: \
+                 run `bootc rollback` before you reboot, or fix podman and run again."
+            );
+        }
+        finalize_composefs_staged_now()?;
+        relabel_staged_composefs_etc(target_image, &deploy, target.as_ref()).context(
+            "labelling the merged /etc failed after finalization; the new deployment boots \
+             next and its first-boot unit relabels /etc, but early services can fail. Run \
+             `bootc rollback` to keep the current deployment.",
+        )?;
     }
+    Ok(())
+}
+
+/// The unit whose `ExecStop=` finalizes a composefs staged deployment.
+const COMPOSEFS_FINALIZE_UNIT: &str = "bootc-finalize-staged.service";
+
+/// Run bootc's composefs finalization (the `/etc` merge and the boot entry
+/// swap) now instead of at shutdown.
+///
+/// Stopping the unit runs its `ExecStop=` in the same sandbox shutdown
+/// would use, and leaves nothing for shutdown to repeat: the composefs
+/// counterpart of [`finalize_staged_now`]. Changes made to `/etc` after
+/// this point do not reach the new deployment.
+fn finalize_composefs_staged_now() -> Result<()> {
+    let unit = COMPOSEFS_FINALIZE_UNIT;
+    let active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !active {
+        // Nothing waits for shutdown: this bootc merged /etc when it staged.
+        println!("[finalize] {unit} is not active; the staged /etc is already merged");
+        return Ok(());
+    }
+    ensure_boot_mounted();
+    println!("[finalize] merging /etc into the staged deployment now ({unit})...");
+    let status = std::process::Command::new("systemctl")
+        .args(["stop", unit])
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to execute systemctl stop {unit}: {e}"))?;
+    let failed = std::process::Command::new("systemctl")
+        .args(["is-failed", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !status.success() || failed {
+        bail!(
+            "finalizing the staged composefs deployment failed; the previous deployment \
+             would boot next. See `journalctl -u {unit}`."
+        );
+    }
+    println!("[finalize] staged composefs deployment finalized: it boots next");
     Ok(())
 }
 
@@ -442,6 +567,44 @@ fn finalized_state(status_stdout: &str) -> FinalizedState {
     }
 }
 
+/// `bootc switch` suppresses its interactive progress display when its output
+/// is piped into the TUI. Report elapsed time until it exits so a long pull
+/// does not look stalled; this is activity, not a download percentage.
+fn wait_with_stage_progress(
+    child: &mut std::process::Child,
+    interval: std::time::Duration,
+    output: &mut impl std::io::Write,
+) -> Result<std::process::ExitStatus> {
+    let started = std::time::Instant::now();
+    let mut next_report = interval;
+    let mut progress_output_available = true;
+    loop {
+        if let Some(status) = child.try_wait().context("waiting for bootc switch")? {
+            return Ok(status);
+        }
+        let elapsed = started.elapsed();
+        if progress_output_available && elapsed >= next_report {
+            let write_result = writeln!(
+                output,
+                "bootc switch is still pulling and staging ({}s elapsed)...",
+                elapsed.as_secs()
+            )
+            .and_then(|()| output.flush());
+            if let Err(error) = write_result {
+                // A closed TUI log pipe must not abandon a switch that bootc
+                // is already staging. Other output failures still surface.
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    progress_output_available = false;
+                } else {
+                    return Err(error).context("writing bootc switch progress");
+                }
+            }
+            next_report += interval;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1).min(interval));
+    }
+}
+
 /// The staged deployment's image spec from `bootc status --json`, if any.
 /// (Schema: `.status.staged.image.image.image` — ImageStatus → ImageReference
 /// → image spec string; stable across bootc 1.x.)
@@ -559,7 +722,7 @@ impl ImageSwapConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
-        schedule_image_swap_firstboot()?;
+        schedule_image_swap_firstboot(self.target_image)?;
 
         finalize_staged_now()?;
 
@@ -699,6 +862,59 @@ impl OstreeDeployConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_wait_reports_long_running_child_and_preserves_exit_status() {
+        for (script, expected_code, expect_report) in
+            [("sleep 0.2; exit 0", 0, true), ("exit 7", 7, false)]
+        {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            let mut output = Vec::new();
+            let status = wait_with_stage_progress(
+                &mut child,
+                std::time::Duration::from_millis(50),
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(status.code(), Some(expected_code), "{script}");
+            assert_eq!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .contains("still pulling and staging"),
+                expect_report,
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_progress_pipe_does_not_abandon_the_switch() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.2; exit 0"])
+            .spawn()
+            .unwrap();
+        let status = wait_with_stage_progress(
+            &mut child,
+            std::time::Duration::from_millis(50),
+            &mut ClosedPipe,
+        )
+        .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn booted_composefs_verity_table() {
@@ -870,5 +1086,53 @@ mod tests {
             full_copy.contains("--force"),
             "a non-interactive refusal must name the flag that accepts it"
         );
+    }
+
+    #[test]
+    fn composefs_relabel_command_shape() {
+        let deploy = Path::new("/sysroot/state/deploy/abc123def456");
+        let cases = [
+            (
+                "ghcr.io/tuna-os/utah:testing",
+                "targeted",
+                "/etc/selinux/targeted/contexts/files/file_contexts",
+            ),
+            (
+                "ghcr.io/projectbluefin/utah:testing",
+                "mls",
+                "/etc/selinux/mls/contexts/files/file_contexts",
+            ),
+            (
+                "quay.io/fedora/fedora-bootc:42",
+                "minimum",
+                "/etc/selinux/minimum/contexts/files/file_contexts",
+            ),
+        ];
+
+        for (img, policy, expected_fc) in cases {
+            let cmd = composefs_relabel_command(img, deploy, policy);
+            let joined = cmd.join(" ");
+            assert!(
+                joined.starts_with("podman run --rm --privileged --security-opt label=disable"),
+                "unexpected command prefix for {img}: {joined}"
+            );
+            assert!(
+                joined.contains("--mount type=bind,src=/sysroot,dst=/target"),
+                "missing bind mount in {joined}"
+            );
+            assert!(joined.contains(img), "missing image name in {joined}");
+            assert!(
+                joined.contains("setfiles -F -r /target/state/deploy/abc123def456"),
+                "missing setfiles and alt-root in {joined}"
+            );
+            assert!(
+                joined.contains(expected_fc),
+                "expected file_contexts {expected_fc} not found in {joined}"
+            );
+            assert!(
+                joined.ends_with("/target/state/deploy/abc123def456/etc"),
+                "missing target etc path in {joined}"
+            );
+        }
     }
 }
