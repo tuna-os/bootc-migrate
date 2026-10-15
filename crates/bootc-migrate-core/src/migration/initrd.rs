@@ -32,12 +32,6 @@ fn detect_lvm() -> bool {
     }
 }
 
-/// Rebuild the staged initrd with LVM/DM support using the host's dracut and
-/// Dakota's kernel modules from the composefs overlay mount.
-///
-/// Non-fatal: warns if dracut is absent or fails so migration still completes.
-/// The user can rerun dracut manually from the OSTree fallback if the system
-/// fails to boot (see the warning message for the exact command).
 /// Build a scratch tree (for `dracut --include`) carrying the systemd units that
 /// loop-mount the composefs ext4 store at /sysroot/composefs inside the initrd,
 /// ordered after sysroot.mount and before bootc-root-setup.service. Returns the
@@ -157,17 +151,62 @@ fn prepare_stateroot_var_include(var: &var_layout::VarMount) -> Result<tempfile:
     Ok(tmp)
 }
 
+/// Whether a failed rebuild must stop the migration.
+///
+/// The stock target initrd already assembles dm/crypt roots, so a failed
+/// rebuild that only *adds* LVM/DM/crypt modules leaves an initrd that most
+/// likely still boots: warn and continue. An XFS root is different. The stock
+/// initrd has no xfs driver, so `sysroot.mount` fails and the system drops to
+/// the emergency shell on the first boot. Making that entry the default is
+/// worse than stopping, so the migration stops before Phase 5 writes the
+/// composefs boot entry or `loader.conf`.
+fn rebuild_failure_is_fatal(needs_xfs: bool) -> bool {
+    needs_xfs
+}
+
+/// Rebuild the staged initrd with LVM/DM/crypt and XFS support, using the
+/// host's dracut and the target's kernel modules from the composefs overlay
+/// mount.
+///
+/// A failure is an error when the stock initrd cannot mount the root (see
+/// [`rebuild_failure_is_fatal`]), and a warning otherwise.
 pub(crate) fn rebuild_initrd_with_lvm_if_needed(
     kver: &str,
     mount_path: &Path,
     target_image: &str,
     initrd_dst: &Path,
 ) -> Result<()> {
+    let needs_xfs = Path::new("/sysroot/composefs-loopback.ext4").exists();
+    match rebuild_initrd(kver, mount_path, target_image, initrd_dst, needs_xfs) {
+        Ok(()) => Ok(()),
+        Err(e) if rebuild_failure_is_fatal(needs_xfs) => Err(e.context(
+            "the target initrd has no xfs driver, so the composefs entry cannot mount this \
+             XFS root without the rebuild. The migration stopped before it changed the boot \
+             entries; the system still boots its current deployment. Free space on / \
+             (dracut builds the initrd under /var/tmp) and run the migration again",
+        )),
+        Err(e) => {
+            eprintln!(
+                "[phase5] Warning: {e:#}. The composefs initrd is left as the target ships it; \
+                 if the composefs entry does not boot, select the OSTree fallback and run the \
+                 migration again."
+            );
+            Ok(())
+        }
+    }
+}
+
+fn rebuild_initrd(
+    kver: &str,
+    mount_path: &Path,
+    target_image: &str,
+    initrd_dst: &Path,
+    needs_xfs: bool,
+) -> Result<()> {
     // LUKS roots appear as device-mapper nodes (detect_lvm), and XFS roots get
     // an ext4 loopback for the verity store. The stock Dakota initrd already
     // handles dm/crypt and composefs; for XFS it just lacks the xfs driver.
     let needs_dm = detect_lvm();
-    let needs_xfs = Path::new("/sysroot/composefs-loopback.ext4").exists();
     // A dedicated /var volume needs a mount unit injected so bootc's composefs
     // boot exposes its data at /var (see prepare_stateroot_var_include).
     let separate_var = var_layout::detect_separate_var()?;
@@ -346,28 +385,29 @@ pub(crate) fn rebuild_initrd_with_lvm_if_needed(
             );
             Ok(())
         }
-        Ok(s) => {
-            eprintln!(
-                "[phase5] Warning: dracut exited {:?} — composefs initrd left unchanged; it \
-                 lacks {label} support and the composefs entry may not boot. Boot the OSTree \
-                 fallback and rerun the migration to recover.",
-                s.code()
-            );
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!(
-                "[phase5] Warning: initrd rebuild failed ({e:#}) — composefs initrd left \
-                 unchanged; boot the OSTree fallback to recover."
-            );
-            Ok(())
-        }
+        Ok(s) => Err(anyhow!(
+            "dracut exited {:?} while rebuilding the composefs initrd with {label} support",
+            s.code()
+        )),
+        Err(e) => Err(e.context(format!(
+            "failed to rebuild the composefs initrd with {label} support"
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stock target initrd has no xfs driver: booting it on an XFS root
+    /// fails `sysroot.mount` and lands in the emergency shell. The LUKS E2E
+    /// cell reproduced this twice when dracut ran out of space under /var/tmp
+    /// and the migration still made the entry the default.
+    #[test]
+    fn failed_rebuild_stops_the_migration_only_for_xfs_roots() {
+        assert!(rebuild_failure_is_fatal(true));
+        assert!(!rebuild_failure_is_fatal(false));
+    }
 
     /// This is the binding copy of the mount options. The unit is established
     /// under /sysroot, which becomes / at switch-root, so the mount survives

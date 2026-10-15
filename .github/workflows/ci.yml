@@ -27,12 +27,12 @@ jobs:
   validate:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - name: Run checks (clippy, rustfmt, unit tests, shellcheck)
         run: just check
 
@@ -43,7 +43,7 @@ jobs:
   coverage:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -70,7 +70,7 @@ jobs:
     env:
       SHELLCHECK_OPTS: --severity=warning
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run actionlint
         # Pinned to a digest, not :latest. This is a required check, so a
         # mutable tag lets an upstream image replacement turn main red with
@@ -89,7 +89,7 @@ jobs:
   cargo-deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           log-level: warn
@@ -138,7 +138,7 @@ jobs:
     timeout-minutes: 310
     steps:
       - name: Wait for E2E workflow
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             // Wait for the E2E workflow to complete.
