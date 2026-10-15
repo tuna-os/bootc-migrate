@@ -783,7 +783,14 @@ for part in "${LOOP_DEV}p1" "${LOOP_DEV}p2" "${LOOP_DEV}p3" "${LOOP_DEV}p4"; do
             for conf in "$entries"/*.conf; do
                 [ -f "$conf" ] || continue
                 if ! grep -q 'console=ttyS0' "$conf"; then
-                    EXTRA_KARGS="console=ttyS0,115200n8 console=tty0 systemd.log_level=info"
+                    # #231: console=ttyS0 alone only buys visibility through
+                    # GRUB/initrd — plymouth takes the console at switch-root
+                    # and everything after that goes dark on serial. Disable
+                    # plymouth and make systemd narrate unit startup so a
+                    # stalled boot names the stalling unit instead of just
+                    # going silent (which looks identical to a healthy,
+                    # merely-slow boot in qemu.log).
+                    EXTRA_KARGS="console=ttyS0,115200n8 console=tty0 systemd.log_level=info plymouth.enable=0 systemd.show_status=1"
                     [ "$E2E_CONSOLE_JOURNAL" = "1" ] && EXTRA_KARGS="$EXTRA_KARGS systemd.journald.forward_to_console=1"
                     sudo sed -i "s|^\(options .*\)\$|\1 $EXTRA_KARGS|" "$conf" 2>/dev/null || true
                     echo "  patched: $(basename "$conf")"
@@ -1553,7 +1560,7 @@ PREDIAG
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after the ostree re-base."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the ostree re-base reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         exit 1
     fi
@@ -1784,7 +1791,7 @@ REVSSH
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after the composefs -> ostree re-base."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the composefs -> ostree re-base reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
@@ -1841,11 +1848,8 @@ ESPCHECK
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
 
-    # What backs /var on the OSTree deployment. On a clean fedora-bootc
-    # install chronyd and gssproxy start; after this route both fail on
-    # missing /var/lib state even though the target's tmpfiles.d creates it
-    # at boot, which points at a /var mount carried over from the composefs
-    # source and mounted over the stateroot /var after tmpfiles ran.
+    # Diagnostic details for the composefs -> ostree deployment (/var mounts,
+    # accounts, and vendor /usr/etc file presence).
     step "=== composefs-to-ostree: /var mount diagnostics ==="
     ssh $SSH_OPTS root@localhost bash <<'VARDIAG' 2>&1 | sed 's/^/[var-diag] /' || true
 set +e
@@ -2040,7 +2044,7 @@ SWAPSSH
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after the image swap."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the image-swap reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
@@ -2328,6 +2332,19 @@ HB_PID=""
 MIGRATE_RC=$(cat /tmp/e2e-migrate.rc 2>/dev/null | cut -d= -f2)
 rm -f /tmp/e2e-migrate.rc
 step "Migration completed in $((SECONDS - MIGRATE_START))s (rc=${MIGRATE_RC:-?})"
+# The hardware compatibility check runs before any change on every
+# migration. A finished migration without --accept-hardware-gaps means it
+# ran and found nothing BLOCKING on this VM; its report must be in the
+# output (the TUI run logs screens, not the migrator's own lines).
+if [ "$E2E_MODE" != "tui-migrate" ] && [ "${MIGRATE_RC:-1}" = "0" ]; then
+    if ! grep -q '^=== Hardware compatibility ===' /tmp/e2e-migrate.log; then
+        echo "FAIL: the migration finished without printing its hardware compatibility report."
+        exit 1
+    fi
+    echo "OK: hardware compatibility report:"
+    sed -n '/^=== Hardware compatibility ===/,/^\(OK:\|=== [^H]\)/p' /tmp/e2e-migrate.log \
+        | head -30 | sed 's/^/  [hardware] /'
+fi
 # Pull the TUI walkthrough artifacts out of the guest: the asciicast
 # recordings of both interactive flows (render a timelapse with
 # `asciinema play` or `agg … .gif` — CI does the latter) and the
@@ -2450,9 +2467,14 @@ printf '%s\n' \
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
 
 # Belt and suspenders: having both sshd.service / ssh.service (sshd -D) and e2e-sshd.socket
-# bound to port 22 kills the daemon with 255/EXCEPTION.
+# bound to port 22 kills the daemon with 255/EXCEPTION. Debian/Ubuntu also
+# enable ssh.socket, which binds 0.0.0.0:22 itself; mask the socket units.
 rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service" \
-      "$DEPLOY_ETC/systemd/system/multi-user.target.wants/ssh.service"
+      "$DEPLOY_ETC/systemd/system/multi-user.target.wants/ssh.service" \
+      "$DEPLOY_ETC/systemd/system/sockets.target.wants/ssh.socket" \
+      "$DEPLOY_ETC/systemd/system/sockets.target.wants/sshd.socket"
+ln -sf /dev/null "$DEPLOY_ETC/systemd/system/ssh.socket"
+ln -sf /dev/null "$DEPLOY_ETC/systemd/system/sshd.socket"
 
 mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
 echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
@@ -2549,7 +2571,7 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
 done
 
 if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-    echo "ERROR: VM did not boot back after migration."
+    echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the migration reboot (after $MAX_ATTEMPTS attempts)."
     step "=== Post-reboot failure diagnostics ==="
     echo "--- All FAILED/DEPEND lines ---"
     serial_failure_lines | tail -80 || true
@@ -3031,7 +3053,7 @@ ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $FEDORA_BOOTNUM,$SDBOOT_BOO
 
 sleep 3
 wait_for_ssh_with_msg "OSTree rollback boot SSH" 120 || {
-    echo "FAIL: VM did not come back after OSTree rollback boot"
+    echo "FAIL: SSH did not answer after the OSTree rollback boot"
     tail -100 qemu.log
     exit 1
 }
@@ -3060,7 +3082,7 @@ step "rollback: restoring BootOrder to $ORIG_BOOTORDER and returning to composef
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $ORIG_BOOTORDER >/dev/null && systemctl reboot" || true
 sleep 3
 wait_for_ssh_with_msg "Return-to-composefs SSH" 60 || {
-    echo "FAIL: VM did not come back to composefs after rollback"
+    echo "FAIL: SSH did not answer after the return-to-composefs reboot"
     tail -100 qemu.log
     exit 1
 }
@@ -3233,10 +3255,21 @@ step "=== Capturing post-commit vs fresh-Dakota diff ==="
 # File listing from the post-commit VM (key subtrees).
 ssh $SSH_OPTS root@localhost "find /etc /boot/loader/entries /boot/efi/loader/entries /sysroot/composefs/images /sysroot/state -type f -o -type l 2>/dev/null | sort" > /tmp/e2e-post-commit-files.txt 2>/dev/null
 
-# File listing from a fresh Dakota container (reference factory state).
-# Pull if not cached, then list factory /etc + /usr paths (not /var or /home — those are seeded empty).
-podman pull --quiet "$TARGET_IMAGE" 2>/dev/null || true
-podman run --rm "$TARGET_IMAGE" find /etc /usr -type f -o -type l 2>/dev/null | sort > /tmp/e2e-fresh-dakota-files.txt 2>/dev/null
+# File listing from a fresh Dakota container (reference factory state):
+# factory /etc + /usr paths (not /var or /home — those are seeded empty).
+# List the exact image the VM booted, not $TARGET_IMAGE: the tag can move
+# while the run is in flight, and a listing of a newer push reports that
+# push's new /etc files as "dropped by the migration".
+TARGET_DIGEST=$(echo "$BOOTC_JSON" | jq -r '.status.booted.image.imageDigest // empty')
+if [ -z "$TARGET_DIGEST" ]; then
+    echo "FAIL: bootc status reports no booted image digest; cannot pick the reference image"; exit 1
+fi
+TARGET_REPO=${TARGET_IMAGE%@*}
+case "${TARGET_REPO##*/}" in *:*) TARGET_REPO=${TARGET_REPO%:*} ;; esac
+REFERENCE_IMAGE="$TARGET_REPO@$TARGET_DIGEST"
+echo "Reference image (booted digest): $REFERENCE_IMAGE"
+podman pull --quiet "$REFERENCE_IMAGE" 2>/dev/null || true
+podman run --rm "$REFERENCE_IMAGE" find /etc /usr -type f -o -type l 2>/dev/null | sort > /tmp/e2e-fresh-dakota-files.txt 2>/dev/null
 
 # Diff: show paths in post-commit that are NOT in the fresh factory image.
 # These should be user-introduced files only.
@@ -3268,7 +3301,7 @@ LC_ALL=C sort -u -o /tmp/e2e-post-commit-files.txt /tmp/e2e-post-commit-files.tx
 grep '^/etc/' /tmp/e2e-fresh-dakota-files.txt | LC_ALL=C sort -u > /tmp/e2e-vendor-etc.txt || true
 VENDOR_ETC_COUNT=$(wc -l < /tmp/e2e-vendor-etc.txt)
 if [ "$VENDOR_ETC_COUNT" -eq 0 ]; then
-    echo "FAIL: the reference listing of $TARGET_IMAGE has no /etc files; the comparison would pass vacuously"
+    echo "FAIL: the reference listing of $REFERENCE_IMAGE has no /etc files; the comparison would pass vacuously"
     exit 1
 fi
 MISSING_VENDOR=$(LC_ALL=C comm -13 /tmp/e2e-post-commit-files.txt /tmp/e2e-vendor-etc.txt || true)
@@ -3276,7 +3309,7 @@ for allowed in $VENDOR_ETC_ALLOWED_MISSING; do
     MISSING_VENDOR=$(echo "$MISSING_VENDOR" | grep -vxF "$allowed" || true)
 done
 if [ -n "$MISSING_VENDOR" ]; then
-    echo "FAIL: $(echo "$MISSING_VENDOR" | wc -l) file(s) the target image ships in /etc are missing after the migration:"
+    echo "FAIL: $(echo "$MISSING_VENDOR" | wc -l) file(s) $REFERENCE_IMAGE ships in /etc are missing after the migration:"
     echo "$MISSING_VENDOR" | head -40 | sed 's/^/  /'
     exit 1
 fi

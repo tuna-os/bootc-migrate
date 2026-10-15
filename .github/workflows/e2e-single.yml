@@ -117,7 +117,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Free disk space
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
@@ -242,7 +242,7 @@ jobs:
 
       - name: Upload TUI walkthrough artifacts
         if: ${{ always() && inputs.mode == 'tui-migrate' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tui-walkthrough
           path: |
@@ -262,11 +262,15 @@ jobs:
             if [ -f e2e-run.log ]; then
               echo '### Last phase reached'
               echo '```'
-              grep -aE '^=== |\[e2e [0-9:]+\] ===' e2e-run.log | tail -5
+              # step() wraps the timestamp in ANSI colour, so the reset lands
+              # between "]" and " ===" and an unescaped pattern never matches.
+              sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' e2e-run.log \
+                | grep -aE '^=== |\[e2e [0-9:]+\] ===' | tail -5
               echo '```'
               echo '### Assertions and errors'
               echo '```'
-              grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' e2e-run.log | tail -20
+              sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' e2e-run.log \
+                | grep -aE 'FAIL:|ERROR:|Migration Failed|panicked' | tail -20
               echo '```'
               echo '### Log tail'
               echo '```'
@@ -279,7 +283,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-single-logs
           path: |
