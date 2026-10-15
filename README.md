@@ -587,8 +587,9 @@ sudo ./tests/run-e2e.sh
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
 
-The CI matrix runs fourteen cells (see `.github/workflows/e2e-tests.yml`, which
-is authoritative):
+The full matrix has fourteen cells (see `.github/e2e-scenarios.yml`, which is
+authoritative). It runs nightly; each PR and push to `main` runs a
+round-robin slice of the gating cells (see `docs/testing.md`):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|

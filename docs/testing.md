@@ -12,7 +12,7 @@ evidence-gathering method this strategy grew out of).
 | Unit | Pure logic: parsers, planners, mergetc tables, routing, digest handling, probe classification | `just test` / CI `validate`, every push | seconds |
 | Feature-matrix | Same, with every cargo feature on (`composefs-native` is invisible to the default build) | `just test-all-features` (part of `just check`) | seconds |
 | Integration (host) | Real repositories on loopback filesystems, real podman probes of real images — no VM | developer machines + scheduled canary | minutes |
-| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml matrix, PR-gated via `e2e-gate` | ~30 min/cell |
+| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml, called from ci.yml's `e2e` job: a round-robin slice of the gating cells per PR/push, the full matrix nightly | ~30 min/cell |
 
 Rules of thumb:
 
@@ -331,16 +331,26 @@ Runner selection, highest precedence first:
 3. **Neither** → `ubuntu-latest`.
 
 `KVM_E2E_ENABLED` is now a **kill switch, not an enable switch**: set it
-to `'false'` to stand the whole matrix down (`e2e-gate` treats a skipped
-run as a trivial pass); unset or `'true'` both run. Switching lanes is a
-variable change, never a workflow edit.
+to `'false'` to stand the whole matrix down (`required-checks` treats the
+skipped `e2e` job as a pass); unset or `'true'` both run. Switching lanes is
+a variable change, never a workflow edit.
+
+### Which cells run when
+
+The scenarios live in `.github/e2e-scenarios.yml`. Cells without
+`allow_failure: true` are gating. Pull requests and pushes to `main` run
+`E2E_ROUND_ROBIN_SIZE` gating cells (repo variable, default 2), starting at
+`(run_number × size) mod <gating cells>`, so consecutive CI runs walk the
+whole gating list. The nightly schedule and `workflow_dispatch` run every
+cell, exploratory ones included. A regression in a cell a PR did not draw
+surfaces on the next runs that draw it, or in the nightly run at the latest.
 
 ### Timeouts, and why they are what they are
 
 | Budget | Value | Reason |
 |---|---|---|
 | Per-cell job timeout | 90 min | The tui-migrate cell measured 65 min end to end (image bake + migration + reboot + rollback + commit, driven through the wizard). |
-| `e2e-gate` wait window (ci.yml) | 100 min | Must clear the job timeout plus queue time. It was 50 min while the matrix was gated off; leaving it there would have failed every PR the moment the matrix started gating. |
+| `e2e` job (ci.yml) | — | No wait window: ci.yml calls e2e-tests.yml as a reusable workflow, so `required-checks` depends on the matrix result directly. The old `e2e-gate` polled for a separately triggered run and held a runner for up to five hours per PR. |
 
 Measured cell runtimes on `ubuntu-latest` (2026-08-27): ostree-rebase-plan
 26 min, composefs-migrate 36 min, tui-migrate 65 min. The `Enable KVM
