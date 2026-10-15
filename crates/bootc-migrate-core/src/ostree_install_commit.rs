@@ -66,6 +66,10 @@ pub const VOLATILE_VAR_PATHS: &[&str] = &[
     "log/journal",
     "lib/systemd/coredump",
     "lib/bootc-rebase",
+    // NetworkManager rewrites its state file on the composefs side after
+    // the copy (at the shutdown before the reboot); the live system
+    // regenerates it.
+    "lib/NetworkManager/NetworkManager.state",
 ];
 
 /// Where the commit record is written, beside the install report.
@@ -245,6 +249,13 @@ pub fn diff_var(old_var: &Path, live_var: &Path) -> Result<VarDiff> {
             let rel = rel_dir.join(entry.file_name());
             let rel_str = rel.to_string_lossy().into_owned();
             let old_meta = entry.metadata()?;
+            // The route's /var copy skips sockets, FIFOs and device nodes
+            // (xattr::copy_dir_all_with_xattrs), so they can never be in the
+            // live /var; counting them would refuse every real host.
+            let old_ty = old_meta.file_type();
+            if !(old_ty.is_dir() || old_ty.is_file() || old_ty.is_symlink()) {
+                continue;
+            }
             diff.entries += 1;
             let Ok(live_meta) = fs::symlink_metadata(live_var.join(&rel)) else {
                 if is_volatile(&rel_str) {
@@ -1019,6 +1030,24 @@ mod tests {
         let diff = diff_var(&d.path().join("nope"), d.path()).unwrap();
         assert_eq!(diff.entries, 0);
         assert!(diff.missing.is_empty());
+    }
+
+    /// Sockets never reach the live /var (the copy skips special files),
+    /// and NetworkManager.state is rewritten after the copy: neither may
+    /// block the commit.
+    #[test]
+    fn diff_var_ignores_special_files_and_nm_state() {
+        let d = tempdir().unwrap();
+        let (old, live) = (d.path().join("old"), d.path().join("live"));
+        fs::create_dir_all(old.join("run")).unwrap();
+        fs::create_dir_all(live.join("run")).unwrap();
+        let _sock = std::os::unix::net::UnixListener::bind(old.join("run/s.sock")).unwrap();
+        write(&old.join("lib/NetworkManager/NetworkManager.state"), "x");
+        fs::create_dir_all(live.join("lib/NetworkManager")).unwrap();
+
+        let diff = diff_var(&old, &live).unwrap();
+        assert!(diff.missing.is_empty(), "missing: {:?}", diff.missing);
+        assert_eq!(diff.volatile_missing, 1);
     }
 
     #[test]
