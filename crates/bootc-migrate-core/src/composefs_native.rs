@@ -256,6 +256,16 @@ pub fn repo_exists(repo_path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// `sha256:<hex>` for `bytes`, the OCI digest form.
+    fn sha256_ref(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        let hex: String = sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("sha256:{hex}")
+    }
+
     /// A minimal POSIX ustar archive: `usr/` and one file under it (the
     /// filesystem builder copies root metadata from `/usr`, so the layer must
     /// contain it). Hand-rolled so the test needs no tar dependency.
@@ -293,15 +303,13 @@ mod tests {
     /// the trait methods the way phase 3 does.
     #[test]
     fn create_and_seal_against_a_real_store() {
-        use sha2::Digest as _;
-
         let dir = tempfile::tempdir().unwrap();
         let store = NativeStore::new(dir.path().join("repo"));
         let repo = store.repo().unwrap();
 
         // Layer: import the tar under its diff_id (sha256 of the bytes).
         let tar = minimal_tar();
-        let diff_id = format!("sha256:{:x}", sha2::Sha256::digest(&tar));
+        let diff_id = sha256_ref(&tar);
         let (layer_verity, _stats) = runtime()
             .unwrap()
             .block_on(composefs_oci::import_layer(
@@ -339,11 +347,7 @@ mod tests {
             config_size = config_json.len(),
             tar_size = tar.len(),
         );
-        let manifest_digest = oci_digest(&format!(
-            "sha256:{:x}",
-            sha2::Sha256::digest(manifest_json.as_bytes())
-        ))
-        .unwrap();
+        let manifest_digest = oci_digest(&sha256_ref(manifest_json.as_bytes())).unwrap();
         // The crate-private content-type tag for manifest splitstreams.
         let manifest_content_type: u64 = u64::from_le_bytes(*b"ocimanif");
         let mut stream = repo.create_stream(manifest_content_type).unwrap();

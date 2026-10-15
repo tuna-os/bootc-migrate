@@ -69,6 +69,26 @@ enum Commands {
     /// deliberately refuses to guess at (an image shipping several desktops,
     /// or one this tool does not recognize).
     DeMigrate(DeMigrateArgs),
+    /// First-boot repair of known migration breakage (L3, issue #309).
+    /// The staged unit runs `repair --firstboot` once on the new system;
+    /// with no flag, prints what a pass would change.
+    Repair(RepairArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct RepairArgs {
+    /// Run the first-boot pass and write the repair log (the unit's mode).
+    #[arg(long)]
+    firstboot: bool,
+    /// Print what a pass would change; change nothing (the default).
+    #[arg(long)]
+    dry_run: bool,
+    /// Stop the staged unit from running on the next boot.
+    #[arg(long)]
+    disable: bool,
+    /// Undo --disable.
+    #[arg(long)]
+    enable: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -531,6 +551,10 @@ fn run() -> Result<()> {
                 bootc_migrate_core::status::render(&bootc_migrate_core::status::gather())
             );
             Ok(())
+        }
+        Some(Commands::Repair(ref a)) => {
+            use bootc_migrate_core::firstboot_repair::{cli, cli_action};
+            cli(cli_action(a.firstboot, a.dry_run, a.disable, a.enable)?)
         }
         Some(Commands::Rebase(ref rebase_args)) => {
             if rebase_args.target_image.is_empty() {

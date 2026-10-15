@@ -691,6 +691,15 @@ impl OstreeInstallConfig<'_> {
         crate::firstboot_verify::install_cleanup_prompt(&deploy_root.join("etc"))
             .context("failed to stage the desktop cleanup prompt")?;
         println!("[firstboot] desktop cleanup prompt staged");
+        // ---- First-boot repair (L3, #309) ----
+        // Staged before the relabel below, so its files get target labels.
+        // The mergetc /etc merge keeps the machine-id verbatim here, as on
+        // CoreMigration, so the machine-id class is not armed.
+        crate::firstboot_repair::stage_repair(
+            &deploy_root.join("etc"),
+            var_copied.then(|| Path::new(OSTREE_STATEROOT_VAR)),
+            false,
+        )?;
 
         // ---- SELinux labels ----
         // The merge and the /var copy wrote files with the labels the host
