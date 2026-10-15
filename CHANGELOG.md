@@ -33,6 +33,29 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   With `--apply` it copies the install report and ESP snapshot into the live
   `/var` first. Then it deletes the old `/var`, the composefs store and the
   composefs deployments. The OSTree repo, `/boot`, the ESP and NVRAM stay.
+- Package host readiness report (#372): `bootc-rebase --dry-run` on a
+  package-managed system checks boot mode, root filesystem, LUKS and LVM,
+  the btrfs subvolume layout, `/boot` and `/home`, free space against the
+  target image's size, running package managers and SELinux. It prints a
+  reason for each refusal, then the hardware report.
+- `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
+  database, no ostree or composefs state) as `Backend::Package` and plans
+  the `package -> ostree` route (`PackageInstall`, not implemented yet).
+  `--target-backend` now defaults to `auto`: composefs from a bootc
+  deployment, as before, and ostree from a package host (#371, part of #370).
+- Hardware and firmware check before every migration, on every route of
+  `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
+  compares the devices that work today, the out-of-tree drivers in use
+  (NVIDIA, VirtualBox, ZFS), their firmware and the CPU microcode with the
+  target image's kernel and `/usr/lib/firmware`. It refuses when a storage,
+  display, network, wireless or USB controller would lose its driver or
+  firmware, unless you add `--accept-hardware-gaps`. A display controller
+  only gets a warning when the target kernel has a firmware framebuffer
+  driver (`simpledrm`, `efifb`). The registry scan
+  collects the target data in its single pass over the layers. Within a run,
+  the tool caches the scan, so it no longer downloads the image once for each
+  check.
+
 - tunaOS desktop-migration E2E cells: a ring of four OSTree re-bases
   between the Albacore GNOME, Niri, COSMIC and XFCE tags, each with
   `--de-migrate`. Every desktop is stashed, restored and required to start
@@ -92,12 +115,29 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The migration stops when it cannot rebuild the composefs initrd for an XFS
+  root. The stock target initrd has no xfs driver, so the old warning let the
+  migration make an entry the default that then failed `sysroot.mount` and
+  dropped to the emergency shell. dracut ran out of space under `/var/tmp`
+  in the LUKS E2E cell after `dakota:stable` grew. The error now stops Phase
+  5 before it writes the boot entry or `loader.conf`, so the system still
+  boots its current deployment. A rebuild that only adds LVM/DM/crypt is
+  still a warning, because the stock initrd assembles those roots.
+
 - `bootc-rebase`'s cross-base gate now says when it has checked a pair and
   found one OS lineage. Before, that pass printed nothing, so it looked
   the same as a gate that had stopped gating. The #80 missing-accounts
   note now also reads `/usr/lib/passwd` and `/usr/lib/group`. EL10 bootc
   images keep their system accounts there, and the note used to list
   every one of them as missing on an AlmaLinux host.
+- `bootc-rebase`'s composefs → OSTree (`OstreeInstall`) route now supplements
+  the merged `/etc/passwd` and `/etc/group` with the target image's vendor
+  accounts from `/usr/lib/`. Target images with `nss-altfiles` or vendor-split
+  databases (Fedora bootc, CentOS, AlmaLinux) keep system accounts (`chrony`,
+  `rpc`, `rpcuser`, `sssd`, `mail`) in `/usr/lib/` instead of `/usr/etc/`;
+  without them in `/etc/passwd` and `/etc/group`, early-boot
+  `systemd-tmpfiles-setup.service` failed to resolve them before
+  `systemd-userdbd` started, causing `chronyd` and `gssproxy` to fail (#276).
 - `bootc-rebase`'s composefs → OSTree route now fills the new stateroot's
   `/var` with the target image's own `/var` skeleton after it copies the
   live `/var`, without overwriting anything it carried. The stateroot of
@@ -105,9 +145,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `/var/lib/chrony`, and chronyd failed. The new post-reboot health check
   found this.
 - `bootc-rebase`'s composefs image swap now prepares the new deployment's
-  first boot when the target is another distribution. On composefs, `bootc
-  switch` merges the running `/etc` at shutdown. From Dakota to Utah, this
-  merge has two results:
+  first boot when the target is another distribution (#267, #275). On composefs,
+  `bootc switch` merges the running `/etc` into the staged deployment at
+  shutdown. From
+  Dakota to Utah, this merge has two results:
   - Dakota creates its accounts at runtime, so its `/etc/passwd` replaces
     Utah's, and Utah's `dbus` user is missing.
   - Dakota has no SELinux policy, so the merged files have no labels, and
@@ -115,8 +156,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   In both cases D-Bus does not start and the boot never completes. The
   route now installs a first-boot unit that runs the target's
   `systemd-sysusers` and `ldconfig` before `sysinit.target`. When the
-  target enforces a policy that the host did not label for, the unit
-  also runs the target's `restorecon` over `/etc` and `/var`.
+  target enforces a policy that the host did not label for, the route
+  does that merge before it returns (it stops `bootc-finalize-staged.service`,
+  which runs the merge), then labels the merged `/etc` with `setfiles` from
+  the target image (#275). Before, PID 1 and journald could not use the
+  unlabelled `/etc/machine-id`, so the boot failed before the first-boot unit
+  ran. The first-boot unit still runs the target's `restorecon` over `/var`
+  and `/etc`.
 - `bootc-rebase` finalizes the deployment `bootc switch` staged before it
   returns, instead of leaving it to shutdown (#262). On a `bootc install
   to-disk` layout with no separate /boot partition, libostree's shutdown-time
