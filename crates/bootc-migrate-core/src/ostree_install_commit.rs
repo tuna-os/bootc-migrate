@@ -807,23 +807,47 @@ pub fn execute(
     Ok(outcome)
 }
 
+/// The `mount` argv that makes `path` read-write or read-only.
+///
+/// On an OSTree boot `/sysroot` is read-only only as a per-mount flag:
+/// ostree-prepare-root bind-remounts it read-only while the filesystem
+/// itself stays read-write for the deployment's `/etc` and the stateroot
+/// `/var`, which are binds of the same filesystem. A plain `remount,ro`
+/// reconfigures the superblock and so turns `/var` and `/etc` read-only on
+/// the running system; `remount,bind` changes only this mount's flag.
+pub fn remount_command(path: &str, read_only: bool) -> Vec<String> {
+    let opts = if read_only {
+        "remount,bind,ro"
+    } else {
+        "remount,bind,rw"
+    };
+    ["mount", "-o", opts, path]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// [`execute`] on the booted host: `/sysroot` is read-only on an OSTree
 /// boot, so it is remounted read-write around the deletes and back to
-/// read-only afterwards (a busy filesystem refuses that; it then stays
+/// read-only afterwards, as a bind remount that leaves the other mounts
+/// of the filesystem alone (a busy filesystem refuses that; it then stays
 /// read-write until the next boot, which is harmless).
 pub fn execute_host(plan: &CommitPlan, forced: bool) -> Result<CommitOutcome> {
-    let status = Command::new("mount")
-        .args(["-o", "remount,rw", PHYSICAL_ROOT])
+    let rw = remount_command(PHYSICAL_ROOT, false);
+    let status = Command::new(&rw[0])
+        .args(&rw[1..])
         .status()
-        .context("running mount -o remount,rw /sysroot")?;
+        .with_context(|| format!("running {}", rw.join(" ")))?;
     if !status.success() {
-        bail!("mount -o remount,rw {PHYSICAL_ROOT} failed (exit {status}); nothing was deleted");
+        bail!(
+            "{} failed (exit {status}); nothing was deleted",
+            rw.join(" ")
+        );
     }
     let proc_mounts = fs::read_to_string("/proc/mounts").context("reading /proc/mounts")?;
     let result = execute(&Layout::host(), plan, &proc_mounts, forced);
-    let ro = Command::new("mount")
-        .args(["-o", "remount,ro", PHYSICAL_ROOT])
-        .status();
+    let ro_argv = remount_command(PHYSICAL_ROOT, true);
+    let ro = Command::new(&ro_argv[0]).args(&ro_argv[1..]).status();
     if !ro.is_ok_and(|s| s.success()) {
         eprintln!(
             "Note: {PHYSICAL_ROOT} could not be remounted read-only (busy); it stays read-write \
@@ -939,6 +963,18 @@ mod tests {
         assert!(mounts_within(Path::new("/sysroot/state"), &mps).is_empty());
         // Prefix of a name is not containment.
         assert!(mounts_within(Path::new("/sysroot/compose"), &mps).is_empty());
+    }
+
+    #[test]
+    fn remount_command_only_touches_the_mount_flag() {
+        // (read_only, expected argv); never a plain remount, which would
+        // flip the superblock under /var and /etc.
+        for (ro, want) in [
+            (false, ["mount", "-o", "remount,bind,rw", "/sysroot"]),
+            (true, ["mount", "-o", "remount,bind,ro", "/sysroot"]),
+        ] {
+            assert_eq!(remount_command("/sysroot", ro), want, "ro={ro}");
+        }
     }
 
     #[test]
