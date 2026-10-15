@@ -346,15 +346,15 @@ pub fn phase5_setup_bootloader(
                 // Rebuild initrd with LVM support if the source system uses LVM.
                 // Must happen before patch_origin_boot_digest so the hash covers
                 // the LVM-enabled initrd bytes, not the original Dakota initrd.
-                if have_initrd
-                    && let Err(e) = super::initrd::rebuild_initrd_with_lvm_if_needed(
+                // An error here means the composefs entry cannot boot; stop
+                // before the entry and loader.conf below make it the default.
+                if have_initrd {
+                    super::initrd::rebuild_initrd_with_lvm_if_needed(
                         &kver,
                         &mount_path,
                         target_image,
                         &esp_initrd,
-                    )
-                {
-                    eprintln!("[phase5] Warning: composefs initrd rebuild failed: {e:#}");
+                    )?;
                 }
 
                 // Now that vmlinuz + initrd are on the ESP, compute their
@@ -470,15 +470,14 @@ pub fn phase5_setup_bootloader(
         extract_files_preferring_mount(&mount_path, target_image, &extract_pairs)
             .context("failed to copy kernel/initrd from target image (GRUB2 path)")?;
 
-        if have_grub_initrd
-            && let Err(e) = super::initrd::rebuild_initrd_with_lvm_if_needed(
+        // As on the systemd-boot path: stop before the entries are promoted.
+        if have_grub_initrd {
+            super::initrd::rebuild_initrd_with_lvm_if_needed(
                 &kver,
                 &mount_path,
                 target_image,
                 &grub_initrd,
-            )
-        {
-            eprintln!("[phase5] Warning: LVM initrd rebuild failed: {e:#}");
+            )?;
         }
 
         // Composefs entry (priority 1)
