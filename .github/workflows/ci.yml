@@ -2,7 +2,8 @@
 #
 # Following the bootc/composefs-rs convention, nearly everything here runs
 # through `just` so it can be reproduced locally with a single command
-# (`just check`). The heavier QEMU end-to-end matrix lives in e2e-tests.yml.
+# (`just check`). The QEMU end-to-end matrix lives in e2e-tests.yml and is
+# called from the `e2e` job below.
 name: CI
 
 permissions:
@@ -101,18 +102,17 @@ jobs:
           command: check advisories bans sources licenses
 
   # Sentinel job for branch protection — set this as the single required check.
-  # Accepts 'skipped' so optional jobs never block a PR (e2e-gate skips on
-  # non-pull_request events).
+  # Accepts 'skipped' so optional jobs never block a PR (e2e skips on fork PRs
+  # and when KVM_E2E_ENABLED='false').
   #
-  # e2e-gate MUST be in this list. Its absence let PR #73 auto-merge despite
-  # a failing E2E cell: required-checks passed on validate+cargo-deny alone
-  # while e2e-gate independently reported failure, and branch protection
-  # only watches this sentinel. Never let required-checks and e2e-gate be
-  # siblings again — required-checks is the merge gate, so every other gate
-  # must feed into it.
+  # e2e MUST be in this list. Its absence let PR #73 auto-merge despite a
+  # failing E2E cell: required-checks passed on validate+cargo-deny alone
+  # while the E2E gate independently reported failure, and branch protection
+  # only watches this sentinel. required-checks is the merge gate, so every
+  # other gate must feed into it.
   required-checks:
     if: always()
-    needs: [validate, cargo-deny, coverage, actionlint, e2e-gate]
+    needs: [validate, cargo-deny, coverage, actionlint, e2e]
     runs-on: ubuntu-24.04
     steps:
       - name: Check all jobs succeeded
@@ -125,84 +125,12 @@ jobs:
             exit 1
           fi
 
-  # Gate PRs on E2E passing. This job waits for the e2e-tests.yml workflow
-  # (which runs in parallel) and blocks merge if any scenario failed. A run
-  # whose whole matrix skipped (KVM_E2E_ENABLED='false' kill switch) is
-  # treated as a pass.
-  e2e-gate:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+  # The E2E matrix, called as a reusable workflow so required-checks depends
+  # on its result directly. This replaced an e2e-gate job that held a runner
+  # for up to five hours polling for a separately triggered E2E run. PRs and
+  # pushes run a round-robin slice of the gating cells (see e2e-tests.yml).
+  e2e:
     needs: [validate]
-    # Must exceed maxWait below, so an overrun surfaces as the script's own
-    # message rather than an opaque job cancellation.
-    timeout-minutes: 310
-    steps:
-      - name: Wait for E2E workflow
-        uses: actions/github-script@v9
-        with:
-          script: |
-            // Wait for the E2E workflow to complete.
-            //
-            // Sizing this against a single job's timeout is the trap. The
-            // matrix is 7 scenarios at timeout-minutes: 90 with no
-            // max-parallel, so wall-clock is set by how many runners are free,
-            // not by the slowest cell. 50 was raised to 100 for that reason and
-            // 100 is still short:
-            //
-            //   run 33211609609 — matrix spanned 21:43 to 01:02 (~3h20m), all
-            //   seven scenarios green. This gate started at 23:00 and needed to
-            //   wait ~122 min. It gave up at 00:40 and failed the PR, throwing
-            //   away three hours of runner time over a passing test suite.
-            //
-            // 5 hours clears the observed worst case with headroom. It does not
-            // cover a fully serialized matrix (7 x 90m = 10.5h) — polling for
-            // that long would cost more than it saves. The real fix is to make
-            // the e2e jobs required checks directly instead of polling for them
-            // from a second workflow; this keeps that change out of scope.
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const sha = context.payload.pull_request.head.sha;
-            const maxWait = 5 * 60 * 60 * 1000;
-            const start = Date.now();
-
-            while (Date.now() - start < maxWait) {
-              const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
-                owner, repo,
-                head_sha: sha,
-                event: 'pull_request',
-              });
-
-              const e2eRun = runs.workflow_runs.find(r => r.name === 'E2E Migration Tests');
-              if (e2eRun) {
-                if (e2eRun.status === 'completed') {
-                  if (e2eRun.conclusion === 'success') {
-                    core.info(`E2E passed: ${e2eRun.html_url}`);
-                    return;
-                  } else if (e2eRun.conclusion === 'skipped') {
-                    // KVM_E2E_ENABLED='false' is the kill switch: every job
-                    // skips and the run concludes 'skipped'. That is not a
-                    // failure — it is an operator deliberately standing the
-                    // matrix down.
-                    core.warning(`E2E skipped (KVM_E2E_ENABLED='false'): ${e2eRun.html_url}`);
-                    return;
-                  } else {
-                    core.setFailed(`E2E failed (${e2eRun.conclusion}): ${e2eRun.html_url}`);
-                    return;
-                  }
-                }
-                core.info(`E2E status: ${e2eRun.status}... waiting`);
-              } else {
-                core.info('E2E workflow not found yet, waiting...');
-              }
-              // 60s, not 30s. Over a multi-hour wait the old interval issues
-              // hundreds of API calls per open PR; once the account is rate
-              // limited octokit's backoff stretches each iteration, so the
-              // budget above stops meaning what it says — which is how a
-              // 50-minute wait produced a 100-minute job.
-              await new Promise(r => setTimeout(r, 60000));
-            }
-            core.setFailed(
-              `Timed out waiting for E2E workflow after ${maxWait / 60000} minutes. ` +
-              'This is a gate timeout, not an E2E failure — check the E2E ' +
-              'Migration Tests run for this commit before treating it as one.'
-            );
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/e2e-tests.yml
+    secrets: inherit
