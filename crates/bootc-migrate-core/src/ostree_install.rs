@@ -539,7 +539,22 @@ impl OstreeInstallConfig<'_> {
             }
             // GRUB first would stop at a GRUB shell on this layout; the
             // worst case with systemd-boot first is the composefs default.
-            systemd_boot_entry = put_systemd_boot_first()?;
+            // Everything is staged by now; a failed NVRAM write must not
+            // abort the run before the report, so it is best-effort like
+            // the entry registration above.
+            systemd_boot_entry = match put_systemd_boot_first() {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not put \"Linux Boot Manager\" first in BootOrder \
+                         ({e:#}). BootOrder is unchanged; if a GRUB entry comes first, the \
+                         first boot may stop at a GRUB shell. Before rebooting, put the \
+                         systemd-boot entry first with `efibootmgr --bootorder`, or pick \
+                         \"Linux Boot Manager\" in the firmware boot menu."
+                    );
+                    None
+                }
+            };
             None
         } else {
             if boot_on_luks {
