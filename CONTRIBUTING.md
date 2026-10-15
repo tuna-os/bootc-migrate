@@ -179,10 +179,10 @@ $ just cleanup        # kill QEMU, prune podman, remove disk.raw and .log files
 ## Adding a new E2E scenario
 
 1. Add a new recipe in `justfile` modelled on `e2e-luks` or `e2e-lvm`.
-2. Add the scenario to `.github/e2e-scenarios.yml` (set `name`, `base`,
-   `target`, `filesystem`, `disk_size`, and any overrides; add
-   `allow_failure: true` while it is exploratory, which keeps it out of the
-   per-PR round-robin and in the nightly run only).
+2. Add the scenario to `.github/e2e-scenarios.yml`. Set `name`, `base`,
+   `target`, `filesystem`, `disk_size`, and any overrides. While the scenario
+   is exploratory, add `allow_failure: true`. This keeps it out of the per-PR
+   round-robin, so only the nightly run uses it.
 3. Update the CI matrix table in [AGENTS.md](AGENTS.md).
 4. Document the scenario in [docs/filesystem-support.md](docs/filesystem-support.md).
 
