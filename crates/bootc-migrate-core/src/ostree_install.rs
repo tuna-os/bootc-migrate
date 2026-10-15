@@ -545,11 +545,6 @@ impl OstreeInstallConfig<'_> {
             return Ok(());
         }
 
-        // #303: the deploy-exists check above races a concurrent run, so hold
-        // the shared migration lock for the live run and re-check under it.
-        let _migration_lock = crate::migration::lifecycle::acquire_exclusive_lock()?;
-        refuse_existing_deploy(self.force)?;
-
         let _sleep_guard =
             crate::migration::SleepGuard::new("bootc composefs -> ostree re-base in progress");
 
