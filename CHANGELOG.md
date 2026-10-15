@@ -108,6 +108,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The preflight reflink check no longer risks making the running system
+  read-only. To probe reflink support it remounts `/sysroot` read-write and
+  then read-only again. The plain `remount,ro` changed the filesystem, not
+  only the `/sysroot` mount, so on a quiet system `/`, `/etc` and `/var`
+  could become read-only too. Both remounts now use `remount,bind`, which
+  changes only the flag of the `/sysroot` mount, as ostree does.
+
 - The migration stops when it cannot rebuild the composefs initrd for an XFS
   root. The stock target initrd has no xfs driver, so the old warning let the
   migration make an entry the default that then failed `sysroot.mount` and

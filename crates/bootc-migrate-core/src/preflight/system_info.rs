@@ -488,11 +488,11 @@ impl SystemInfo {
 
         let supports_reflink = if sysroot_was_ro {
             let _ = Command::new("mount")
-                .args(["-o", "remount,rw", sysroot])
+                .args(sysroot_remount_args(sysroot, false))
                 .status();
             let ok = check_reflink_support(sysroot);
             let _ = Command::new("mount")
-                .args(["-o", "remount,ro", sysroot])
+                .args(sysroot_remount_args(sysroot, true))
                 .status();
             ok
         } else {
@@ -557,9 +557,37 @@ impl SystemInfo {
     }
 }
 
+/// `mount` arguments that flip only the read-only flag of the `/sysroot`
+/// mount itself.
+///
+/// On an OSTree boot `/sysroot` is read-only through its own mount flag,
+/// while the filesystem under it stays writable: the deployment's `/etc` and
+/// the stateroot `/var` are bind mounts of it. A plain `remount,ro` changes
+/// the filesystem instead, so on a quiet system it can make `/`, `/etc` and
+/// `/var` read-only under the running OS (on a busy one it fails with EBUSY).
+/// `bind` limits the change to this one mount, as ostree does.
+fn sysroot_remount_args(sysroot: &str, read_only: bool) -> [&str; 3] {
+    let opts = if read_only {
+        "remount,bind,ro"
+    } else {
+        "remount,bind,rw"
+    };
+    ["-o", opts, sysroot]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sysroot_remount_only_touches_the_mount_flag() {
+        for (read_only, opts) in [(false, "remount,bind,rw"), (true, "remount,bind,ro")] {
+            assert_eq!(
+                sysroot_remount_args("/sysroot", read_only),
+                ["-o", opts, "/sysroot"]
+            );
+        }
+    }
 
     /// The pull follows podman's storage path, so the most specific existing
     /// candidate wins — measuring "/" when /var is a small separate volume is
