@@ -117,8 +117,15 @@ impl NativeStore {
         repo: &Arc<Repository<ObjectId>>,
         config_digest: &composefs_oci::OciDigest,
     ) -> Result<ObjectId> {
-        let fs: FileSystem<ObjectId> = create_filesystem(repo, config_digest, None)
-            .context("building composefs filesystem from OCI layers")?;
+        // Default transform options = the historical allowlist-only xattr
+        // filtering, i.e. the digest composefs-oci 0.7 produced.
+        let fs: FileSystem<ObjectId> = create_filesystem(
+            repo,
+            config_digest,
+            None,
+            &composefs_oci::OciTransformOptions::default(),
+        )
+        .context("building composefs filesystem from OCI layers")?;
         fs.commit_image(repo, None)
             .context("committing EROFS image to the repo")
     }
@@ -224,8 +231,8 @@ impl ComposefsStore for NativeStore {
             oc.layer_refs,
             Some(&erofs),
             None,
-            None,
-            None,
+            // Keep any cached boot EROFS refs; an empty map would drop them.
+            &oc.boot_image_refs,
         )
         .context("writing sealed config splitstream")?;
 
@@ -332,8 +339,7 @@ mod tests {
             refs,
             None,
             None,
-            None,
-            None,
+            &std::collections::HashMap::new(),
         )
         .unwrap();
         let config_digest = config_digest.to_string();

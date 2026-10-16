@@ -94,6 +94,19 @@ e2e-cross-base: build test
       E2E_CROSS_BASE="1" \
       ./tests/run-e2e.sh
 
+# Cross-family composefs migration (#256, #261). Asserts the cross-family gate
+# refuses without --accept-cross-base and applies the cross-family /etc policy.
+e2e-cross-family target="ghcr.io/bootcrew/opensuse-bootc:latest" expect_os_id="opensuse-tumbleweed": build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="{{env_var_or_default('BASE_IMAGE', 'ghcr.io/projectbluefin/bluefin:stable')}}" \
+      TARGET_IMAGE="{{target}}" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_CROSS_FAMILY="1" \
+      E2E_EXPECT_OS_ID="{{expect_os_id}}" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-cross-family.log
+
 # Composefs image swap across distributions: dakota (composefs-native)
 # -> utah (Bluefin on Fedora Hummingbird) through bootc-rebase's ImageSwap
 # route. Asserts the reboot lands in utah with the base kept as rollback.
@@ -107,6 +120,21 @@ e2e-image-swap: build test
       E2E_MODE="image-swap" \
       E2E_EXPECT_OS_ID="hummingbird" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-image-swap.log
+
+# The Dakota -> Utah migration through the OstreeInstall route (#302):
+# dakota (composefs-native) -> utah on the OSTree backend. Asserts the
+# reboot lands in utah with GRUB first and the composefs entry as rollback.
+e2e-dakota-utah: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/utah:testing" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_MODE="composefs-to-ostree" \
+      E2E_EXPECT_OS_ID="hummingbird" \
+      E2E_EXPECT_DM="gdm" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-dakota-utah.log
 
 e2e-debug: build
     @echo "=== Running E2E with composefs systemd debug logging ==="

@@ -507,6 +507,15 @@ After running `bootc-migrate commit`, the OSTree fallback is removed
 from the ESP and rollback becomes a fresh install. The E2E test exercises the
 full round-trip (composefs → OSTree → composefs) on every run.
 
+### First-boot repair
+
+The migration stages a unit that runs one time on the first boot. It fixes
+these known problems: carried home files with the wrong owner or time, a
+duplicated machine-id, broken Flatpak installations, and SELinux labels.
+Other findings stay as they are; the repair log reports them. To stop the
+repair, run `sudo bootc-migrate repair --disable` before the reboot. See
+[docs/first-boot-repair.md](docs/first-boot-repair.md).
+
 ### What's preserved
 
 Validated end-to-end (21+ assertions per run; see `tests/run-e2e.sh`):
@@ -587,7 +596,7 @@ sudo ./tests/run-e2e.sh
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
 
-The full matrix has fourteen cells (see `.github/e2e-scenarios.yml`, which is
+The full matrix has seventeen cells (see `.github/e2e-scenarios.yml`, which is
 authoritative). It runs nightly; each PR and push to `main` runs a
 round-robin slice of the gating cells (see `docs/testing.md`):
 
@@ -601,7 +610,11 @@ round-robin slice of the gating cells (see `docs/testing.md`):
 | ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
 | TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
 | cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/debian-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/ubuntu-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/arch-bootc:latest | btrfs | 40G |
 | composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
+| composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |
 

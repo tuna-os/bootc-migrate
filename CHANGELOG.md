@@ -26,6 +26,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- Cross-family E2E base-pair matrix (#261). Three more non-gating cells
+  exercise `E2E_CROSS_FAMILY=1` beyond Bluefin → openSUSE Tumbleweed:
+  Bluefin → Debian, Ubuntu and Arch Linux. The test harness adapts
+  base-image setup (SSH units, multi-distro root home locations, and
+  family-specific `/etc` configuration sidecars).
 - Package host readiness report (#372): `bootc-rebase --dry-run` on a
   package-managed system checks boot mode, root filesystem, LUKS and LVM,
   the btrfs subvolume layout, `/boot` and `/home`, free space against the
@@ -113,7 +118,20 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   then read-only again. The plain `remount,ro` changed the filesystem, not
   only the `/sysroot` mount, so on a quiet system `/`, `/etc` and `/var`
   could become read-only too. Both remounts now use `remount,bind`, which
-  changes only the flag of the `/sysroot` mount, as ostree does.
+  changes only the flag of the `/sysroot` mount, as ostree does. The
+  OstreeDeploy and ImageSwap routes write into the staged deployment under
+  `/sysroot`. They had relied on that failed remount to leave `/sysroot`
+  writable. They now make it writable themselves and set the flag back when
+  they finish.
+
+- `Strategy::OstreeInstall` (composefs → ostree) now holds the same run lock
+  as the forward migration (#303). Before, its check for an existing
+  deployment had no lock, so two runs started together both passed it and
+  then used the same ESP snapshot, install and `/var` copy at the same
+  time. A second run now stops before it changes anything and names the
+  holder (pid and start time). The lock is an
+  `flock`, so a crashed or killed run does not block the next one. A
+  refused run also no longer truncates the holder's pid out of the lock file.
 
 - The migration stops when it cannot rebuild the composefs initrd for an XFS
   root. The stock target initrd has no xfs driver, so the old warning let the

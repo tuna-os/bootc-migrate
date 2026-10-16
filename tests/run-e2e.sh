@@ -66,7 +66,8 @@ E2E_TEST_MODE="${E2E_TEST_MODE:-migrate}"
 # the first execution of an exploratory route, and its deliverable is the
 # policy under assertion, not Dakota's lifecycle on an openSUSE guest.
 E2E_CROSS_FAMILY="${E2E_CROSS_FAMILY:-0}"
-# os-release ID the migrated system must report (cross-family cells only).
+# os-release ID the migrated system must report (cross-family, image-swap
+# and composefs-to-ostree cells).
 E2E_EXPECT_OS_ID="${E2E_EXPECT_OS_ID:-}"
 # Display manager the migrated system must run (gdm, sddm, ...); empty
 # accepts any when the default target is graphical. Checked by
@@ -148,6 +149,21 @@ assert_system_healthy() {
     fi
 }
 
+# assert_l2_present <label> <binary> <route>: post-reboot L2 assertions —
+# `status` runs and names the route, and the desktop cleanup prompt was
+# staged into what is now the live /etc.
+assert_l2_present() {
+    step "=== $1: L2 status + cleanup prompt ==="
+    STATUS_OUT=$(ssh $SSH_OPTS root@localhost "$2 status" 2>&1) || {
+        echo "FAIL: $2 status exited nonzero"; echo "$STATUS_OUT" | sed 's/^/  /'; exit 1; }
+    echo "$STATUS_OUT" | sed 's/^/  /'
+    echo "$STATUS_OUT" | grep -qF "$3" || { echo "FAIL: status does not name route '$3'"; exit 1; }
+    echo "$STATUS_OUT" | grep -q "First-boot verify:" || { echo "FAIL: status has no verify line"; exit 1; }
+    ssh $SSH_OPTS root@localhost "test -f /etc/xdg/autostart/bootc-migrate-cleanup.desktop" || {
+        echo "FAIL: the desktop cleanup prompt was not staged"; exit 1; }
+    echo "OK: status names the route and the cleanup prompt is staged."
+}
+
 # capture_health_baseline: just before a migration, record which paths under
 # /etc and /var/home the base itself already has mislabeled, so the
 # post-reboot health check fails only on mislabels the migration introduced
@@ -164,6 +180,40 @@ capture_health_baseline() {
         fi
         echo "health baseline: $(wc -l < /var/lib/e2e-health/label-baseline) path(s) already mislabeled on the base"' \
         2>&1 | sed 's/^/[health-baseline] /' || true
+}
+
+# seed_ownership_fixture: plant a small tree in /var whose owner, group, and
+# mtime the post-reboot health check re-verifies (e2e-health.sh section 7).
+# The migration carries /var to the new deployment file by file; a copy that
+# drops identity (live Dakota -> Utah landed every file root-owned with
+# fresh mtimes and broke the desktop, #308) fails loudly here. Numeric
+# 4242:4242 needs no account, so the fixture is independent of passwd
+# carrying; expect.tsv is generated from the planted tree, so the assertion
+# is "the migration changed nothing".
+seed_ownership_fixture() {
+    step "=== Seeding /var ownership fixture ==="
+    ssh $SSH_OPTS root@localhost bash <<'OWNFIX'
+set -e
+rm -rf /var/lib/e2e-ownership
+mkdir -p /var/lib/e2e-ownership/tree/subdir
+cd /var/lib/e2e-ownership/tree
+echo "owned-by-4242" > owned-by-4242.txt
+echo "root-file" > root-file.txt
+echo "nested" > subdir/nested.txt
+ln -s owned-by-4242.txt link-to-owned
+chown 4242:4242 owned-by-4242.txt subdir/nested.txt subdir
+chmod 640 owned-by-4242.txt
+chmod 750 subdir
+touch -h -d '@1600000000' owned-by-4242.txt root-file.txt subdir subdir/nested.txt link-to-owned
+{
+    for f in owned-by-4242.txt root-file.txt subdir subdir/nested.txt; do
+        if [ -d "$f" ]; then kind=d; else kind=f; fi
+        printf '%s\t%s\t%s\t%s\n' "$f" "$(stat -c '%u:%g' "$f")" "$(stat -c '%Y' "$f")" "$kind"
+    done
+    printf '%s\t%s\t%s\t%s\t%s\n' link-to-owned "" "" l "$(readlink link-to-owned)"
+} > /var/lib/e2e-ownership/expect.tsv
+cat /var/lib/e2e-ownership/expect.tsv
+OWNFIX
 }
 
 # heartbeat: while $1 is a live PID, prints a "[e2e HH:MM:SS] still <label>
@@ -287,22 +337,29 @@ FROM BASE_IMAGE_PLACEHOLDER
 # which is exactly what we want.
 RUN mkdir -p /usr/lib/systemd/system-preset && \
     echo 'enable sshd.service' > /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
-    echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
+    echo 'enable sshd.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
+    echo 'enable ssh.service' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset && \
+    echo 'enable ssh.socket' >> /usr/lib/systemd/system-preset/50-e2e-ssh.preset
 RUN systemctl enable sshd.service && systemctl enable sshd.socket || true
+RUN systemctl enable ssh.service && systemctl enable ssh.socket || true
 # Direct symlink fallback in case systemctl enable was a no-op
 RUN mkdir -p /usr/lib/systemd/system/multi-user.target.wants && \
-    ln -sf /usr/lib/systemd/system/sshd.service \
-           /usr/lib/systemd/system/multi-user.target.wants/sshd.service
+    for u in sshd.service ssh.service; do \
+        if [ -f "/usr/lib/systemd/system/$u" ]; then \
+            ln -sf "/usr/lib/systemd/system/$u" "/usr/lib/systemd/system/multi-user.target.wants/$u"; \
+        fi; \
+    done
 # NOTE: e2e-sshd.socket, PermitRootLogin, and other user-specific /etc
-# customizations are baked into the base image here for Bluefin's first boot.
+# customizations are baked into the base image here for the first boot.
 # The ComposeFS 3-way merge will drop these (old==cur, new absent), but
 # Phase 4's `ensure_e2e_ssh_socket` recreates them in the deploy /etc so
-# they're present on the Dakota composefs boot too.
-RUN echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
+# they're present on the target composefs boot too.
+RUN mkdir -p /etc/ssh && \
+    echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && \
     echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config && \
     echo 'Port 22' >> /etc/ssh/sshd_config
-# Disable firewalld (CentOS Stream 10 blocks SSH by default)
-RUN systemctl disable firewalld 2>/dev/null || true
+# Disable firewalld / ufw / SuSEfirewall (CentOS Stream 10 / Ubuntu block SSH by default)
+RUN systemctl disable firewalld ufw SuSEfirewall2 2>/dev/null || true
 # e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
 RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
@@ -384,11 +441,14 @@ elif [ -f "$CHECKPOINT" ]; then
     CKPT_MNT="/tmp/mnt-e2e-ckpt"
     sudo mkdir -p "$CKPT_MNT"
     sudo mount "$CKPT_ROOT" "$CKPT_MNT"
-    CKPT_SSH="$CKPT_MNT/ostree/deploy/default/var/roothome/.ssh"
-    sudo mkdir -p "$CKPT_SSH"
-    sudo chmod 700 "$CKPT_SSH"
-    sudo cp ./test_key.pub "$CKPT_SSH/authorized_keys"
-    sudo chmod 600 "$CKPT_SSH/authorized_keys"
+    for ckpt_ssh in "$CKPT_MNT"/ostree/deploy/*/var/roothome/.ssh "$CKPT_MNT"/ostree/deploy/*/var/root/.ssh "$CKPT_MNT"/state/os/*/var/roothome/.ssh "$CKPT_MNT"/state/os/*/var/root/.ssh; do
+        if [ -d "$(dirname "$ckpt_ssh")" ]; then
+            sudo mkdir -p "$ckpt_ssh"
+            sudo chmod 700 "$ckpt_ssh"
+            sudo cp ./test_key.pub "$ckpt_ssh/authorized_keys"
+            sudo chmod 600 "$ckpt_ssh/authorized_keys"
+        fi
+    done
     sudo umount "$CKPT_MNT"
     sudo losetup -d "$CKPT_LOOP"
 else
@@ -707,13 +767,14 @@ else
 fi
 echo "stateroot /var on disk: $STATEROOT_VAR"
 
-# Inject SSH key to root home (which is symlinked to /var/roothome on OSTree)
-ROOT_SSH_DIR="$STATEROOT_VAR/roothome/.ssh"
-sudo mkdir -p "$ROOT_SSH_DIR"
-sudo chmod 700 "$ROOT_SSH_DIR"
-sudo cp ./test_key.pub "$ROOT_SSH_DIR/authorized_keys"
-sudo chmod 600 "$ROOT_SSH_DIR/authorized_keys"
-sudo chown -R 0:0 "$ROOT_SSH_DIR"
+# Inject SSH key to root home (which is symlinked to /var/roothome on OSTree, or /var/root)
+for rhome in "$STATEROOT_VAR/roothome/.ssh" "$STATEROOT_VAR/root/.ssh"; do
+    sudo mkdir -p "$rhome"
+    sudo chmod 700 "$rhome"
+    sudo cp ./test_key.pub "$rhome/authorized_keys"
+    sudo chmod 600 "$rhome/authorized_keys"
+    sudo chown -R 0:0 "$rhome"
+done
 
 # Ensure SSH permits root login (already in derived image, but double-check)
 SSHD_CONFIG_DIR="$STATEROOT_VAR/etc/ssh"
@@ -1709,6 +1770,7 @@ REVFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> ostree via OstreeInstall (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> ostree via OstreeInstall (implemented)'"; exit 1; }
 
+    seed_ownership_fixture
     capture_health_baseline
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
@@ -1840,6 +1902,11 @@ REVSSH
     [ "$HOME_MARKER" = "real-home-data" ] || { echo "FAIL: /var/home data not carried (got: $HOME_MARKER)"; exit 1; }
     REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || echo MISSING")
     [ "$REALUSER" != "MISSING" ] || { echo "FAIL: realuser missing from the merged passwd"; exit 1; }
+    BOOTED_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    echo "  os-release ID: $BOOTED_ID"
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"; exit 1
+    fi
     echo "OK: booted the OSTree deployment of $BOOTED_IMG with /etc, /var and /var/home carried over."
 
     # The composefs deployment must remain reachable: its firmware entry and
@@ -1848,6 +1915,16 @@ REVSSH
     echo "$NVRAM" | sed 's/^/  /'
     echo "$NVRAM" | grep -qi "Linux Boot Manager" || {
         echo "FAIL: the composefs deployment's 'Linux Boot Manager' firmware entry is gone"; exit 1; }
+    # The route puts the shim/GRUB entry bootupd registered first in
+    # BootOrder, so the next cold boot lands in the OSTree deployment
+    # again and systemd-boot stays one firmware pick away as rollback.
+    FIRST_BOOT=$(echo "$NVRAM" | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
+    FIRST_ENTRY=$(echo "$NVRAM" | grep -i "^Boot${FIRST_BOOT}" || true)
+    echo "  first in BootOrder: ${FIRST_ENTRY:-<none>}"
+    if [ -z "$FIRST_BOOT" ] || ! echo "$FIRST_ENTRY" | grep -qiE 'shim|grub' \
+        || echo "$FIRST_ENTRY" | grep -qi "Linux Boot Manager"; then
+        echo "FAIL: the shim/GRUB entry is not first in BootOrder"; exit 1
+    fi
     # The OSTree deployment mounts nothing at /boot/efi by itself (Bluefin's
     # own installs leave the ESP unmounted; gpt-auto may put it at /efi), so
     # look at every usual place and fall back to mounting the ESP partition
@@ -1866,6 +1943,8 @@ ESPCHECK
 )
     [ "${CFS_KERNELS:-0}" -ge 1 ] || { echo "FAIL: composefs kernel directory was not restored to the ESP"; exit 1; }
     echo "OK: composefs rollback entry and ESP artifacts preserved."
+
+    assert_l2_present "composefs-to-ostree" "/var/tmp/bootc-rebase" "composefs -> ostree via OstreeInstall"
 
     # Diagnostic details for the composefs -> ostree deployment (/var mounts,
     # accounts, and vendor /usr/etc file presence).
@@ -1939,6 +2018,7 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    seed_ownership_fixture
     capture_health_baseline
     step "=== image-swap: running bootc-rebase --target-backend composefs ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
@@ -2137,6 +2217,8 @@ SWAPSSH
     ssh $SSH_OPTS root@localhost "getent passwd dbus; ls -Z /etc/passwd /etc/ld.so.cache 2>/dev/null" || true
     echo "OK: image-swap first-boot unit ran."
 
+    assert_l2_present "image-swap" "/var/tmp/bootc-rebase" "composefs -> composefs via ImageSwap"
+
     # The base deployment must remain as rollback: bootc reports it, or at
     # least its deployment directory is still on disk.
     ROLLBACK_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.rollback.image.image.image // empty')
@@ -2172,6 +2254,14 @@ useradd -m -U realuser 2>/dev/null || true
 mkdir -p /var/home/realuser
 echo "real-home-data" > /var/home/realuser/home-marker.txt
 chown -R realuser:realuser /var/home/realuser
+# #309 sabotage canary: a tree with a known owner and an old mtime. The
+# migration records it in the identity manifest; a step after staging
+# breaks it, and the first-boot repair must put it back.
+mkdir -p /var/home/realuser/repair-canary/sub
+echo "canary" > /var/home/realuser/repair-canary/file
+echo "canary" > /var/home/realuser/repair-canary/sub/nested
+chown -R realuser:realuser /var/home/realuser/repair-canary
+find /var/home/realuser/repair-canary -exec touch -h -d @1600000000 {} +
 
 # Persist absolute legacy paths like real OSTree user state does. A native
 # /home target must keep these working without rewriting the user's files.
@@ -2273,12 +2363,20 @@ if [ "$E2E_CROSS_FAMILY" = "1" ]; then
 set -e
 test -f /etc/default/useradd || { echo "FAIL: source ships no /etc/default/useradd"; exit 1; }
 echo "# e2e cross-family edit" >> /etc/default/useradd
-test -f /etc/dnf/dnf.conf || { echo "FAIL: source ships no /etc/dnf/dnf.conf"; exit 1; }
-echo "max_parallel_downloads=20" >> /etc/dnf/dnf.conf
+if [ -f /etc/dnf/dnf.conf ]; then
+    echo "max_parallel_downloads=20" >> /etc/dnf/dnf.conf
+elif [ -f /etc/zypp/zypp.conf ]; then
+    echo "download.max_concurrent_connections=20" >> /etc/zypp/zypp.conf
+elif [ -f /etc/pacman.conf ]; then
+    echo "ParallelDownloads=20" >> /etc/pacman.conf
+elif [ -f /etc/dpkg/dpkg.cfg ]; then
+    echo "# e2e cross-family edit" >> /etc/dpkg/dpkg.cfg
+fi
 echo "source os-release: $(grep -E '^(ID|ID_LIKE)=' /etc/os-release | tr '\n' ' ')"
 CROSSFIX
 fi
 
+seed_ownership_fixture
 capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
@@ -2441,11 +2539,26 @@ grep -q "e2e cross-family edit" "$ETC/default/useradd" \
     && { echo "FAIL: /etc/default/useradd still carries the source edit (target default did not win)"; exit 1; }
 grep -q "e2e cross-family edit" "$ETC/default/useradd.rebase-old" \
     || { echo "FAIL: /etc/default/useradd.rebase-old missing or without the displaced edit"; exit 1; }
-# Only the source's vendor ships dnf.conf: dropped, edit preserved.
-test -e "$ETC/dnf/dnf.conf" \
-    && { echo "FAIL: /etc/dnf/dnf.conf (source-vendor-only) was carried onto the target"; exit 1; }
-grep -q "max_parallel_downloads=20" "$ETC/dnf/dnf.conf.rebase-old" \
-    || { echo "FAIL: /etc/dnf/dnf.conf.rebase-old missing or without the displaced edit"; exit 1; }
+# Source-vendor-only file: dropped, edit preserved in sidecar.
+if [ -f "$ETC/dnf/dnf.conf.rebase-old" ]; then
+    test -e "$ETC/dnf/dnf.conf" \
+        && { echo "FAIL: /etc/dnf/dnf.conf (source-vendor-only) was carried onto the target"; exit 1; }
+    grep -q "max_parallel_downloads=20" "$ETC/dnf/dnf.conf.rebase-old" \
+        || { echo "FAIL: /etc/dnf/dnf.conf.rebase-old missing or without the displaced edit"; exit 1; }
+elif [ -f "$ETC/zypp/zypp.conf.rebase-old" ]; then
+    test -e "$ETC/zypp/zypp.conf" \
+        && { echo "FAIL: /etc/zypp/zypp.conf (source-vendor-only) was carried onto the target"; exit 1; }
+    grep -q "download.max_concurrent_connections=20" "$ETC/zypp/zypp.conf.rebase-old" \
+        || { echo "FAIL: /etc/zypp/zypp.conf.rebase-old missing or without the displaced edit"; exit 1; }
+elif [ -f "$ETC/pacman.conf.rebase-old" ]; then
+    test -e "$ETC/pacman.conf" \
+        && { echo "FAIL: /etc/pacman.conf (source-vendor-only) was carried onto the target"; exit 1; }
+elif [ -f "$ETC/dpkg/dpkg.cfg.rebase-old" ]; then
+    test -e "$ETC/dpkg/dpkg.cfg" \
+        && { echo "FAIL: /etc/dpkg/dpkg.cfg (source-vendor-only) was carried onto the target"; exit 1; }
+else
+    echo "FAIL: expected a source-vendor-only .rebase-old sidecar (e.g. dnf.conf or zypp.conf)"; exit 1
+fi
 # Machine state and user additions carried verbatim (the same-lineage
 # assertions after the reboot check them too; fail early here).
 grep -q "e2e migration marker" "$ETC/hostname" || { echo "FAIL: /etc/hostname not carried"; exit 1; }
@@ -2490,6 +2603,18 @@ printf '%s\n' \
     > "$DEPLOY_ETC/systemd/system/e2e-sshd@.service"
 ln -sf ../e2e-sshd.socket "$DEPLOY_ETC/systemd/system/sockets.target.wants/e2e-sshd.socket"
 
+# Belt and suspenders: having both sshd.service / ssh.service (sshd -D) and e2e-sshd.socket
+# bound to port 22 kills the daemon with 255/EXCEPTION. Debian/Ubuntu also
+# enable ssh.socket, which binds 0.0.0.0:22 itself; mask the socket units.
+rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service" \
+      "$DEPLOY_ETC/systemd/system/multi-user.target.wants/ssh.service" \
+      "$DEPLOY_ETC/systemd/system/sockets.target.wants/ssh.socket" \
+      "$DEPLOY_ETC/systemd/system/sockets.target.wants/sshd.socket"
+ln -sf /dev/null "$DEPLOY_ETC/systemd/system/ssh.socket"
+ln -sf /dev/null "$DEPLOY_ETC/systemd/system/sshd.socket"
+
+mkdir -p "$DEPLOY_ETC/ssh/sshd_config.d"
+echo "PermitRootLogin yes" > "$DEPLOY_ETC/ssh/sshd_config.d/90-e2e.conf"
 printf '%s\n' \
     '[Unit]' \
     'Description=E2E Emergency Diagnostic Dump' \
@@ -2507,11 +2632,38 @@ printf '%s\n' \
     > "$DEPLOY_ETC/systemd/system/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/emergency.target.wants/emergency-dump.service"
 ln -sf ../emergency-dump.service "$DEPLOY_ETC/systemd/system/rescue.target.wants/emergency-dump.service"
-
-# Belt and suspenders: having both sshd.service (sshd -D) and e2e-sshd.socket
-# bound to port 22 kills the daemon with 255/EXCEPTION.
-rm -f "$DEPLOY_ETC/systemd/system/multi-user.target.wants/sshd.service"
 CFS_POSTMERGEFIX
+
+# #309: post-stage, pre-reboot sabotage. Break the canary tree in the /var
+# copy the new deployment mounts, the way #308's identity-dropping copy did:
+# root-owned, fresh mtimes. The first-boot repair must restore it from the
+# manifest. When /var stays in place (a dedicated /var filesystem), the new
+# deployment mounts the live /var: no copy can break it and no manifest is
+# recorded, so the ownership class must stay unarmed and leave later edits.
+step "=== first-boot repair: sabotaging the canary tree (#309) ==="
+ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
+set -e
+CANARY_REL=home/realuser/repair-canary
+for V in /sysroot/state/os/default/var /var; do
+    [ -d "$V/$CANARY_REL" ] && break
+done
+DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
+test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
+test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
+if [ "$V" = /var ]; then
+    test ! -e /var/lib/bootc-migrate/identity-manifest.tsv || { echo "FAIL: identity manifest recorded for an in-place /var"; exit 1; }
+    # Same filesystem after the reboot: tells the assertion which case ran.
+    mkdir -p /var/lib/bootc-migrate
+    touch /var/lib/bootc-migrate/e2e-repair-var-in-place
+    echo "in-place /var: ownership class not armed; canary left untouched"
+    exit 0
+fi
+grep -q "repair-canary/file" "$V/lib/bootc-migrate/identity-manifest.tsv" || { echo "FAIL: canary missing from $V/lib/bootc-migrate/identity-manifest.tsv"; exit 1; }
+chown -R root:root "$V/$CANARY_REL"
+touch "$V/$CANARY_REL/file" "$V/$CANARY_REL/sub/nested"
+echo "sabotaged $V/$CANARY_REL: $(stat -c '%U:%G %Y' "$V/$CANARY_REL/file")"
+REPAIR_SABOTAGE
 
 step "=== Verifying migration artifacts before reboot ==="
 ssh $SSH_OPTS root@localhost bash <<'DIAG'
@@ -2636,6 +2788,32 @@ fi
 echo "OK: Booted backend is ComposeFS."
 
 assert_system_healthy "post-migration"
+assert_l2_present "post-migration" "/var/tmp/bootc-migrate" "ostree -> composefs via CoreMigration"
+
+# #309: the first-boot repair ran once, logged the ownership fix, and the
+# canary tree is back to its recorded owner and mtime.
+step "=== first-boot repair: asserting the canary was repaired (#309) ==="
+ssh $SSH_OPTS root@localhost bash <<'REPAIR_ASSERT'
+set -e
+STATE=/var/lib/bootc-migrate
+journalctl -b -u bootc-migrate-repair-firstboot.service --no-pager | tail -20 || true
+test -f "$STATE/repair-log.json" || { echo "FAIL: no repair log at $STATE/repair-log.json"; exit 1; }
+echo "repair-result: $(cat "$STATE/repair-result")"
+if [ -e "$STATE/e2e-repair-var-in-place" ]; then
+    grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "not-applicable"' || {
+        echo "FAIL: ownership class ran against an in-place /var"; cat "$STATE/repair-log.json"; exit 1; }
+else
+    grep -A1 '"class": "ownership"' "$STATE/repair-log.json" | grep -q '"status": "repaired"' || {
+        echo "FAIL: repair log does not show the ownership class repaired"; cat "$STATE/repair-log.json"; exit 1; }
+fi
+for f in file sub/nested sub; do
+    got=$(stat -c '%U:%G %Y' "/var/home/realuser/repair-canary/$f")
+    [ "$got" = "realuser:realuser 1600000000" ] || { echo "FAIL: canary $f is '$got', expected 'realuser:realuser 1600000000'"; exit 1; }
+done
+test ! -e /etc/bootc-migrate/repair-firstboot || { echo "FAIL: repair marker still armed after first boot"; exit 1; }
+test ! -e /etc/bootc-migrate/bootc-migrate-repair || { echo "FAIL: staged repair binary not removed"; exit 1; }
+echo "OK: canary owner and mtime are as recorded after the first-boot repair."
+REPAIR_ASSERT
 
 # #256: the whole point — the migrated system is the target's family.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then
@@ -3005,8 +3183,17 @@ set -e
 grep -q "e2e cross-family edit" /etc/default/useradd \
     && { echo "FAIL: live /etc/default/useradd carries the source edit"; exit 1; }
 test -f /etc/default/useradd.rebase-old || { echo "FAIL: live sidecar for default/useradd missing"; exit 1; }
-test -e /etc/dnf/dnf.conf && { echo "FAIL: live /etc/dnf/dnf.conf exists on the target"; exit 1; }
-test -f /etc/dnf/dnf.conf.rebase-old || { echo "FAIL: live sidecar for dnf.conf missing"; exit 1; }
+if [ -f /etc/dnf/dnf.conf.rebase-old ]; then
+    test -e /etc/dnf/dnf.conf && { echo "FAIL: live /etc/dnf/dnf.conf exists on the target"; exit 1; }
+elif [ -f /etc/zypp/zypp.conf.rebase-old ]; then
+    test -e /etc/zypp/zypp.conf && { echo "FAIL: live /etc/zypp/zypp.conf exists on the target"; exit 1; }
+elif [ -f /etc/pacman.conf.rebase-old ]; then
+    test -e /etc/pacman.conf && { echo "FAIL: live /etc/pacman.conf exists on the target"; exit 1; }
+elif [ -f /etc/dpkg/dpkg.cfg.rebase-old ]; then
+    test -e /etc/dpkg/dpkg.cfg && { echo "FAIL: live /etc/dpkg/dpkg.cfg exists on the target"; exit 1; }
+else
+    echo "FAIL: expected a source-vendor-only .rebase-old sidecar in live /etc"; exit 1
+fi
 REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
 test -f "$REPORT" || { echo "FAIL: cross-family report missing after reboot"; exit 1; }
 if grep -q '"firstboot_unit_installed": true' "$REPORT"; then
@@ -3020,7 +3207,10 @@ else
     echo "OK: no first-boot unit was needed."
 fi
 echo "--- package manager on the target ---"
-command -v zypper && ls /etc/zypp/repos.d 2>&1 || echo "(no zypper / no repos.d — informational)"
+command -v zypper && ls /etc/zypp/repos.d 2>&1 || true
+command -v apt && ls /etc/apt/sources.list.d 2>&1 || true
+command -v pacman && ls /etc/pacman.d 2>&1 || true
+command -v dnf && ls /etc/yum.repos.d 2>&1 || true
 echo "--- wheel group numbering (remap evidence) ---"
 getent group wheel || true
 find /var/home -maxdepth 1 -mindepth 1 -exec stat -c '%U:%G %n' {} + 2>/dev/null | head -5
