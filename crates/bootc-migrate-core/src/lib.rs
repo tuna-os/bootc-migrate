@@ -60,6 +60,7 @@ pub mod selinux;
 pub mod source_host;
 pub mod status;
 pub mod steam_flatpak;
+pub mod sysroot;
 pub mod tee_log;
 pub mod transaction;
 pub mod types;

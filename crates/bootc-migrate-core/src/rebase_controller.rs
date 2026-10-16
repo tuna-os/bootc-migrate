@@ -16,6 +16,7 @@ use crate::migration;
 use crate::ostree_install;
 use crate::preflight::{self, readiness};
 use crate::selinux;
+use crate::sysroot::{SYSROOT, SysrootWritable};
 
 /// Everything the OSTree-to-ComposeFS migration strategy needs, translated
 /// from CLI flags exactly once by the caller.
@@ -752,6 +753,10 @@ impl ImageSwapConfig<'_> {
         }
 
         stage_via_bootc_switch(self.target_image)?;
+        // The first-boot unit and the /etc labels below are written into the
+        // staged deployment under /sysroot, which is read-only by its mount.
+        let _sysroot =
+            SysrootWritable::acquire(SYSROOT).context("cannot write into the staged deployment")?;
 
         if let Some(plan) = &de_plan {
             de.run_post_switch(plan, false)?;
@@ -866,6 +871,11 @@ impl OstreeDeployConfig<'_> {
         }
 
         stage_via_bootc_switch(self.target_image)?;
+        // The remap report, the /etc policy and the relabel marker below are
+        // written into the staged deployment under /sysroot, which is
+        // read-only by its mount.
+        let _sysroot =
+            SysrootWritable::acquire(SYSROOT).context("cannot write into the staged deployment")?;
 
         if let Some(plan) = &cross_base_plan {
             let staged_root = cross_base::staged_deployment_root()

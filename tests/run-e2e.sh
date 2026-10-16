@@ -1546,6 +1546,12 @@ UNSEED
     step "=== ostree-rebase: re-injecting e2e-sshd into the staged deploy ==="
     ssh $SSH_OPTS root@localhost bash <<'POSTMERGEFIX'
 set -e
+# bootc-rebase puts the /sysroot mount back to read-only when it finishes.
+# These are test-only edits, so lift that one flag (bind: not the
+# filesystem under it) for them.
+if grep -qE '^[^ ]+ /sysroot [^ ]+ ro[, ]' /proc/mounts; then
+    mount -o remount,bind,rw /sysroot
+fi
 # Exactly two deployments exist at this point (booted + staged); the
 # booted one is marked with a leading '*' in `ostree admin status`, so the
 # other line is unambiguously the staged deployment.
@@ -2134,6 +2140,12 @@ SWAPDIAG
     step "=== image-swap: re-injecting e2e-sshd into the staged deployment ==="
     ssh $SSH_OPTS root@localhost "BASE_VERITY='$BASE_VERITY' E2E_CONSOLE_JOURNAL='$E2E_CONSOLE_JOURNAL' bash -s" <<'SWAPSSH'
 set -e
+# bootc-rebase puts the /sysroot mount back to read-only when it finishes.
+# These are test-only edits, so lift that one flag (bind: not the
+# filesystem under it) for them.
+if grep -qE '^[^ ]+ /sysroot [^ ]+ ro[, ]' /proc/mounts; then
+    mount -o remount,bind,rw /sysroot
+fi
 STAGED=""
 for d in /sysroot/state/deploy/*/; do
     v=$(basename "$d")

@@ -479,27 +479,15 @@ impl SystemInfo {
             }
         }
 
-        // 5. Reflink check — remount /sysroot rw first if needed (OSTree default is ro)
-        let sysroot_was_ro = if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-            mounts.lines().any(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                parts.len() >= 4 && parts[1] == sysroot && parts[3].split(',').any(|o| o == "ro")
-            })
-        } else {
-            false
-        };
-
-        let supports_reflink = if sysroot_was_ro {
-            let _ = Command::new("mount")
-                .args(["-o", "remount,rw", sysroot])
-                .status();
-            let ok = check_reflink_support(sysroot);
-            let _ = Command::new("mount")
-                .args(["-o", "remount,ro", sysroot])
-                .status();
-            ok
-        } else {
-            check_reflink_support(sysroot)
+        // 5. Reflink check. /sysroot is read-only on an OSTree boot, so make
+        // it writable for the probe and put the flag back afterwards. If
+        // that fails, report no reflink support: the safe answer.
+        let sysroot_was_ro = fs::read_to_string("/proc/mounts")
+            .map(|m| crate::sysroot::mount_is_read_only(&m, sysroot))
+            .unwrap_or(false);
+        let supports_reflink = match crate::sysroot::SysrootWritable::acquire(sysroot) {
+            Ok(_writable) => check_reflink_support(sysroot),
+            Err(_) => false,
         };
 
         // 6. GRUB tool availability

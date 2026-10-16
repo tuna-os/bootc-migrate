@@ -130,6 +130,17 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   install report names an ESP-resident entry, the commit step now checks
   for the systemd-boot entry and says to keep both.
 
+- The preflight reflink check no longer risks making the running system
+  read-only. To probe reflink support it remounts `/sysroot` read-write and
+  then read-only again. The plain `remount,ro` changed the filesystem, not
+  only the `/sysroot` mount, so on a quiet system `/`, `/etc` and `/var`
+  could become read-only too. Both remounts now use `remount,bind`, which
+  changes only the flag of the `/sysroot` mount, as ostree does. The
+  OstreeDeploy and ImageSwap routes write into the staged deployment under
+  `/sysroot`. They had relied on that failed remount to leave `/sysroot`
+  writable. They now make it writable themselves and set the flag back when
+  they finish.
+
 - `Strategy::OstreeInstall` (composefs → ostree) now holds the same run lock
   as the forward migration (#303). Before, its check for an existing
   deployment had no lock, so two runs started together both passed it and
