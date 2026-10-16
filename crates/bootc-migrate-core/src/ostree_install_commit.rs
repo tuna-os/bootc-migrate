@@ -11,7 +11,9 @@
 //! 1. **Preconditions.** Booted from OSTree (never from composefs — that is
 //!    the tree this deletes); the booted deployment is the one the install
 //!    report names; the ESP snapshot the route took is still on disk; the
-//!    firmware still has the shim/GRUB entry that reaches the deployment.
+//!    firmware still has the entry that reaches the deployment: shim/GRUB,
+//!    or systemd-boot when /boot is on LUKS and the install staged an
+//!    ESP-resident entry (#328).
 //! 2. **Verification.** Every path of the old stateroot `/var` must exist in
 //!    the live `/var` (presence + size, not ownership: a cross-family re-base
 //!    remapped that on purpose). Paths missing outside
@@ -37,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::migration::rollback;
+use crate::ostree_install::esp_resident;
 use crate::ostree_install::{OstreeInstallReport, PHYSICAL_ROOT, REPORT_FILE, STATE_DIR};
 
 /// The old composefs stateroot `/var`, relative to the physical root.
@@ -470,18 +473,35 @@ pub fn plan(layout: &Layout, facts: &HostFacts) -> Result<CommitPlan> {
         ));
     }
 
-    let grub = facts
-        .efibootmgr
-        .as_deref()
-        .and_then(rollback::parse_ostree_boot_entry_id);
+    // A /boot-on-LUKS host boots its OSTree deployment through systemd-boot
+    // and the ESP-resident entry the install staged (#328), not shim/GRUB.
+    let esp_resident = report
+        .as_ref()
+        .and_then(|(_, r)| r.esp_resident_entry.clone());
+    let fw_entry = match &esp_resident {
+        Some(_) => facts
+            .efibootmgr
+            .as_deref()
+            .and_then(esp_resident::parse_systemd_boot_entry_id),
+        None => facts
+            .efibootmgr
+            .as_deref()
+            .and_then(rollback::parse_ostree_boot_entry_id),
+    };
     checks.push(check(
         "firmware reaches the OSTree deployment",
-        grub.is_some(),
+        fw_entry.is_some(),
         false,
-        match (&facts.efibootmgr, &grub) {
-            (None, _) => "efibootmgr -v could not be run".into(),
-            (Some(_), None) => "no shim/GRUB entry in NVRAM".into(),
-            (Some(_), Some(id)) => format!("shim/GRUB entry Boot{id}"),
+        match (&facts.efibootmgr, &fw_entry, &esp_resident) {
+            (None, _, _) => "efibootmgr -v could not be run".into(),
+            (Some(_), None, None) => "no shim/GRUB entry in NVRAM".into(),
+            (Some(_), Some(id), None) => format!("shim/GRUB entry Boot{id}"),
+            (Some(_), None, Some(_)) => "no systemd-boot (\"Linux Boot Manager\") entry in NVRAM; \
+                 this host boots its OSTree deployment through it"
+                .into(),
+            (Some(_), Some(id), Some(entry)) => {
+                format!("systemd-boot entry Boot{id}, which boots the ESP-resident entry {entry}")
+            }
         },
     ));
 
@@ -539,7 +559,7 @@ pub fn plan(layout: &Layout, facts: &HostFacts) -> Result<CommitPlan> {
         report_path: report.map(|(p, _)| p),
         diff,
         targets,
-        kept: kept_paths(layout)?,
+        kept: kept_paths(layout, esp_resident.as_deref())?,
     })
 }
 
@@ -582,24 +602,37 @@ pub fn plan_targets(layout: &Layout) -> Result<Vec<Target>> {
 }
 
 /// What the commit leaves in place, and why.
-fn kept_paths(layout: &Layout) -> Result<Vec<(String, String)>> {
+fn kept_paths(layout: &Layout, esp_resident: Option<&str>) -> Result<Vec<(String, String)>> {
+    let boot = match esp_resident {
+        // /boot on LUKS (#328): systemd-boot and the ESP-resident entry are
+        // what boots the OSTree deployment. Removing either leaves the host
+        // unbootable, so say that instead of offering their removal.
+        Some(entry) => [
+            format!(
+                "never touched; systemd-boot and the ESP-resident entry {entry} boot this \
+                 system's OSTree deployment (/boot is on LUKS) — keep them"
+            ),
+            "never touched; the \"Linux Boot Manager\" entry boots this system — do not \
+             remove it"
+                .to_string(),
+        ],
+        None => [
+            "never touched; the composefs kernel, systemd-boot and loader entries the route \
+             restored stay, but no longer boot anything after this commit"
+                .to_string(),
+            "never touched; the \"Linux Boot Manager\" rollback entry stays — remove it with \
+             `bootc-rebase boot-entries --interactive --apply`"
+                .to_string(),
+        ],
+    };
+    let [esp, nvram] = boot;
     let mut kept = vec![
         (
             layout.sysroot.join("ostree").display().to_string(),
             "the OSTree repo and the booted deployment".to_string(),
         ),
-        (
-            "ESP and /boot".to_string(),
-            "never touched; the composefs kernel, systemd-boot and loader entries the route \
-             restored stay, but no longer boot anything after this commit"
-                .to_string(),
-        ),
-        (
-            "UEFI NVRAM".to_string(),
-            "never touched; the \"Linux Boot Manager\" rollback entry stays — remove it with \
-             `bootc-rebase boot-entries --interactive --apply`"
-                .to_string(),
-        ),
+        ("ESP and /boot".to_string(), esp),
+        ("UEFI NVRAM".to_string(), nvram),
     ];
     // Anything else under the old state directory is not ours to judge.
     let state = layout.sysroot.join("state");
@@ -1186,6 +1219,56 @@ mod tests {
                 "firmware reaches the OSTree deployment"
             ]
         );
+    }
+
+    /// Mark the fixture's install report as a /boot-on-LUKS install (#328).
+    fn with_esp_resident_entry(layout: &Layout) {
+        let path = layout.old_var().join("lib/bootc-rebase").join(REPORT_FILE);
+        let mut report: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        report["esp_resident_entry"] = "bootc-migrate-ostree.conf".into();
+        fs::write(&path, report.to_string()).unwrap();
+    }
+
+    /// On a /boot-on-LUKS host the OSTree deployment boots through
+    /// systemd-boot and the ESP-resident entry, so the commit must check
+    /// for that entry and must not offer to remove it.
+    #[test]
+    fn firmware_check_and_advice_follow_the_boot_path() {
+        let shim_only =
+            "BootOrder: 0001\nBoot0001* Fedora\tHD(1,GPT,x)/File(\\EFI\\fedora\\shimx64.efi)\n";
+        let sdboot_only = "BootOrder: 0002\nBoot0002* Linux Boot Manager\tHD(1,GPT,x)/File(\\EFI\\systemd\\systemd-bootx64.efi)\n";
+        // (esp-resident install, efibootmgr output, firmware check passes)
+        let cases = [
+            (false, shim_only, true),
+            (false, sdboot_only, false),
+            (true, sdboot_only, true),
+            (true, shim_only, false),
+        ];
+        for (esp_resident, efi, passes) in cases {
+            let (_d, layout) = fixture("cafe.0");
+            if esp_resident {
+                with_esp_resident_entry(&layout);
+            }
+            let f = HostFacts {
+                efibootmgr: Some(efi.into()),
+                ..facts()
+            };
+            let plan = plan(&layout, &f).unwrap();
+            let refused: Vec<_> = plan.blocking(false).iter().map(|c| c.name).collect();
+            assert_eq!(
+                !refused.contains(&"firmware reaches the OSTree deployment"),
+                passes,
+                "esp_resident={esp_resident} efi={efi:?}: {refused:?}"
+            );
+            let nvram = &plan.kept.iter().find(|(k, _)| k == "UEFI NVRAM").unwrap().1;
+            if esp_resident {
+                assert!(nvram.contains("do not remove"), "{nvram}");
+                assert!(!nvram.contains("boot-entries"), "{nvram}");
+            } else {
+                assert!(nvram.contains("boot-entries"), "{nvram}");
+            }
+        }
     }
 
     #[test]

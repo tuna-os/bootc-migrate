@@ -120,6 +120,16 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
+  boot entry it boots from. Since #328 such a host boots its OSTree
+  deployment through systemd-boot ("Linux Boot Manager") and an
+  ESP-resident entry. The commit step still checked for a shim/GRUB
+  firmware entry, said the systemd-boot and loader entries no longer boot
+  anything, and suggested removing "Linux Boot Manager" with
+  `boot-entries --apply`, which would leave the host unbootable. When the
+  install report names an ESP-resident entry, the commit step now checks
+  for the systemd-boot entry and says to keep both.
+
 - `Strategy::OstreeInstall` (composefs → ostree) now holds the same run lock
   as the forward migration (#303). Before, its check for an existing
   deployment had no lock, so two runs started together both passed it and

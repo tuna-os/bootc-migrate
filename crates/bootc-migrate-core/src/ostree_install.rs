@@ -55,7 +55,7 @@ use crate::registry;
 use crate::scan;
 use crate::xattr;
 
-mod esp_resident;
+pub(crate) mod esp_resident;
 
 /// The physical root of a composefs host (the block-device filesystem the
 /// composefs store and state live on).
