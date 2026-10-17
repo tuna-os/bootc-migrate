@@ -69,7 +69,7 @@ Route availability by frontend (mechanism fact, not a support claim):
 | CoreMigration → GRUB2 (`--bootloader grub2`) | **UNPROVEN** | no cell sets it (`grub.rs` is a placeholder; the logic lives in `phase5_setup_bootloader` with no E2E) |
 | KeepSource on OstreeDeploy (GRUB stays GRUB) | **PROVEN** | gating `bluefin ostree re-base` green on main 33891928677 |
 | KeepSource on ImageSwap (systemd-boot stays) | **UNPROVEN** | route is RED; nothing separable is proven |
-| OstreeInstall GRUB-first + "Linux Boot Manager" rollback entry | **UNPROVEN** | cell is RED; bootloader vs route failure not separated |
+| OstreeInstall journaled rollback-first `BootOrder` + one-shot target `BootNext` | **UNPROVEN** | route cell and both fault-boundary cells are non-gating and have not supplied green evidence |
 | Standalone `migrate-bootloader` (#65) | refuses by design | pure BLS/karg logic is unit-tested; live ESP/NVRAM mutation is not implemented and no CLI path runs it — no boot claim exists to prove |
 | BIOS/CSM (non-UEFI) hosts, any route | **UNPROVEN** | harness boots OVMF/UEFI only; no BIOS cell |
 | GRUB2-BLS as an endpoint (openSUSE default) | **UNPROVEN** | reference note in `docs/references.md` only |
@@ -132,8 +132,8 @@ no package manager, GNOME) → Utah (ostree, GRUB via bootupd, GNOME).
 
 | Axis | Status for this pair |
 |---|---|
-| Backend (composefs → ostree) | **RED** with `fedora-bootc:44`; **no cell** with Utah — unproven for this pair |
-| Bootloader (systemd-boot → GRUB-first + rollback entry) | **UNPROVEN** (only exercised inside the RED cell) |
+| Backend (composefs → ostree) | **RED** with `fedora-bootc:44`; Utah has an active non-gating cell but no green evidence |
+| Bootloader (systemd-boot fallback first → one-shot GRUB `BootNext` → promote after observed boot) | **UNPROVEN** (route and fault-boundary cells have not supplied green evidence) |
 | LUKS (btrfs-on-LUKS source) | **UNPROVEN** (no btrfs-on-LUKS cell on any route) |
 | UKI | N/A — ostree target boots BLS/GRUB, not a UKI question |
 | Package manager (none → ?) | **UNPROVEN** (Unknown-lineage path, no green E2E) |

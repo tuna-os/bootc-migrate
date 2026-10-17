@@ -58,6 +58,10 @@ pub(crate) fn run(args: &CommitArgs) -> Result<()> {
         println!("Not confirmed — nothing was deleted.");
         return Ok(());
     }
+    // The first successful OSTree boot is the trust boundary.  Only now make
+    // its firmware entry persistent; the staging run used BootNext and kept
+    // the composefs loader first for automatic fallback.
+    bootc_migrate_core::ostree_install::promote_committed_boot_order()?;
     let outcome = commit::execute_host(&plan, args.force)?;
     println!(
         "Commit complete: {} path(s) deleted, {} reclaimed. The OSTree deployment is now the \

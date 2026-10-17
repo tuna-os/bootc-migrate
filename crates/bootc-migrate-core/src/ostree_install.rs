@@ -49,6 +49,9 @@ use crate::cross_family;
 use crate::mergetc::{self, IdentityMergePolicy, MergePolicy};
 use crate::migration::rollback;
 use crate::migration::{MountGuard, PodmanImageMount, acquire_lock, find_esp_or_mount};
+use crate::ostree_install_txn::{
+    self as boot_txn, BootObservation, BootTransaction, BootTxnPhase, InstallClassification,
+};
 use crate::preflight;
 use crate::rebase_controller::validate_target_image;
 use crate::registry;
@@ -385,6 +388,305 @@ pub struct OstreeInstallReport {
     pub systemd_boot_entry: Option<String>,
 }
 
+fn transaction_paths() -> Vec<PathBuf> {
+    let mut paths = vec![
+        boot_txn::journal_path(Path::new(STATE_DIR)),
+        boot_txn::journal_path(&Path::new(OSTREE_STATEROOT_VAR).join("lib/bootc-rebase")),
+        boot_txn::journal_path(
+            &Path::new(PHYSICAL_ROOT).join("state/os/default/var/lib/bootc-rebase"),
+        ),
+    ];
+    paths.dedup();
+    paths
+}
+
+fn read_host_transaction() -> Result<Option<BootTransaction>> {
+    for path in transaction_paths() {
+        if let Some(txn) = boot_txn::read_journal(&path)? {
+            return Ok(Some(txn));
+        }
+    }
+    Ok(None)
+}
+
+/// Write the live journal and mirror it into the new OSTree stateroot.  The
+/// latter is what makes the latest phase visible after the one-shot boot.
+fn persist_transaction(txn: &BootTransaction) -> Result<()> {
+    let paths = transaction_paths();
+    boot_txn::write_journal(&paths[0], txn)?;
+    let carried = boot_txn::journal_path(&Path::new(OSTREE_STATEROOT_VAR).join("lib/bootc-rebase"));
+    if carried != paths[0] && Path::new(OSTREE_STATEROOT_VAR).is_dir() {
+        boot_txn::write_journal(&carried, txn)?;
+    }
+    Ok(())
+}
+
+fn advance_transaction(txn: &mut BootTransaction, phase: BootTxnPhase) -> Result<()> {
+    txn.advance(phase);
+    persist_transaction(txn)
+}
+
+fn read_nvram() -> Result<String> {
+    let out = Command::new("efibootmgr")
+        .arg("-v")
+        .output()
+        .context("running efibootmgr -v")?;
+    if !out.status.success() {
+        bail!(
+            "efibootmgr -v failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn parse_boot_next(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("BootNext:")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn boot_entry_present(output: &str, id: Option<&str>) -> bool {
+    let Some(id) = id else {
+        return false;
+    };
+    output.lines().any(|line| {
+        line.trim()
+            .strip_prefix("Boot")
+            .and_then(|rest| rest.get(..4))
+            .is_some_and(|found| found.eq_ignore_ascii_case(id))
+    })
+}
+
+fn observe_transaction(txn: &BootTransaction) -> Result<BootObservation> {
+    let nvram = read_nvram()?;
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    Ok(BootObservation {
+        booted_ostree: cmdline
+            .split_whitespace()
+            .any(|arg| arg.starts_with("ostree=")),
+        esp_restored: boot_txn::esp_files_restored(txn),
+        target_entry_present: boot_entry_present(&nvram, txn.target_entry.as_deref()),
+        rollback_entry_present: boot_entry_present(&nvram, txn.rollback_entry.as_deref()),
+        boot_next: parse_boot_next(&nvram),
+        boot_order: rollback::parse_boot_order(&nvram).unwrap_or_default(),
+    })
+}
+
+/// Read and classify a boot transaction without changing the machine.
+pub fn inspect_boot_transaction() -> Result<Option<(BootTransaction, InstallClassification)>> {
+    let Some(txn) = read_host_transaction()? else {
+        return Ok(None);
+    };
+    let observed = observe_transaction(&txn)?;
+    let classification = boot_txn::classify_install(&txn, &observed);
+    Ok(Some((txn, classification)))
+}
+
+fn set_boot_order_checked(order: &str) -> Result<()> {
+    if order.is_empty() {
+        bail!("refusing to write an empty UEFI BootOrder");
+    }
+    run_checked(
+        Command::new("efibootmgr").args(["--bootorder", order]),
+        "efibootmgr --bootorder",
+    )?;
+    let observed = rollback::parse_boot_order(&read_nvram()?).unwrap_or_default();
+    if !observed.eq_ignore_ascii_case(order) {
+        bail!("BootOrder write was not observed: wanted {order}, found {observed}");
+    }
+    Ok(())
+}
+
+fn clear_boot_next() -> Result<()> {
+    if parse_boot_next(&read_nvram()?).is_none() {
+        return Ok(());
+    }
+    run_checked(
+        Command::new("efibootmgr").arg("--delete-bootnext"),
+        "efibootmgr --delete-bootnext",
+    )?;
+    if let Some(next) = parse_boot_next(&read_nvram()?) {
+        bail!("BootNext clear was not observed: Boot{next} remains armed");
+    }
+    Ok(())
+}
+
+fn rollback_interrupted_transaction(txn: &mut BootTransaction, cause: &str) -> Result<()> {
+    txn.error = Some(cause.to_string());
+    let snapshot = Path::new(&txn.snapshot_dir);
+    let esp = Path::new(&txn.esp);
+    restore_esp(snapshot, esp).context("restoring the composefs ESP snapshot")?;
+    if !boot_txn::esp_files_restored(txn) {
+        txn.advance(BootTxnPhase::RollbackUnconfirmed);
+        let _ = persist_transaction(txn);
+        bail!("boot transaction rollback could not verify the restored ESP files");
+    }
+
+    ensure_systemd_boot_entry(&txn.target_image, &txn.esp);
+    let nvram = read_nvram()?;
+    txn.rollback_entry = esp_resident::parse_systemd_boot_entry_id(&nvram);
+    let Some(rollback_id) = txn.rollback_entry.as_deref() else {
+        txn.advance(BootTxnPhase::RollbackUnconfirmed);
+        let _ = persist_transaction(txn);
+        bail!("boot transaction rollback could not observe a systemd-boot rollback entry");
+    };
+    clear_boot_next()?;
+    let safe_order = rollback::build_new_boot_order(&txn.original_boot_order, rollback_id);
+    set_boot_order_checked(&safe_order)?;
+    txn.prepared_boot_order = safe_order;
+
+    let observed = observe_transaction(txn)?;
+    if !observed.esp_restored || !observed.rollback_entry_present || observed.boot_next.is_some() {
+        txn.advance(BootTxnPhase::RollbackUnconfirmed);
+        let _ = persist_transaction(txn);
+        bail!("boot transaction rollback could not be confirmed from ESP and firmware state");
+    }
+    advance_transaction(txn, BootTxnPhase::RolledBack)?;
+    Ok(())
+}
+
+fn arm_transaction(txn: &mut BootTransaction) -> Result<()> {
+    let before = observe_transaction(txn)?;
+    if boot_txn::classify_install(txn, &before) != InstallClassification::Resumable {
+        bail!(
+            "boot transaction is not safely resumable from phase {:?}",
+            txn.phase
+        );
+    }
+    let target = txn
+        .target_entry
+        .clone()
+        .context("prepared boot transaction has no target firmware entry")?;
+    advance_transaction(txn, BootTxnPhase::Arming)?;
+    let arm = (|| -> Result<()> {
+        run_checked(
+            Command::new("efibootmgr").args(["--bootnext", &target]),
+            "efibootmgr --bootnext",
+        )?;
+        let observed = observe_transaction(txn)?;
+        if observed
+            .boot_next
+            .as_deref()
+            .is_none_or(|next| !next.eq_ignore_ascii_case(&target))
+        {
+            bail!(
+                "BootNext write was not observed: wanted Boot{target}, found {:?}",
+                observed.boot_next
+            );
+        }
+        if !observed
+            .boot_order
+            .eq_ignore_ascii_case(&txn.prepared_boot_order)
+        {
+            bail!(
+                "BootOrder changed while arming: wanted {}, found {}",
+                txn.prepared_boot_order,
+                observed.boot_order
+            );
+        }
+        Ok(())
+    })();
+    if let Err(e) = arm {
+        let cause = format!("{e:#}");
+        rollback_interrupted_transaction(txn, &cause)?;
+        bail!("{cause} (boot changes rolled back and observed)");
+    }
+    advance_transaction(txn, BootTxnPhase::Committed)?;
+    println!(
+        "[boot-txn] committed: BootNext=Boot{target}; BootOrder remains {} until `bootc-rebase commit --apply`",
+        txn.prepared_boot_order
+    );
+    Ok(())
+}
+
+fn handle_existing_transaction(target_image: &str, dry_run: bool) -> Result<bool> {
+    let Some(mut txn) = read_host_transaction()? else {
+        return Ok(false);
+    };
+    let observed = observe_transaction(&txn)?;
+    let classification = boot_txn::classify_install(&txn, &observed);
+    println!(
+        "[boot-txn] existing transaction: phase={:?}, classification={}",
+        txn.phase,
+        classification.as_str()
+    );
+    if txn.target_image != target_image
+        && !matches!(
+            classification,
+            InstallClassification::Complete | InstallClassification::Failed
+        )
+    {
+        bail!(
+            "unfinished boot transaction targets {}, not {}; finish or repair it before starting another",
+            txn.target_image,
+            target_image
+        );
+    }
+    match classification {
+        InstallClassification::Resumable if dry_run => {
+            bail!("boot transaction is prepared and resumable; dry-run will not arm BootNext")
+        }
+        InstallClassification::Resumable => {
+            arm_transaction(&mut txn)?;
+            println!("[boot-txn] resumed the prepared transaction; reboot to test the target");
+            Ok(true)
+        }
+        InstallClassification::NeedsRepair if dry_run => {
+            bail!("boot transaction needs repair; dry-run will not change ESP or firmware state")
+        }
+        InstallClassification::NeedsRepair => {
+            let phase = txn.phase;
+            rollback_interrupted_transaction(&mut txn, &format!("interrupted in phase {phase:?}"))?;
+            bail!(
+                "interrupted boot transaction was rolled back and observed; inspect the partial \
+                 OSTree deployment, then rerun with --force to replace it"
+            )
+        }
+        InstallClassification::InProgress => {
+            bail!("boot transaction is committed and BootNext is armed; reboot before re-running")
+        }
+        InstallClassification::Complete | InstallClassification::Failed => Ok(false),
+    }
+}
+
+fn injected_fault(point: &str) -> Result<()> {
+    if std::env::var("BOOTC_REBASE_FAULT_POINT").as_deref() == Ok(point) {
+        bail!("fault injection at {point}");
+    }
+    Ok(())
+}
+
+/// Promote the observed-good target entry to persistent `BootOrder`.  Called
+/// only by the destructive commit path, after its typed confirmation.
+pub fn promote_committed_boot_order() -> Result<()> {
+    let Some(mut txn) = read_host_transaction()? else {
+        bail!("no boot transaction journal found under {STATE_DIR}");
+    };
+    let observed = observe_transaction(&txn)?;
+    if boot_txn::classify_install(&txn, &observed) != InstallClassification::Complete {
+        bail!(
+            "boot transaction is {}, not complete; refusing to promote BootOrder",
+            boot_txn::classify_install(&txn, &observed).as_str()
+        );
+    }
+    let target = txn
+        .target_entry
+        .clone()
+        .context("committed boot transaction has no target firmware entry")?;
+    let order = rollback::build_new_boot_order(&observed.boot_order, &target);
+    set_boot_order_checked(&order)?;
+    txn.advance(BootTxnPhase::Committed);
+    txn.boot_order_promoted = true;
+    persist_transaction(&txn)?;
+    println!("[boot-txn] observed-good target promoted: BootOrder={order}");
+    Ok(())
+}
+
 // ---- I/O -----------------------------------------------------------------
 
 impl OstreeInstallConfig<'_> {
@@ -404,6 +706,9 @@ impl OstreeInstallConfig<'_> {
         } else {
             Some(acquire_lock()?)
         };
+        if handle_existing_transaction(self.target_image, self.dry_run)? {
+            return Ok(());
+        }
         println!("Checking system state...");
 
         let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
@@ -546,13 +851,8 @@ impl OstreeInstallConfig<'_> {
                 install_command(self.target_image, &carry_over_kargs(&cmdline)).join(" ")
             );
             println!(
-                "[DRY RUN] Would 3-way merge /etc into the new deployment (source defaults from {}), copy /var to {OSTREE_STATEROOT_VAR}, restore the composefs ESP artifacts, and {}.",
+                "[DRY RUN] Would 3-way merge /etc into the new deployment (source defaults from {}), copy /var to {OSTREE_STATEROOT_VAR}, restore and verify the composefs ESP artifacts, keep the rollback entry first in BootOrder, and arm the target once with BootNext. `commit --apply` promotes the target in BootOrder only after an observed OSTree boot.",
                 booted_image.as_deref().unwrap_or("<unknown booted image>"),
-                if boot_on_luks {
-                    "copy the new kernel and initrd to the ESP with a BLS entry, make it systemd-boot's default, and put \"Linux Boot Manager\" first in BootOrder"
-                } else {
-                    "put the GRUB entry first in BootOrder"
-                }
             );
             return Ok(());
         }
@@ -591,11 +891,27 @@ impl OstreeInstallConfig<'_> {
             .iter()
             .any(|p| p.starts_with("EFI/Linux/bootc_composefs-"))
         {
-            eprintln!(
-                "Warning: no composefs kernel directory found on the ESP; the running \
-                 deployment will not be restorable as a rollback entry after the install."
+            bail!(
+                "no composefs kernel directory found on the ESP; refusing an install that \
+                 cannot restore the running deployment as a rollback entry"
             );
         }
+        let snapshot_hashes = boot_txn::snapshot_hashes(&snapshot_dir, &snapshot_paths)?;
+        let original_nvram = read_nvram()?;
+        let original_boot_order = rollback::parse_boot_order(&original_nvram)
+            .context("efibootmgr reported no BootOrder before the install")?;
+        let mut boot_transaction = BootTransaction::new(
+            self.target_image,
+            Path::new(&esp),
+            &snapshot_dir,
+            snapshot_hashes,
+            original_boot_order,
+        );
+        persist_transaction(&boot_transaction)?;
+        println!(
+            "[boot-txn] begun; journaled {} ESP file hash(es)",
+            boot_transaction.esp_file_hashes.len()
+        );
 
         // A previous failed attempt may have removed the stateroot /var while
         // the repo layout survives; `bootc install` reuses extant layouts
@@ -628,14 +944,44 @@ impl OstreeInstallConfig<'_> {
             .status()
             .context("failed to execute podman")?;
         if !status.success() {
-            bail!(
-                "bootc install to-existing-root failed (exit {status}); the composefs ESP \
-                 snapshot is at {} — restore it with `bootc-rebase` before rebooting if the \
-                 ESP was already emptied",
-                snapshot_dir.display()
-            );
+            let cause = format!("bootc install to-existing-root failed (exit {status})");
+            rollback_interrupted_transaction(&mut boot_transaction, &cause)?;
+            bail!("{cause} (composefs boot path restored and observed)");
         }
         drop(_boot_binds);
+        injected_fault("after-esp-wipe")?;
+        // bootc's destructive ESP update is complete. Restore and observe the
+        // source boot path before any migration work that can fail; from this
+        // point onward, an ordinary error still leaves a bootable fallback.
+        let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
+        println!("[esp] {} composefs artifact(s) restored", restored.len());
+        if !boot_txn::esp_files_restored(&boot_transaction) {
+            rollback_interrupted_transaction(
+                &mut boot_transaction,
+                "restored ESP files did not match the journaled snapshot hashes",
+            )?;
+            bail!("restored ESP files did not match the journaled snapshot hashes");
+        }
+        if !Path::new(&esp)
+            .join("EFI/systemd/systemd-bootx64.efi")
+            .is_file()
+            || !ensure_systemd_boot_entry(self.target_image, &esp)
+        {
+            rollback_interrupted_transaction(
+                &mut boot_transaction,
+                "no observed systemd-boot firmware entry reaches the restored composefs loader",
+            )?;
+            bail!("no observed systemd-boot firmware entry reaches the restored composefs loader");
+        }
+        let nvram = read_nvram()?;
+        let rollback_id = esp_resident::parse_systemd_boot_entry_id(&nvram)
+            .context("systemd-boot registration succeeded but its entry was not observed")?;
+        let fallback_order =
+            rollback::build_new_boot_order(&boot_transaction.original_boot_order, &rollback_id);
+        set_boot_order_checked(&fallback_order)?;
+        boot_transaction.rollback_entry = Some(rollback_id.clone());
+        boot_transaction.prepared_boot_order = fallback_order;
+        persist_transaction(&boot_transaction)?;
 
         let deployment = newest_deployment(&deployment_entries()?).ok_or_else(|| {
             anyhow!("no OSTree deployment found under {OSTREE_DEPLOY_DIR} after the install")
@@ -739,74 +1085,74 @@ impl OstreeInstallConfig<'_> {
             Err(e) => return Err(e),
         }
 
-        // ---- ESP restore + NVRAM ----
+        // ---- Boot target + one-shot arm ----
         println!(
             "{}",
             step(
                 8,
                 TOTAL_STEPS,
-                "Bootloader: restoring the composefs rollback entry"
+                "Bootloader: observing the restored rollback and target entries"
             )
         );
-        let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
-        println!("[esp] {} composefs artifact(s) restored", restored.len());
-        // A composefs host installed to disk boots systemd-boot through the
-        // removable-media path and may never have had a firmware entry of
-        // its own; bootupd just replaced that path with shim. The restored
-        // loader needs an entry to be reachable at all, so register one
-        // when it is missing (idempotent, best-effort), then put GRUB
-        // ahead of it.
-        let rollback_entry = if Path::new(&esp)
-            .join("EFI/systemd/systemd-bootx64.efi")
-            .is_file()
-        {
-            ensure_systemd_boot_entry(self.target_image, &esp)
-        } else {
-            false
-        };
+        if !boot_txn::esp_files_restored(&boot_transaction) {
+            rollback_interrupted_transaction(
+                &mut boot_transaction,
+                "composefs ESP files changed after their early verified restore",
+            )?;
+            bail!("composefs ESP files changed after their early verified restore");
+        }
+        let mut nvram = read_nvram()?;
+        if !boot_entry_present(&nvram, Some(&rollback_id)) {
+            rollback_interrupted_transaction(
+                &mut boot_transaction,
+                "the observed systemd-boot rollback entry disappeared before arming",
+            )?;
+            bail!("the observed systemd-boot rollback entry disappeared before arming");
+        }
         let mut esp_resident_entry = None;
-        let mut systemd_boot_entry = None;
-        let grub_entry = if boot_on_luks && rollback_entry {
+        if boot_on_luks {
             println!("=== Bootloader: ESP-resident entry (/boot on the encrypted root) ===");
-            match esp_resident::stage(Path::new(PHYSICAL_ROOT), Path::new(&esp), &deployment) {
-                Ok(entry) => esp_resident_entry = Some(entry),
-                Err(e) => eprintln!(
-                    "Warning: could not write the ESP-resident entry ({e:#}). systemd-boot \
-                     stays first, so the host boots the composefs deployment again. To boot \
-                     the new deployment, {}.",
-                    esp_resident::manual_workaround()
-                ),
-            }
-            // GRUB first would stop at a GRUB shell on this layout; the
-            // worst case with systemd-boot first is the composefs default.
-            // Everything is staged by now; a failed NVRAM write must not
-            // abort the run before the report, so it is best-effort like
-            // the entry registration above.
-            systemd_boot_entry = match put_systemd_boot_first() {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!(
-                        "Warning: could not put \"Linux Boot Manager\" first in BootOrder \
-                         ({e:#}). BootOrder is unchanged; if a GRUB entry comes first, the \
-                         first boot may stop at a GRUB shell. Before rebooting, put the \
-                         systemd-boot entry first with `efibootmgr --bootorder`, or pick \
-                         \"Linux Boot Manager\" in the firmware boot menu."
-                    );
-                    None
-                }
-            };
-            None
+            esp_resident_entry = Some(
+                esp_resident::stage(Path::new(PHYSICAL_ROOT), Path::new(&esp), &deployment)
+                    .context("staging the ESP-resident OSTree entry")?,
+            );
+        }
+
+        nvram = read_nvram()?;
+        let target_id = if boot_on_luks {
+            rollback_id.clone()
         } else {
-            if boot_on_luks {
-                eprintln!(
-                    "Warning: /boot is on the encrypted root and no firmware entry reaches \
-                     systemd-boot, so GRUB stays first and the first boot will likely stop at \
-                     a GRUB shell. Before rebooting, {}.",
-                    esp_resident::manual_workaround()
-                );
-            }
-            put_grub_first()?
+            rollback::parse_ostree_boot_entry_id(&nvram)
+                .context("bootupd did not leave an observable shim/GRUB firmware entry")?
         };
+        boot_transaction.deployment = Some(deployment.clone());
+        boot_transaction.target_entry = Some(target_id.clone());
+        boot_transaction.rollback_entry = Some(rollback_id.clone());
+        advance_transaction(&mut boot_transaction, BootTxnPhase::EntryCreated)?;
+
+        let prepared_order =
+            rollback::build_new_boot_order(&boot_transaction.original_boot_order, &rollback_id);
+        set_boot_order_checked(&prepared_order)?;
+        boot_transaction.prepared_boot_order = prepared_order;
+        persist_transaction(&boot_transaction)?;
+        let prepared = observe_transaction(&boot_transaction)?;
+        if !prepared.esp_restored
+            || !prepared.target_entry_present
+            || !prepared.rollback_entry_present
+        {
+            rollback_interrupted_transaction(
+                &mut boot_transaction,
+                "prepared boot chain did not match the observed ESP and firmware state",
+            )?;
+            bail!("prepared boot chain did not match the observed ESP and firmware state");
+        }
+        println!(
+            "[boot-txn] prepared: target Boot{target_id}, rollback Boot{rollback_id}, BootOrder={}",
+            boot_transaction.prepared_boot_order
+        );
+
+        let grub_entry = (!boot_on_luks).then_some(target_id);
+        let systemd_boot_entry = boot_on_luks.then_some(rollback_id);
 
         let report = OstreeInstallReport {
             target_image: self.target_image.to_string(),
@@ -854,24 +1200,22 @@ impl OstreeInstallConfig<'_> {
                 kept.display()
             );
         }
+        advance_transaction(&mut boot_transaction, BootTxnPhase::Prepared)?;
+        injected_fault("before-arm")?;
+        arm_transaction(&mut boot_transaction)?;
         if esp_resident_entry.is_some() {
             println!(
-                "OSTree deployment staged. Reboot to enter it through systemd-boot; the \
-                 composefs deployment stays selectable in the systemd-boot menu as rollback. \
-                 /boot is on the encrypted root, so `bootc upgrade` writes later kernels \
-                 where neither GRUB nor this ESP entry reads them: refresh the ESP copy after \
-                 each upgrade (#305)."
-            );
-        } else if rollback_entry {
-            println!(
-                "OSTree deployment staged. Reboot to enter it; the composefs deployment stays \
-                 selectable through the \"Linux Boot Manager\" firmware entry as rollback."
+                "OSTree deployment staged for one boot through systemd-boot; the composefs \
+                 deployment stays selectable in its menu as rollback. /boot is on the \
+                 encrypted root, so `bootc upgrade` writes later kernels where neither GRUB \
+                 nor this ESP entry reads them: refresh the ESP copy after each upgrade (#305)."
             );
         } else {
             println!(
-                "OSTree deployment staged. Reboot to enter it. No firmware entry reaches the \
-                 restored composefs loader; its ESP artifacts are in place, so an entry for \
-                 \\EFI\\systemd\\systemd-bootx64.efi can be added later with efibootmgr."
+                "OSTree deployment staged for one boot through BootNext. BootOrder still \
+                 prefers the restored \"Linux Boot Manager\" composefs rollback entry; \
+                 `bootc-rebase commit --apply` promotes GRUB only after this OSTree deployment \
+                 has been observed running."
             );
         }
         Ok(())
@@ -1091,6 +1435,23 @@ fn deployment_entries() -> Result<Vec<(String, u64)>> {
     Ok(out)
 }
 
+fn sync_file_and_parents(path: &Path, stop: &Path) -> Result<()> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("syncing {}", path.display()))?;
+    let mut parent = path.parent();
+    while let Some(dir) = parent {
+        fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .with_context(|| format!("syncing {}", dir.display()))?;
+        if dir == stop {
+            break;
+        }
+        parent = dir.parent();
+    }
+    Ok(())
+}
+
 /// Walk the ESP and copy every composefs-owned path into `snapshot_dir`,
 /// returning the relative paths copied.
 fn snapshot_esp(esp: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
@@ -1104,6 +1465,7 @@ fn snapshot_esp(esp: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
             fs::create_dir_all(parent)?;
         }
         fs::copy(&src, &dst).with_context(|| format!("snapshotting {}", src.display()))?;
+        sync_file_and_parents(&dst, snapshot_dir)?;
     }
     Ok(paths)
 }
@@ -1128,6 +1490,7 @@ fn restore_esp(snapshot_dir: &Path, esp: &Path) -> Result<Vec<String>> {
             fs::create_dir_all(parent)?;
         }
         fs::copy(&src, &dst).with_context(|| format!("restoring {}", dst.display()))?;
+        sync_file_and_parents(&dst, esp)?;
         restored.push(rel);
     }
     Ok(restored)
@@ -1594,70 +1957,6 @@ fn seed_var_from_target(target_image: &str) {
         ),
         Err(e) => eprintln!("Warning: could not run the target image to fill /var: {e}"),
     }
-}
-
-/// Put the shim/GRUB entry bootupd registered first in `BootOrder`, keeping
-/// every other entry (the composefs "Linux Boot Manager" included) behind
-/// it. Returns the entry id, or `None` with a warning when no such entry
-/// exists — the firmware's removable-media fallback (`EFI/BOOT/BOOTX64.EFI`,
-/// which bootupd also writes) then boots GRUB.
-fn put_grub_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
-        .arg("-v")
-        .output()
-        .context("running efibootmgr")?;
-    if !out.status.success() {
-        bail!(
-            "efibootmgr failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let txt = String::from_utf8_lossy(&out.stdout);
-    let Some(id) = rollback::parse_ostree_boot_entry_id(&txt) else {
-        eprintln!(
-            "Warning: no shim/GRUB firmware entry found; the new deployment boots through the \
-             removable-media fallback unless the firmware prefers systemd-boot's entry."
-        );
-        return Ok(None);
-    };
-    let order = rollback::parse_boot_order(&txt).unwrap_or_default();
-    let new_order = rollback::build_new_boot_order(&order, &id);
-    run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
-        "efibootmgr --bootorder",
-    )?;
-    println!("[nvram] BootOrder: {new_order} (GRUB entry Boot{id} first)");
-    Ok(Some(id))
-}
-
-/// Put systemd-boot's firmware entry ("Linux Boot Manager") first in
-/// `BootOrder`, for the layout where GRUB cannot boot the deployment
-/// (#305). Returns the entry id, or `None` with a warning when there is
-/// no such entry.
-fn put_systemd_boot_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
-        .arg("-v")
-        .output()
-        .context("running efibootmgr")?;
-    if !out.status.success() {
-        bail!(
-            "efibootmgr failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let txt = String::from_utf8_lossy(&out.stdout);
-    let Some(id) = esp_resident::parse_systemd_boot_entry_id(&txt) else {
-        eprintln!("Warning: no \"Linux Boot Manager\" firmware entry found; BootOrder unchanged.");
-        return Ok(None);
-    };
-    let order = rollback::parse_boot_order(&txt).unwrap_or_default();
-    let new_order = rollback::build_new_boot_order(&order, &id);
-    run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
-        "efibootmgr --bootorder",
-    )?;
-    println!("[nvram] BootOrder: {new_order} (systemd-boot entry Boot{id} first)");
-    Ok(Some(id))
 }
 
 #[cfg(test)]
