@@ -25,6 +25,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Cross-family `/etc` policy on the `bootc switch` routes (#259). `OstreeDeploy`
+  now reconciles the staged deployment after OSTree finalization, preserving
+  target defaults, identity-DB ordering and displaced-edit sidecars while
+  scheduling `/.autorelabel`; `ImageSwap` applies the same policy after
+  composefs finalization and preserves its sysusers/ldconfig first-boot work.
+  A non-gating OstreeDeploy cross-family E2E cell covers the route.
 
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that

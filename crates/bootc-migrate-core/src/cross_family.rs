@@ -1,6 +1,7 @@
-//! Cross-family re-base on the composefs conversion route
-//! (bootc-migrate#256): Fedora → openSUSE, and every other pair that shares
-//! no base lineage at all.
+//! Cross-family re-base policy for both the composefs conversion route and
+//! the `bootc switch` routes (`OstreeDeploy` and `ImageSwap`)
+//! (bootc-migrate#256/#259): Fedora → openSUSE, and every other pair that
+//! shares no base lineage at all.
 //!
 //! # Why the same-lineage merge is the wrong merge here
 //!
@@ -15,9 +16,10 @@
 //! booted openSUSE with Fedora's `/etc` (no zypper repositories "and much
 //! more").
 //!
-//! `bootc-rebase`'s OstreeDeploy route already has the #67 hardening
-//! (remap, `/etc` conflict policy, autorelabel) for that shape of problem,
-//! but only there; the composefs route had nothing, not even a warning.
+//! `bootc-rebase`'s `OstreeDeploy` and `ImageSwap` routes now apply the same
+//! policy after the native switch/finalization seam; their immutable composefs
+//! root combines the policy's first-boot work with the existing sysusers and
+//! ldconfig repair.
 //!
 //! # The policy
 //!
@@ -193,19 +195,22 @@ const UNKNOWN_LINEAGE_REASON: &str = "the two os-release identities share no ID_
      and at least one image ships no known package manager, so the pair can be neither \
      confirmed nor ruled out as same-family";
 
-/// The early gate the composefs routes run before anything is pulled or
-/// staged: scan the target's identity over the registry, print the
-/// verdict, and refuse a cross-family target unless accepted.
+/// The early gate used by routes that stage through `bootc switch`: scan the
+/// target's identity over the registry, print the verdict, and refuse a
+/// cross-family target unless accepted.
 ///
-/// This is the fast-fail courtesy, not the decision. An unscannable
-/// target is a warning here, not a refusal — the conversion route's Phase
-/// 4 decides again from the *mounted* image's own `os-release`
-/// ([`decide`]), which needs no registry, and refuses there if it must.
-/// (The `bootc switch` routes have no such second look; for them the
-/// warning is the whole answer, and `bootc switch` itself needs the
-/// registry moments later anyway.) Making the scan a hard requirement
-/// would turn a proxy or a registry blip into a refusal of every
-/// same-family migration, which is the route's protected regression gate.
+/// This is the fast-fail courtesy, not the decision. An unscannable target is
+/// a warning here; the route reads the staged image's own `os-release` after
+/// `bootc switch` and calls [`decide`] before finalization.
+pub fn gate_for_switch(target_image: &str, accepted: bool) -> Result<()> {
+    let verdict = build_verdict(target_image)?;
+    enforce_and_print(&verdict, accepted, SWITCH_DECIDE_NOTE)
+}
+
+/// The early gate used by the composefs conversion route.
+///
+/// The conversion route's Phase 4 decides again from the mounted image's own
+/// `os-release`, so its historical warning remains specific to that phase.
 pub fn gate(target_image: &str, accepted: bool) -> Result<()> {
     let verdict = build_verdict(target_image)?;
     enforce_and_print(&verdict, accepted, CONVERSION_DECIDE_NOTE)
@@ -228,6 +233,10 @@ pub fn gate_with_caps(
 /// verbatim: the migrator's printed output is frozen.
 const CONVERSION_DECIDE_NOTE: &str = "Phase 4 decides from the pulled image's own \
      os-release; a cross-family target is refused there unless --accept-cross-base was given.";
+
+const SWITCH_DECIDE_NOTE: &str = "the staged deployment's own os-release is \
+     checked after bootc switch; a cross-family target is refused there unless \
+     --accept-cross-base was given.";
 
 /// Refuse an unaccepted cross-family verdict, otherwise print what the
 /// verdict means. Every printed byte matches [`gate`]'s historical output
@@ -427,6 +436,149 @@ pub fn plan_etc(states: &[EtcPathState]) -> EtcCrossFamilyPlan {
     }
     plan
 }
+/// Apply the cross-family policy over a deployment that `bootc switch` has
+/// already staged.
+///
+/// The native switch merge has already produced `staged_etc_dir`. This pass
+/// deliberately reconciles that output rather than running a second three-way
+/// merge: target defaults are copied, source-vendor-only paths are removed,
+/// displaced user values become `.rebase-old` sidecars, carried paths are
+/// restored from live `/etc`, and identity databases are union-merged
+/// target-first (with password databases remaining source-first).
+pub fn apply_staged_etc_policy(
+    source_default_dir: &Path,
+    current_dir: &Path,
+    target_default_dir: &Path,
+    staged_etc_dir: &Path,
+    plan: &CrossFamilyPlan,
+) -> Result<EtcCrossFamilyPlan> {
+    let states =
+        crate::mergetc::etc_path_states(source_default_dir, current_dir, target_default_dir)
+            .context("failed to read the three /etc trees for the cross-family policy")?;
+    let etc_plan = plan_etc(&states);
+    print!("{}", render_etc_report(&plan.host, &plan.target, &etc_plan));
+    fs::create_dir_all(staged_etc_dir)
+        .with_context(|| format!("failed to create {}", staged_etc_dir.display()))?;
+
+    for rel_path in &etc_plan.sidecars {
+        let sidecar = format!("{rel_path}{}", crate::mergetc::REBASE_OLD_SUFFIX);
+        write_entry(current_dir, rel_path, staged_etc_dir, &sidecar)
+            .with_context(|| format!("failed to preserve /etc/{sidecar}"))?;
+    }
+    for rel_path in &etc_plan.take_target {
+        write_entry(target_default_dir, rel_path, staged_etc_dir, rel_path)
+            .with_context(|| format!("failed to write target default for /etc/{rel_path}"))?;
+    }
+    for rel_path in &etc_plan.dropped {
+        remove_entry(&staged_etc_dir.join(rel_path))
+            .with_context(|| format!("failed to drop source-vendor path /etc/{rel_path}"))?;
+    }
+    for rel_path in &etc_plan.carried {
+        write_entry(current_dir, rel_path, staged_etc_dir, rel_path)
+            .with_context(|| format!("failed to preserve carried path /etc/{rel_path}"))?;
+    }
+    for rel_path in &etc_plan.identity {
+        let current = crate::mergetc::read_file_at(current_dir, rel_path);
+        let target = crate::mergetc::read_file_at(target_default_dir, rel_path);
+        let Some(merged) = crate::mergetc::merge_identity_db(
+            rel_path,
+            current.as_deref(),
+            target.as_deref(),
+            crate::mergetc::IdentityMergePolicy::TargetFirst,
+        ) else {
+            continue;
+        };
+        let dest = staged_etc_dir.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        remove_entry(&dest)?;
+        fs::write(&dest, merged)
+            .with_context(|| format!("failed to write merged identity DB /etc/{rel_path}"))?;
+        let metadata_source = if current_dir.join(rel_path).is_file() {
+            current_dir.join(rel_path)
+        } else {
+            target_default_dir.join(rel_path)
+        };
+        if metadata_source.is_file() {
+            copy_entry_metadata(&metadata_source, &dest)?;
+        }
+    }
+
+    Ok(etc_plan)
+}
+
+/// Copy a regular file or symlink from one tree to another, replacing the
+/// destination. The policy must preserve target metadata when it takes a
+/// target default, and source metadata when it writes a sidecar or carried
+/// value.
+fn write_entry(src_base: &Path, src_rel: &str, dest_base: &Path, dest_rel: &str) -> Result<()> {
+    let src = src_base.join(src_rel);
+    let meta =
+        fs::symlink_metadata(&src).with_context(|| format!("failed to stat {}", src.display()))?;
+    let dest = dest_base.join(dest_rel);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if src == dest {
+        return Ok(());
+    }
+    remove_entry(&dest)?;
+
+    if meta.file_type().is_symlink() {
+        let target = fs::read_link(&src)
+            .with_context(|| format!("failed to read symlink {}", src.display()))?;
+        std::os::unix::fs::symlink(&target, &dest)
+            .with_context(|| format!("failed to create symlink {}", dest.display()))?;
+    } else if meta.is_file() {
+        let content =
+            fs::read(&src).with_context(|| format!("failed to read {}", src.display()))?;
+        fs::write(&dest, content).with_context(|| format!("failed to write {}", dest.display()))?;
+        copy_entry_metadata(&src, &dest)?;
+    } else {
+        bail!("unsupported /etc entry type at {}", src.display());
+    }
+    Ok(())
+}
+
+fn remove_entry(path: &Path) -> Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("failed to stat {}", path.display())),
+    };
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    } else {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_entry_metadata(src: &Path, dest: &Path) -> Result<()> {
+    crate::mergetc::copy_file_metadata(src, dest)?;
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(src).with_context(|| format!("failed to stat {}", src.display()))?;
+    rustix::fs::chownat(
+        rustix::fs::CWD,
+        dest,
+        Some(rustix::fs::Uid::from_raw(meta.uid())),
+        Some(rustix::fs::Gid::from_raw(meta.gid())),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .with_context(|| format!("failed to set ownership on {}", dest.display()))?;
+    Ok(())
+}
+
+/// Read a target identity database from the vendor `/etc` tree, falling back
+/// to the image's `/usr/lib` database used by EL-style bootc images, then to
+/// the already-reconciled staged `/etc`.
+pub(crate) fn target_identity_db(staged_root: &Path, vendor_etc: &Path, name: &str) -> String {
+    std::fs::read_to_string(vendor_etc.join(name))
+        .or_else(|_| std::fs::read_to_string(staged_root.join("usr/lib").join(name)))
+        .or_else(|_| std::fs::read_to_string(staged_root.join("etc").join(name)))
+        .unwrap_or_default()
+}
 
 /// Render the end-of-phase summary.
 pub fn render_etc_report(host: &BaseInfo, target: &BaseInfo, plan: &EtcCrossFamilyPlan) -> String {
@@ -557,6 +709,40 @@ pub fn render_firstboot_unit(var_steps: &[RemapStep], relabel: bool) -> Option<S
     unit.push('\n');
     unit.push_str("[Install]\n");
     unit.push_str("WantedBy=sysinit.target\n");
+    Some(unit)
+}
+
+/// Render the cross-family first-boot unit used by `ImageSwap`.
+///
+/// It keeps the remap and relabel work from [`render_firstboot_unit`] and
+/// adds the target's system-user and library-cache repair that the image-swap
+/// route needs. One unit and one marker avoid a race where either independent
+/// unit could remove the marker before the other ran.
+pub fn render_image_swap_cross_family_firstboot_unit(
+    var_steps: &[RemapStep],
+    relabel: bool,
+) -> Option<String> {
+    let Some(mut unit) = render_firstboot_unit(var_steps, relabel) else {
+        // ImageSwap must keep its existing system-user and library-cache
+        // repair even when no UID/GID or SELinux work is needed.
+        return Some(render_image_swap_firstboot_unit(false));
+    };
+    unit = unit.replacen(
+        "Before=sysinit.target\n",
+        "Before=sysinit.target systemd-sysusers.service dbus-broker.service dbus.service\n",
+        1,
+    );
+    let marker_command = format!("ExecStart=/usr/bin/rm -f /etc/{FIRSTBOOT_MARKER}\n");
+    let mut image_swap_commands =
+        String::from("ExecStart=-/usr/bin/systemd-sysusers\nExecStart=-/usr/sbin/ldconfig\n");
+    if relabel {
+        image_swap_commands.push_str("ExecStart=-/usr/sbin/restorecon -RF /etc\n");
+    }
+    unit = unit.replacen(
+        &marker_command,
+        &format!("{image_swap_commands}{marker_command}"),
+        1,
+    );
     Some(unit)
 }
 
@@ -1136,6 +1322,7 @@ mod tests {
                 format!("/usr/bin/rm -f /etc/{FIRSTBOOT_MARKER}"),
             ]
         );
+
         let relabel = render_image_swap_firstboot_unit(true);
         let e = execs(&relabel);
         assert_eq!(e.first().unwrap(), "-/usr/sbin/restorecon -RF /etc /var");
@@ -1143,6 +1330,44 @@ mod tests {
         assert!(e.last().unwrap().contains(FIRSTBOOT_MARKER));
         assert!(relabel.contains(&format!("ConditionPathExists=/etc/{FIRSTBOOT_MARKER}")));
         assert!(relabel.contains("Before=sysinit.target systemd-sysusers.service"));
+    }
+    #[test]
+    fn image_swap_cross_family_firstboot_unit_preserves_all_steps() {
+        let step = RemapStep {
+            kind: IdKind::Uid,
+            from: 81,
+            to: 499,
+        };
+        let unit = render_image_swap_cross_family_firstboot_unit(&[step], true).unwrap();
+        let execs: Vec<&str> = unit
+            .lines()
+            .filter_map(|line| line.strip_prefix("ExecStart="))
+            .collect();
+        assert_eq!(
+            execs,
+            vec![
+                "/usr/bin/chown -hR --from=81 499 /var",
+                "-/usr/sbin/restorecon -RF /etc /var",
+                "-/usr/bin/systemd-sysusers",
+                "-/usr/sbin/ldconfig",
+                "-/usr/sbin/restorecon -RF /etc",
+                &format!("/usr/bin/rm -f /etc/{FIRSTBOOT_MARKER}"),
+            ]
+        );
+        assert!(unit.contains("Before=sysinit.target systemd-sysusers.service"));
+        let no_policy = render_image_swap_cross_family_firstboot_unit(&[], false).unwrap();
+        let execs: Vec<&str> = no_policy
+            .lines()
+            .filter_map(|line| line.strip_prefix("ExecStart="))
+            .collect();
+        assert_eq!(
+            execs,
+            vec![
+                "-/usr/bin/systemd-sysusers",
+                "-/usr/sbin/ldconfig",
+                &format!("/usr/bin/rm -f /etc/{FIRSTBOOT_MARKER}"),
+            ]
+        );
     }
 
     #[test]
@@ -1444,6 +1669,117 @@ mod tests {
         );
     }
 
+    #[test]
+    fn policy_applied_to_staged_deployment() {
+        let source = tempfile::tempdir().unwrap();
+        let current = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let write = |root: &tempfile::TempDir, path: &str, content: &str| {
+            let full = root.path().join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, content).unwrap();
+        };
+
+        write(source, "target.conf", "source default\n");
+        write(current, "target.conf", "local edit\n");
+        write(target, "target.conf", "target default\n");
+        write(source, "source-only.conf", "source only\n");
+        write(current, "source-only.conf", "local source edit\n");
+        write(source, "hostname", "source-host\n");
+        write(current, "hostname", "machine-host\n");
+        write(target, "hostname", "target-host\n");
+        write(current, "user-added.conf", "user value\n");
+        write(target, "target-only.conf", "target-only\n");
+        write(
+            source,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\n",
+        );
+        write(
+            current,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n",
+        );
+        write(
+            target,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:997:997::/:/sbin/nologin\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\n",
+        );
+        write(source, "shadow", "root:*:1::::::\n");
+        write(
+            current,
+            "shadow",
+            "root:$6$real:1::::::\nrealuser:$6$u:1::::::\n",
+        );
+        write(target, "shadow", "root:*:1::::::\nchrony:!:1::::::\n");
+
+        // The native switch merge has already kept the local side for the
+        // conflicts and source-only path; the apply step must reconcile it.
+        write(&staged, "target.conf", "local edit\n");
+        write(&staged, "source-only.conf", "local source edit\n");
+        write(&staged, "hostname", "machine-host\n");
+        write(&staged, "user-added.conf", "user value\n");
+        write(&staged, "target-only.conf", "target-only\n");
+        write(
+            &staged,
+            "passwd",
+            "root:x:0:0::/root:/bin/bash\nwheel:x:10:10::/:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n",
+        );
+        write(
+            &staged,
+            "shadow",
+            "root:$6$real:1::::::\nrealuser:$6$u:1::::::\n",
+        );
+
+        let plan = CrossFamilyPlan {
+            host: base("bluefin", Some("fedora")),
+            target: base("opensuse-tumbleweed", Some("opensuse suse")),
+        };
+        let etc_plan = apply_staged_etc_policy(
+            source.path(),
+            current.path(),
+            target.path(),
+            staged.path(),
+            &plan,
+        )
+        .unwrap();
+
+        let read = |path: &str| fs::read_to_string(staged.path().join(path)).ok();
+        let cases = [
+            (
+                "target.conf",
+                Some("target default\n"),
+                Some("local edit\n"),
+            ),
+            ("source-only.conf", None, Some("local source edit\n")),
+            ("hostname", Some("machine-host\n"), None),
+            ("user-added.conf", Some("user value\n"), None),
+            ("target-only.conf", Some("target-only\n"), None),
+        ];
+        for (path, expected, sidecar) in cases {
+            assert_eq!(read(path).as_deref(), expected, "{path}");
+            assert_eq!(
+                read(&format!("{path}{}", crate::mergetc::REBASE_OLD_SUFFIX)).as_deref(),
+                sidecar,
+                "{path} sidecar"
+            );
+        }
+        assert_eq!(
+            read("passwd").as_deref(),
+            Some(
+                "root:x:0:0::/root:/bin/bash\nwheel:x:997:997::/:/sbin/nologin\nchrony:x:499:499::/var/lib/chrony:/sbin/nologin\nrealuser:x:1000:1000::/var/home/realuser:/bin/bash\n"
+            )
+        );
+        assert_eq!(
+            read("shadow").as_deref(),
+            Some("root:$6$real:1::::::\nrealuser:$6$u:1::::::\nchrony:!:1::::::\n")
+        );
+        assert!(etc_plan.take_target.contains(&"target.conf".to_string()));
+        assert!(etc_plan.dropped.contains(&"source-only.conf".to_string()));
+        assert!(etc_plan.identity.contains(&"passwd".to_string()));
+    }
+
     fn caps_with_base(base: Option<BaseInfo>) -> scan::Capabilities {
         scan::Capabilities {
             composefs_capable: false,
@@ -1547,10 +1883,10 @@ mod tests {
     }
 
     #[test]
-    fn conversion_decide_note_stays_verbatim() {
-        // The migrator's printed output is frozen: gate()'s Unknown warning
-        // must keep naming Phase 4. Route-specific notes live beside their
-        // routes (e.g. OSTREE_INSTALL_DECIDE_NOTE), never here.
+    fn route_decide_notes_remain_distinct() {
+        // The conversion route's historical output is frozen; switch routes
+        // name the staged deployment that performs the authoritative check.
         assert!(CONVERSION_DECIDE_NOTE.contains("Phase 4 decides"));
+        assert!(SWITCH_DECIDE_NOTE.contains("staged deployment's own os-release"));
     }
 }

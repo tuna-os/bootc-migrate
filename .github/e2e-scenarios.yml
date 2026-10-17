@@ -93,6 +93,17 @@
   # the stash directory exists afterwards.
   de_migrate: true
   allow_failure: true
+- name: bluefin -> openSUSE Tumbleweed (cross-family ostree re-base, OstreeDeploy)
+  base: ghcr.io/projectbluefin/bluefin:stable
+  # #259: exercise the post-finalization cross-family policy on the
+  # bootc switch route. Non-gating while the target's community image
+  # and the new OstreeDeploy reconciliation get real-run coverage.
+  target: ghcr.io/bootcrew/opensuse-bootc:latest
+  mode: ostree-rebase
+  disk_size: 40G
+  cross_family: true
+  expect_os_id: opensuse-tumbleweed
+  allow_failure: true
 - name: bluefin -> dakota (TUI-driven migration)
   base: ghcr.io/projectbluefin/bluefin:stable
   target: ghcr.io/projectbluefin/dakota:stable

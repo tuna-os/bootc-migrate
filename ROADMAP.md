@@ -110,13 +110,13 @@ validation named in that issue's own scope never shipped.
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
-| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
+| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is covered — #191 shipped (2026-08-28); same-family cross-base remap and conflict walks still need a genuinely cross-base E2E pair, while #259's cross-family cell covers the separate policy path | #67, #187, #259 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
-| Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
+| Identity-DB merge across families | implemented in `cross_family` for conversion, `OstreeDeploy`, and `ImageSwap`: target-first accounts, source-first password databases | the four composefs cells and the new non-gating OstreeDeploy cell assert real-tree identity preservation; same-family/native `bootc switch` identity divergence remains the separate #80 gap | #80, #256, #259 |
 | composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | two non-gating cells (dakota composefs-native → fedora-bootc 44, and → utah testing, #302) assert the route, the fixtures, GRUB first in BootOrder and the preserved rollback entry; never executed on a real host before that cell | #260 |
 | composefs → ostree with `/boot` on an encrypted root (`ostree_install::esp_resident`) | implemented: the route detects `/boot` without its own partition on a dm-crypt or `rd.luks.` root, copies the new kernel and initrd to the ESP with a BLS entry that keeps the `ostree=` argument, makes that entry the systemd-boot default and puts systemd-boot first in `BootOrder`; detection, entry parsing, the ESP plan and the staging are table-tested | no E2E cell installs a composefs host with `/boot` on LUKS; the hand-made equivalent was staged on a real host, but its boot is not yet recorded; after `bootc upgrade`, the ESP copy does not follow the new kernel | #305 |
-| composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) asserts the route, the fixtures, the booted identity and the kept rollback; it depends on a pre-alpha image and has not yet passed end to end | #66 |
-| Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | four non-gating cells (bluefin → bootcrew openSUSE, Debian, Ubuntu, Arch) assert the refusal, the staged `/etc` shape and the booted identity; they depend on community images and have not yet passed end to end | #256, #261 |
+| composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image; accepted cross-family swaps reconcile `/etc` after native finalization and preserve the sysusers/ldconfig first-boot repair | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) covers the ordinary route; the cross-family swap path remains covered by the composefs family cells and needs a dedicated image-swap cell | #66, #259 |
+| Cross-family migration on the `bootc switch` routes (`cross_family`) | implemented: early gate plus authoritative staged-image decision; `OstreeDeploy` reconciles `/etc`, remaps the finalized tree and schedules `/.autorelabel`, while `ImageSwap` installs a combined remap/relabel/sysusers/ldconfig first-boot unit; planner, direct staged apply, gate and unit rendering are table-tested | five non-gating cells (four composefs conversion targets plus bluefin → openSUSE OstreeDeploy) assert refusal, the staged `/etc` shape and the booted identity; they depend on community images and have not yet passed end to end | #256, #259, #261 |
 | First-boot repair (`firstboot_repair`, L3) | implemented on the `CoreMigration` and `OstreeInstall` routes; each class and the unit are table-tested on fixture roots | the `CoreMigration` cells break a canary tree after staging and assert the ownership repair after the reboot; the `flatpak` and `selinux-label` classes run in no cell, and `selinux-label` gets input only when the verify probe reports that class | #309 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
@@ -351,21 +351,18 @@ either is imminent:
 - **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch) via `bootc switch`** —
   M3's cross-base work (#67) stays within the Fedora family, where `/etc`
   defaults, UID/GID allocation, and the init/PAM stack share lineage. The
-  composefs *conversion* route now has a cross-family policy (#256,
-  `crates/bootc-migrate-core/src/cross_family.rs`): most of `/etc` is
-  non-mergeable (the target's defaults win, the source vendor's files are
-  dropped), an explicit allowlist of machine state and every user-added
-  path are carried, identity databases merge target-first with a `/var`
-  remap, and displaced edits survive as `.rebase-old` sidecars — the
-  "reinstall with data preservation" shape this entry described before it
-  existed. It is gated behind `--accept-cross-base`, exploratory, and
-  covered by one non-gating cell. The `bootc switch` routes (OstreeDeploy,
-  ImageSwap) refuse a cross-family target on the same gate but apply no
-  policy: their `/etc` is the native merge's, which is the same-lineage
-  rule. A cross-family policy over a `bootc switch`-staged deployment would
-  reuse `etc_conflict`'s post-merge seam; that is #259, one of the
-  any-base-to-any-base steps tracked in #258 (with #260 for
-  composefs → ostree and #261 for an E2E base-pair matrix).
+  composefs *conversion* route and both `bootc switch` routes now share the
+  cross-family policy in `crates/bootc-migrate-core/src/cross_family.rs`:
+  most of `/etc` is non-mergeable (the target's defaults win, the source
+  vendor's files are dropped), an explicit allowlist of machine state and
+  every user-added path are carried, identity databases merge target-first
+  with a `/var` remap, and displaced edits survive as `.rebase-old` sidecars.
+  `OstreeDeploy` applies it after native finalization so libostree cannot
+  overwrite the result and schedules `/.autorelabel`; `ImageSwap` applies it
+  after composefs finalization and preserves its sysusers/ldconfig first-boot
+  work in the combined unit. It remains gated behind `--accept-cross-base`.
+  Four composefs cells and one non-gating OstreeDeploy cell cover the real
+  target shape; the latter is tracked by #259.
 
 ### 1.0 — Universal migrator
 
