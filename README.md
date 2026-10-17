@@ -145,6 +145,49 @@ For a live run, turn off dry-run there. The final review requires typing
 `CONFIRM` and Enter before anything changes. Root is needed to run a migration,
 though you can browse the catalog without it.
 
+## Coming from a regular (non-bootc) install
+
+A regular Fedora, Ubuntu, Debian or Arch install is a **package host**: its
+operating system is managed by rpm, dpkg or pacman rather than by a bootc
+deployment. `bootc-rebase` detects that source and selects the package → OSTree
+route. The TUI exposes the same route, limits the image picker to OSTree
+targets, and keeps the run read-only.
+
+> **Current status: preview only.** `PackageInstall` is not implemented yet
+> ([#373](https://github.com/tuna-os/bootc-migrate/issues/373)). Run the
+> readiness preview, but do not treat it as a migration:
+
+```bash
+sudo bootc-rebase rebase \
+  --target-image quay.io/fedora/fedora-bootc:latest \
+  --target-backend ostree \
+  --dry-run
+```
+
+The preview prints the package-host readiness and target-hardware reports. It
+checks UEFI boot, the root filesystem and subvolume layout, LUKS/LVM, `/boot`,
+`/home`, free space, active package transactions and SELinux. The evidence for
+each source distribution, filesystem and boot mode is tracked in
+[the support matrix](docs/support-matrix.md#package-based-source-hosts).
+
+The completed route will use this contract:
+
+- User accounts, home directories, application data and user-modified `/etc`
+  files carry to the bootc deployment. Unmodified package-owned configuration
+  is replaced by the target image's default.
+- Host packages do **not** carry. The software report
+  ([#377](https://github.com/tuna-os/bootc-migrate/issues/377)) will list
+  missing packages, third-party repositories, services and kernel modules,
+  with Flatpak, Homebrew, toolbox/distrobox or derived-image replacements.
+- The old package OS remains a bootable **Previous system** entry until commit;
+  creating and undoing that rollback entry is tracked by
+  [#374](https://github.com/tuna-os/bootc-migrate/issues/374).
+- Commit is deliberately separate and one-way. After booting and verifying the
+  new deployment, the guided commit in
+  [#378](https://github.com/tuna-os/bootc-migrate/issues/378) will reclaim the
+  old OS. The existing `bootc-rebase commit` handles composefs → OSTree only
+  and must not be used as a substitute.
+
 ## Architecture
 
 ```mermaid

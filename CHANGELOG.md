@@ -48,6 +48,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   the `package -> ostree` route (`PackageInstall`, not implemented yet).
   `--target-backend` now defaults to `auto`: composefs from a bootc
   deployment, as before, and ostree from a package host (#371, part of #370).
+- The TUI now recognizes package-managed hosts as a read-only preview route,
+  limits their target picker to OSTree images and runs the existing
+  `bootc-rebase --dry-run` readiness/hardware reports. Live PackageInstall
+  remains disabled until #373. Package-host guidance, per-distribution /
+  filesystem / boot-mode evidence rows and the roadmap's unvalidated-path
+  entry make that boundary explicit (#381).
 - Hardware and firmware check before every migration, on every route of
   `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
   compares the devices that work today, the out-of-tree drivers in use

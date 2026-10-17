@@ -118,6 +118,7 @@ validation named in that issue's own scope never shipped.
 | composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) asserts the route, the fixtures, the booted identity and the kept rollback; it depends on a pre-alpha image and has not yet passed end to end | #66 |
 | Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | four non-gating cells (bluefin → bootcrew openSUSE, Debian, Ubuntu, Arch) assert the refusal, the staged `/etc` shape and the booted identity; they depend on community images and have not yet passed end to end | #256, #261 |
 | First-boot repair (`firstboot_repair`, L3) | implemented on the `CoreMigration` and `OstreeInstall` routes; each class and the unit are table-tested on fixture roots | the `CoreMigration` cells break a canary tree after staging and assert the ownership repair after the reboot; the `flatpak` and `selinux-label` classes run in no cell, and `selinux-label` gets input only when the verify probe reports that class | #309 |
+| package → ostree (`PackageInstall`) | source detection, route planning, package-host readiness and hardware reports implemented; TUI exposes an OSTree-only read-only preview | install, `/etc` classification, data carry, rollback, software report, commit, first-boot verification and every E2E cell remain open; no package-host source is supported | #370–#381 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -329,6 +330,33 @@ still advisable before treating firmware-specific behavior as universal.
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
 request; non-experts can read what will happen before it happens.
 
+### M6 — Package-host onboarding — **detection and readiness only**
+
+[#370](https://github.com/tuna-os/bootc-migrate/issues/370) extends the engine
+to regular rpm-, dpkg- and pacman-managed installs. The work is deliberately
+sequenced: package hosts have more varied disk layouts and no OSTree factory
+`/etc`, so detecting one is not evidence that installing beside it is safe.
+
+The two read-only pieces have landed:
+
+- #371 detects `Backend::Package`, plans `PackageInstall` and defaults its
+  target backend to OSTree.
+- #372 reports boot mode, filesystems, LUKS/LVM, btrfs subvolumes, `/boot`,
+  `/home`, free space, active package managers, SELinux and target hardware.
+
+Everything that mutates or completes the contract remains open: the install
+engine (#373), old-system rollback and undo (#374), package-database `/etc`
+classification (#375), home and data carry (#376), software report (#377),
+guided commit (#378), first-boot verification (#379), and package-source E2E
+cells (#380). #381 documents that boundary, adds evidence rows, and gives the
+TUI an OSTree-only **dry-run** entry; its live confirmation and software-report
+screens cannot graduate until #373 and #377 supply them.
+
+**Exit criteria (not yet met)**: the Fedora Cloud → fedora-bootc cell is green
+on `main`; the TUI shows target-specific readiness and software reports before
+live confirmation; the old OS boots after staging and after undo; first-boot
+verification passes; guided commit removes only the verified old system.
+
 ### Deferred extensions (raised on #30, not yet scoped into a milestone)
 
 Two directions came up in discussion on the [generalize-into-a-re-base-engine
@@ -387,6 +415,7 @@ graph TD
   M1 --> M5A["M5 #68 DE stash/restore — detection+wiring landed, cross-DE E2E cell deferred"]
   M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI unit-tested + tui-migrate E2E cell gating"]
   M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
+  M1 --> M6["M6 #370 package hosts — detection + readiness landed; install, reports, rollback and E2E open"]
 ```
 
 ## Risks & standing mitigations

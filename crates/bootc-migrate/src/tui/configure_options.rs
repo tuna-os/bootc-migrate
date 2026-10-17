@@ -22,9 +22,14 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let package_preview = app.is_package_source();
     let options: Vec<(&str, String, bool)> = vec![
         (
-            "Dry-run (recommended first run)",
+            if package_preview {
+                "Dry-run (required: PackageInstall is preview-only)"
+            } else {
+                "Dry-run (recommended first run)"
+            },
             if app.opt_dry_run {
                 "[x]".to_owned()
             } else {
