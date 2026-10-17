@@ -25,6 +25,8 @@
 //! - [`preflight`] — system introspection and migration readiness checks
 //! - [`migration`] — the phase 0–5 migration pipeline, bootloader/BLS handling,
 //!   kernel command-line construction, and os-release parsing
+//! - [`ostree_install_txn`] — journaled, observe-before-trust firmware cutover
+//!   for the composefs → OSTree route
 //! - [`transaction`] — two-phase apply: `commit` / `undo` of a staged migration
 //! - [`types`] — shared types such as [`VerityDigest`]
 
@@ -48,6 +50,7 @@ pub mod motd;
 pub mod ostree;
 pub mod ostree_install;
 pub mod ostree_install_commit;
+pub mod ostree_install_txn;
 pub mod package_host;
 pub mod preflight;
 pub mod rebase_controller;

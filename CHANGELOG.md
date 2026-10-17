@@ -25,14 +25,26 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- The composefs → OSTree boot cutover is now a durable, observe-before-trust
+  transaction (#387). It atomically journals each phase and the ESP snapshot
+  hashes, restores and verifies the composefs boot path immediately after
+  bootc's destructive ESP update, keeps that rollback entry first in
+  `BootOrder`, and arms the new target for one boot with `BootNext`. A restart
+  classifies observed ESP/NVRAM state as complete, resumable, failed,
+  needs-repair or in-progress; resumable transactions arm safely and damaged
+  transactions restore the verified fallback. `commit --apply` promotes the
+  target in `BootOrder` only after an OSTree boot has been observed. Two
+  non-gating fault-injection cells cover interruption after the ESP wipe and
+  immediately before arming.
 
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
   old `/var` against the live `/var`, and lists every path with its size.
-  With `--apply` it copies the install report and ESP snapshot into the live
-  `/var` first. Then it deletes the old `/var`, the composefs store and the
-  composefs deployments. The OSTree repo, `/boot`, the ESP and NVRAM stay.
+  With `--apply` it promotes the observed-good target entry in UEFI
+  `BootOrder`, copies the install report and ESP snapshot into the live
+  `/var`, then deletes the old `/var`, composefs store and composefs
+  deployments. The OSTree repo, `/boot` and ESP stay.
 - Cross-family E2E base-pair matrix (#261). Three more non-gating cells
   exercise `E2E_CROSS_FAMILY=1` beyond Bluefin → openSUSE Tumbleweed:
   Bluefin → Debian, Ubuntu and Arch Linux. The test harness adapts

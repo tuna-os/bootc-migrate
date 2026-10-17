@@ -83,6 +83,14 @@ E2E_DE_FROM="${E2E_DE_FROM:-gnome}"
 # D-Bus, for example) leaves its error in qemu.log. Off by default: the
 # extra serial output slows every boot.
 E2E_CONSOLE_JOURNAL="${E2E_CONSOLE_JOURNAL:-0}"
+# Optional reverse-route crash boundary. The first invocation stops after the
+# named durable phase; the cell then exercises startup classification and
+# either rollback repair or safe resume.
+E2E_BOOT_TXN_FAULT="${E2E_BOOT_TXN_FAULT:-}"
+case "$E2E_BOOT_TXN_FAULT" in
+    ""|after-esp-wipe|before-arm) ;;
+    *) echo "ERROR: unknown E2E_BOOT_TXN_FAULT '$E2E_BOOT_TXN_FAULT'"; exit 1 ;;
+esac
 case "$E2E_DE_FROM" in
     gnome) DE_SEED_REL=".config/dconf/user" ;;
     kde) DE_SEED_REL=".config/kdeglobals" ;;
@@ -1010,6 +1018,26 @@ ATTEMPT=1
 SSH_OPTS="-i ./test_key -p $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 SCP_OPTS="-i ./test_key -P $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
+# A reachable SSH socket after `reboot` does not prove that a reboot happened:
+# systemctl can refuse or a reconnect can land on the old boot.  Every reboot
+# boundary records the kernel boot_id and requires a different one afterwards.
+capture_boot_id() {
+    ssh $SSH_OPTS root@localhost "cat /proc/sys/kernel/random/boot_id" 2>/dev/null
+}
+
+assert_boot_id_changed() {
+    local before="$1"
+    local label="$2"
+    local after
+    after=$(capture_boot_id)
+    if [ -z "$before" ] || [ -z "$after" ] || [ "$before" = "$after" ]; then
+        echo "FAIL: $label did not produce a new kernel boot_id (before=${before:-missing}, after=${after:-missing})"
+        exit 1
+    fi
+    echo "OK: $label changed boot_id ($before -> $after)."
+}
+
+
 # Stream high-signal qemu serial output to stdout (full log is on disk in qemu.log).
 vm_tail vm-serial &
 TAIL_PID=$!
@@ -1620,6 +1648,7 @@ exit 0
 PREDIAG
 
     step "=== ostree-rebase: rebooting into the new deployment ==="
+    PRE_OSTREE_REBASE_BOOT_ID=$(capture_boot_id)
     ssh $SSH_OPTS root@localhost "reboot" || true
     sleep 5
     ATTEMPT=1
@@ -1640,6 +1669,7 @@ PREDIAG
         serial_failure_lines | tail -40 || true
         exit 1
     fi
+    assert_boot_id_changed "$PRE_OSTREE_REBASE_BOOT_ID" "ostree re-base reboot"
 
     # #262: what the previous boot's finalization did, read from its journal,
     # before the assertion below turns a wrong deployment into an exit.
@@ -1774,19 +1804,79 @@ REVFIX
     capture_health_baseline
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
-    # steps of this mode, and a job that times out inside them must leave
-    # the progress in the log.
+    # steps of this mode, and a job that stops inside them must leave progress.
+    FAULT_ENV=""
+    [ -n "$E2E_BOOT_TXN_FAULT" ] \
+        && FAULT_ENV="BOOTC_REBASE_FAULT_POINT='$E2E_BOOT_TXN_FAULT'"
+    set +e
     ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --accept-cross-base" 2>&1 \
+        "$FAULT_ENV /var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --accept-cross-base" 2>&1 \
         | tee /tmp/rebase-out.log \
         | awk '{ print "[rebase] " $0; fflush() }'
     REBASE_RC=${PIPESTATUS[0]}
-    if [ "$REBASE_RC" != "0" ]; then
-        echo "FAIL: bootc-rebase exited nonzero ($REBASE_RC)"
-        exit 1
+    set -e
+
+    if [ -z "$E2E_BOOT_TXN_FAULT" ]; then
+        [ "$REBASE_RC" = "0" ] || { echo "FAIL: bootc-rebase exited $REBASE_RC"; exit 1; }
+        grep -q "OSTree deployment staged" /tmp/rebase-out.log || {
+            echo "FAIL: bootc-rebase did not report a staged OSTree deployment"; exit 1; }
+    else
+        [ "$REBASE_RC" != "0" ] || { echo "FAIL: fault point did not stop bootc-rebase"; exit 1; }
+        grep -q "fault injection at $E2E_BOOT_TXN_FAULT" /tmp/rebase-out.log || {
+            echo "FAIL: bootc-rebase stopped for the wrong reason"; exit 1; }
+        step "=== boot transaction: restarting after $E2E_BOOT_TXN_FAULT ==="
+        set +e
+        ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree --accept-cross-base" 2>&1 \
+            | tee /tmp/rebase-resume.log \
+            | awk '{ print "[rebase-resume] " $0; fflush() }'
+        RESUME_RC=${PIPESTATUS[0]}
+        set -e
+
+        if [ "$E2E_BOOT_TXN_FAULT" = "before-arm" ]; then
+            [ "$RESUME_RC" = "0" ] || { echo "FAIL: prepared transaction did not resume"; exit 1; }
+            grep -q "startup classification: resumable" /tmp/rebase-resume.log || {
+                echo "FAIL: restart did not classify the prepared transaction as resumable"; exit 1; }
+            grep -q "resumed the prepared transaction" /tmp/rebase-resume.log || {
+                echo "FAIL: restart did not arm the prepared transaction"; exit 1; }
+        else
+            [ "$RESUME_RC" != "0" ] || { echo "FAIL: damaged transaction unexpectedly resumed"; exit 1; }
+            grep -q "startup classification: needs-repair" /tmp/rebase-resume.log || {
+                echo "FAIL: restart did not classify the interrupted transaction as needs-repair"; exit 1; }
+            grep -q "rolled back and observed" /tmp/rebase-resume.log || {
+                echo "FAIL: restart did not report an observed rollback"; exit 1; }
+            ssh $SSH_OPTS root@localhost bash <<'RECOVERYASSERT'
+set -e
+J=/var/lib/bootc-rebase/boot-transaction.json
+test "$(jq -r .phase "$J")" = rolled-back || { cat "$J"; exit 1; }
+ESP=$(jq -r .esp "$J")
+SNAP=$(jq -r .snapshot_dir "$J")
+jq -r '.esp_file_hashes | to_entries[] | [.key, .value] | @tsv' "$J" |
+while IFS=$'\t' read -r rel expected; do
+    [ "$(sha256sum "$SNAP/$rel" | cut -d' ' -f1)" = "$expected" ]
+    [ "$(sha256sum "$ESP/$rel" | cut -d' ' -f1)" = "$expected" ]
+done
+FIRST=$(efibootmgr -v | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
+efibootmgr -v | grep -i "^Boot${FIRST}.*Linux Boot Manager" >/dev/null
+echo "OK: rollback journal, ESP hashes, and fallback BootOrder are observed."
+RECOVERYASSERT
+            PRE_FAULT_RECOVERY_BOOT_ID=$(capture_boot_id)
+            ssh $SSH_OPTS root@localhost "reboot" || true
+            sleep 5
+            FAULT_BOOT_OK=no
+            for _ in $(seq 1 60); do
+                if ssh $SSH_OPTS root@localhost true 2>/dev/null; then FAULT_BOOT_OK=yes; break; fi
+                sleep 3
+            done
+            [ "$FAULT_BOOT_OK" = yes ] || { echo "FAIL: recovered composefs boot did not return"; exit 1; }
+            assert_boot_id_changed "$PRE_FAULT_RECOVERY_BOOT_ID" "boot transaction recovery reboot"
+            ssh $SSH_OPTS root@localhost "grep -qE '(^| )composefs=' /proc/cmdline" || {
+                echo "FAIL: recovered boot did not return to composefs"; exit 1; }
+            assert_system_healthy "boot transaction recovery"
+            step "=== composefs-to-ostree fault recovery PASSED ==="
+            exit 0
+        fi
     fi
-    grep -q "OSTree deployment staged" /tmp/rebase-out.log || {
-        echo "FAIL: bootc-rebase did not report a staged OSTree deployment"; exit 1; }
 
     step "=== composefs-to-ostree: verifying the staged deployment before reboot ==="
     ssh $SSH_OPTS root@localhost bash <<'REVDIAG'
@@ -1812,6 +1902,20 @@ ls -la "$D/etc/rebase-test/" 2>&1
 grep -H '^realuser:' "$D/etc/passwd" 2>&1
 ls "$(dirname "$D")/../var/rebase-test/" 2>&1
 REVDIAG
+    ssh $SSH_OPTS root@localhost bash <<'BOOTTXNASSERT'
+set -e
+J=/var/lib/bootc-rebase/boot-transaction.json
+test -f "$J" || { echo "FAIL: boot transaction journal missing"; exit 1; }
+test "$(jq -r .phase "$J")" = committed || { echo "FAIL: boot transaction is not committed"; cat "$J"; exit 1; }
+TARGET=$(jq -r .target_entry "$J")
+ROLLBACK=$(jq -r .rollback_entry "$J")
+NEXT=$(efibootmgr | sed -n 's/^BootNext: *//p')
+FIRST=$(efibootmgr | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
+[ "${NEXT,,}" = "${TARGET,,}" ] || { echo "FAIL: BootNext=$NEXT, target=$TARGET"; exit 1; }
+[ "${FIRST,,}" = "${ROLLBACK,,}" ] || { echo "FAIL: BootOrder starts $FIRST, rollback=$ROLLBACK"; exit 1; }
+echo "OK: journal committed only after BootNext=Boot$TARGET was observed; rollback Boot$ROLLBACK remains first."
+BOOTTXNASSERT
+
 
     # e2e-sshd.socket was baked into the base image, so the source factory
     # and the live /etc agree and the target lacks it: the 3-way merge drops
@@ -1852,6 +1956,7 @@ fi
 REVSSH
 
     step "=== composefs-to-ostree: rebooting into the OSTree deployment ==="
+    PRE_OSTREE_INSTALL_BOOT_ID=$(capture_boot_id)
     ssh $SSH_OPTS root@localhost "reboot" || true
     sleep 5
     vm_tail vm-post &
@@ -1877,6 +1982,7 @@ REVSSH
         tail -120 qemu.log
         exit 1
     fi
+    assert_boot_id_changed "$PRE_OSTREE_INSTALL_BOOT_ID" "composefs-to-ostree reboot"
 
     step "=== composefs-to-ostree: post-reboot assertions ==="
     POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
@@ -1915,16 +2021,16 @@ REVSSH
     echo "$NVRAM" | sed 's/^/  /'
     echo "$NVRAM" | grep -qi "Linux Boot Manager" || {
         echo "FAIL: the composefs deployment's 'Linux Boot Manager' firmware entry is gone"; exit 1; }
-    # The route puts the shim/GRUB entry bootupd registered first in
-    # BootOrder, so the next cold boot lands in the OSTree deployment
-    # again and systemd-boot stays one firmware pick away as rollback.
+    # BootNext was consumed by this boot. BootOrder must still prefer the
+    # composefs systemd-boot entry until commit promotes observed-good GRUB.
     FIRST_BOOT=$(echo "$NVRAM" | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
     FIRST_ENTRY=$(echo "$NVRAM" | grep -i "^Boot${FIRST_BOOT}" || true)
-    echo "  first in BootOrder: ${FIRST_ENTRY:-<none>}"
-    if [ -z "$FIRST_BOOT" ] || ! echo "$FIRST_ENTRY" | grep -qiE 'shim|grub' \
-        || echo "$FIRST_ENTRY" | grep -qi "Linux Boot Manager"; then
-        echo "FAIL: the shim/GRUB entry is not first in BootOrder"; exit 1
+    echo "  first in BootOrder before commit: ${FIRST_ENTRY:-<none>}"
+    if [ -z "$FIRST_BOOT" ] || ! echo "$FIRST_ENTRY" | grep -qi "Linux Boot Manager"; then
+        echo "FAIL: composefs rollback is not first in BootOrder before commit"; exit 1
     fi
+    echo "$NVRAM" | grep -q '^BootNext:' && {
+        echo "FAIL: one-shot BootNext was not consumed"; exit 1; }
     # The OSTree deployment mounts nothing at /boot/efi by itself (Bluefin's
     # own installs leave the ESP unmounted; gpt-auto may put it at /efi), so
     # look at every usual place and fall back to mounting the ESP partition
@@ -2009,11 +2115,18 @@ done
 ls -d /sysroot/ostree/deploy/default/deploy/*.0 >/dev/null || { echo "the OSTree deployment is gone"; exit 1; }
 [ -f /var/lib/bootc-rebase/ostree-install-report.json ] || { echo "install report not mirrored"; exit 1; }
 [ -f /var/lib/bootc-rebase/ostree-install-commit.json ] || { echo "commit record missing"; exit 1; }
+NVRAM=$(efibootmgr -v)
+FIRST=$(echo "$NVRAM" | sed -n 's/^BootOrder: *\([0-9A-Fa-f]\{4\}\).*/\1/p')
+ENTRY=$(echo "$NVRAM" | grep -i "^Boot${FIRST}" || true)
+echo "$ENTRY" | grep -qiE 'shim|grub' || { echo "observed-good GRUB entry was not promoted: $ENTRY"; exit 1; }
+jq -e '.boot_order_promoted == true' /var/lib/bootc-rebase/boot-transaction.json >/dev/null \
+    || { echo "journal does not record BootOrder promotion"; exit 1; }
 df -h /sysroot | sed 's/^/[commit-df-after] /'
 COMMITCHECK
     echo "OK: composefs state removed; OSTree repo, deployment and forensics kept."
 
     step "=== composefs-to-ostree: rebooting after commit ==="
+    PRE_OSTREE_COMMIT_BOOT_ID=$(capture_boot_id)
     ssh $SSH_OPTS root@localhost "reboot" || true
     sleep 5
     ATTEMPT=1
@@ -2032,6 +2145,7 @@ COMMITCHECK
         tail -120 qemu.log
         exit 1
     fi
+    assert_boot_id_changed "$PRE_OSTREE_COMMIT_BOOT_ID" "bootc-rebase commit reboot"
     ssh $SSH_OPTS root@localhost "cat /proc/cmdline" | grep -qE '(^| )ostree=' || {
         echo "FAIL: after the commit reboot the OSTree deployment was not booted"; exit 1; }
     VAR_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/rebase-test/marker.txt 2>/dev/null || echo MISSING")
@@ -2213,6 +2327,7 @@ ls -laZ "$DEPLOY_ETC/systemd/system/" 2>&1 | head -20
 SWAPSSH
 
     step "=== image-swap: rebooting into the staged deployment ==="
+    PRE_IMAGE_SWAP_BOOT_ID=$(capture_boot_id)
     ssh $SSH_OPTS root@localhost "reboot" || true
     sleep 5
     vm_tail vm-post &
@@ -2238,6 +2353,7 @@ SWAPSSH
         tail -120 qemu.log
         exit 1
     fi
+    assert_boot_id_changed "$PRE_IMAGE_SWAP_BOOT_ID" "image-swap reboot"
 
     step "=== image-swap: post-reboot assertions ==="
     POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
@@ -2793,6 +2909,7 @@ cat /sysroot/state/deploy/*/etc/fstab 2>/dev/null | grep -E '/var|^UUID' || echo
 DIAG
 
 step "=== Rebooting VM ==="
+PRE_MIGRATION_BOOT_ID=$(capture_boot_id)
 ssh $SSH_OPTS root@localhost "reboot" || true
 
 # Wait for VM to shutdown
@@ -2834,6 +2951,7 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     tail -150 qemu.log
     exit 1
 fi
+assert_boot_id_changed "$PRE_MIGRATION_BOOT_ID" "migration reboot"
 
 # 10. Run post-migration validation checks
 step "=== Running post-migration validation checks ==="
@@ -3209,6 +3327,7 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
     echo "OK: OSTree deployment preserved by undo."
 
     # Reboot — must come back on OSTree (fallback), not composefs.
+    PRE_UNDO_BOOT_ID=$(capture_boot_id)
     ssh $SSH_OPTS root@localhost "systemctl reboot" || true
     sleep 5
     UNDO_BOOT_OK=no
@@ -3219,6 +3338,7 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
     if [ "$UNDO_BOOT_OK" != yes ]; then
         echo "FAIL: VM did not boot after undo"; tail -100 qemu.log; exit 1
     fi
+    assert_boot_id_changed "$PRE_UNDO_BOOT_ID" "undo reboot"
     UNDO_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     if echo "$UNDO_CMDLINE" | grep -q 'composefs='; then
         echo "FAIL: still booting composefs after undo (cmdline: $UNDO_CMDLINE)"; exit 1
@@ -3341,6 +3461,7 @@ ORIG_BOOTORDER=$(ssh $SSH_OPTS root@localhost "efibootmgr 2>/dev/null | awk '/^B
 step "rollback: reordering BootOrder to $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM (was $ORIG_BOOTORDER)"
 
 # Put Fedora shim first, sd-boot second. OVMF honours BootOrder.
+PRE_ROLLBACK_BOOT_ID=$(capture_boot_id)
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $FEDORA_BOOTNUM,$SDBOOT_BOOTNUM >/dev/null && systemctl reboot" || true
 
 sleep 3
@@ -3348,6 +3469,7 @@ wait_for_ssh_with_msg "OSTree rollback boot SSH" 360 "vm-rollback" || {
     echo "FAIL: SSH did not answer after the OSTree rollback boot"
     exit 1
 }
+assert_boot_id_changed "$PRE_ROLLBACK_BOOT_ID" "OSTree rollback reboot"
 
 # Cmdline must show the *OSTree* path: composefs= absent, ostree= present.
 ROLLBACK_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
@@ -3383,12 +3505,14 @@ ROLLBACK_DIAG
 
 # Restore the original BootOrder (systemd-boot first) before rebooting back.
 step "rollback: restoring BootOrder to $ORIG_BOOTORDER and returning to composefs"
+PRE_RETURN_BOOT_ID=$(capture_boot_id)
 ssh $SSH_OPTS root@localhost "efibootmgr --bootorder $ORIG_BOOTORDER >/dev/null && systemctl reboot" || true
 sleep 3
 wait_for_ssh_with_msg "Return-to-composefs SSH" 300 "vm-return-cfs" || {
     echo "FAIL: SSH did not answer after the return-to-composefs reboot"
     exit 1
 }
+assert_boot_id_changed "$PRE_RETURN_BOOT_ID" "return-to-composefs reboot"
 
 RETURN_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
 if ! echo "$RETURN_CMDLINE" | grep -q 'composefs='; then
