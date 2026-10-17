@@ -1,18 +1,17 @@
 # Filesystem Support: btrfs vs XFS
 
-This document explains how the migration tool handles the two most common root
-filesystem types it encounters — btrfs (Bluefin stable) and XFS (Bluefin LTS) —
-and where the two paths diverge.
+This document explains how the tool supports two root filesystems:
+btrfs (Bluefin stable) and XFS (Bluefin LTS). It describes where the two
+paths diverge.
 
-## Background: what composefs requires
+## Background: what composefs needs
 
 The composefs object store (`/sysroot/composefs/`) holds content-addressed EROFS
-images and their backing file objects. When `bootc` pulls an OCI image into this
-store, it seals each file object with **fs-verity** — a kernel feature that computes
-and stores a Merkle-tree hash over a file's contents, allowing the kernel to detect
-on-the-fly corruption or tampering.
+images and data files. When `bootc` pulls an OCI image into this
+store, it seals each file with **fs-verity**. This kernel feature calculates
+a Merkle-tree hash over file contents to detect corruption.
 
-**fs-verity requires kernel + filesystem support.** As of Linux 6.12:
+**fs-verity needs kernel and filesystem support.** As of Linux 6.12:
 
 | Filesystem | fs-verity | reflink (CoW copy) |
 |------------|-----------|--------------------|
@@ -27,48 +26,47 @@ Bluefin **LTS** (CentOS Stream 10-based) ships XFS by default.
 
 ## btrfs path (Bluefin stable → Dakota stable)
 
-The happy path. No workarounds needed.
+The standard path needs no workarounds.
 
 ### Phase 0 — preflight
 
-`preflight.rs` reads `/proc/mounts` to confirm the root filesystem type and probes
-for reflink support by attempting an actual copy-on-write clone under `/sysroot`.
-On btrfs both checks pass.
+`preflight.rs` reads `/proc/mounts` to confirm the root filesystem type. It
+probes for reflink support with a copy-on-write clone under `/sysroot`.
+On btrfs, both checks pass.
 
 ### Phase 1 — OSTree object import (optional)
 
-OSTree file objects are reflinked (copy-on-write cloned) from the existing OSTree
-repo at `/sysroot/ostree/repo` into the composefs object store at
-`/sysroot/composefs/objects`. Reflink is ~instant and uses no extra disk space on
-btrfs, so this phase is cheap.
+The tool will clone OSTree files with reflink from `/sysroot/ostree/repo`
+into `/sysroot/composefs/objects`. Reflink is fast and uses no extra disk
+space on btrfs.
 
 `check_free_space` uses a **1.1× multiplier** when reflink is available (vs 1.5×
-without), since a reflink share means almost no additional blocks are consumed.
+without), because reflink shares existing data blocks.
 
 ### Phase 3 — EROFS seal
 
 `bootc internals cfs seal` calls `ioctl(FS_IOC_ENABLE_VERITY)` on each object file.
-btrfs handles this natively; no extra setup.
+btrfs handles this natively without extra setup.
 
 ### /var migration
 
 On btrfs, `/var` is typically a subvolume mounted with `subvol=/` or a named
-subvolume. The tool copies `/var` data into `/sysroot/state/os/default/var` —
-the composefs state path — via `copy_dir_all_with_xattrs`. The composefs initramfs
-bind-mounts this path at `/var` post-pivot, so user data is preserved.
+subvolume. The tool copies `/var` data into `/sysroot/state/os/default/var`
+(the composefs state path) with `copy_dir_all_with_xattrs`. The composefs
+initramfs bind-mounts this path at `/var` after the switch root to preserve user data.
 
 ---
 
 ## XFS path (Bluefin LTS → Dakota stable)
 
-XFS does not support fs-verity, so a workaround is needed before any composefs
-objects can be sealed. Additionally, Bluefin LTS uses LVM for the root volume,
-which requires initrd changes before the composefs boot can succeed.
+XFS lacks fs-verity support, so the tool uses a workaround before it seals
+composefs objects. Also, Bluefin LTS uses LVM for the root volume, which needs
+initrd updates before composefs boots.
 
 ### Phase 0 — preflight
 
-Same fs-type detection. `is_btrfs = false`, `fs_type = "xfs"`. Reflink is probed
-separately (XFS supports reflink on many configurations but not all).
+The tool detects the filesystem type (`is_btrfs = false`, `fs_type = "xfs"`).
+It probes reflink support separately.
 
 ### Pre-Phase 1 — ext4 loopback for fs-verity
 
@@ -76,158 +74,132 @@ separately (XFS supports reflink on many configurations but not all).
 
 1. Creates a sparse file at `/sysroot/composefs-loopback.ext4`.  
    Size = `clamp(ceil(ostree_repo_GB × 1.5 + 5), 10, 30)` GB.
-2. Formats it as ext4 with `-O verity` (`mkfs.ext4 -F -O verity`).
-3. Loop-mounts it at `/sysroot/composefs` with `-o loop`.
+2. Formats the file as ext4 with `-O verity` (`mkfs.ext4 -F -O verity`).
+3. Mounts the file as a loop device at `/sysroot/composefs` with `-o loop`.
 
-All subsequent composefs operations (object store writes, EROFS image creation,
-fs-verity sealing) target `/sysroot/composefs`, which is now an ext4 filesystem
-living inside a sparse file on the XFS root — sidestepping XFS's lack of verity
-support entirely.
+Later composefs actions will use `/sysroot/composefs`. This is an ext4
+filesystem in a sparse file on XFS, which bypasses the lack of verity support in XFS.
 
-The loopback image is idempotent: if it already exists and is mounted, the tool
-detects this via `findmnt` and skips recreation.
+The loopback setup is idempotent. If the file exists and the host mounts it,
+the tool detects the mount with `findmnt` and skips creation.
 
 ### Phase 1 — OSTree object import
 
-On XFS without reflink, `check_free_space` uses a **1.5× multiplier** and performs
-full copies rather than reflink clones. This is slower and uses more space. If
-reflink is available on the XFS volume, the tool uses it (the probe is runtime, not
-hardcoded to XFS=no-reflink).
+On XFS without reflink, `check_free_space` uses a **1.5× multiplier** and does
+full file copies. This process is slower and uses more space. If the XFS volume
+supports reflink, the tool uses reflink clones.
 
 ### Phase 3 — EROFS seal
 
 `bootc internals cfs seal` runs against the composefs store on the ext4 loopback,
-where `ioctl(FS_IOC_ENABLE_VERITY)` succeeds normally.
+where `ioctl(FS_IOC_ENABLE_VERITY)` succeeds.
 
 ### Phase 5 — LVM initrd rebuild
 
 Bluefin LTS installs root on LVM (`/dev/mapper/<vg>-<lv>`). The Dakota initrd
-fetched from the OCI registry was built without LVM dracut modules, so it cannot
-activate the volume group at boot and drops to an emergency shell.
+from the OCI registry has no LVM modules. It cannot activate the volume group
+at boot and enters an emergency shell.
 
-`phase5_setup_bootloader` detects this and rebuilds the initrd:
+`phase5_setup_bootloader` detects LVM and rebuilds the initrd:
 
 1. **`detect_lvm()`** — checks `/dev/mapper` for entries other than `control`.
-   If none, the rebuild step is a no-op.
+   If none exist, the tool skips the rebuild.
 
 2. **`rebuild_initrd_with_lvm_if_needed(kver, mount_path, initrd_dst)`**:
-   - Locates `dracut` on the running host (`/usr/bin/dracut` or `/usr/sbin/dracut`).
+   - Locates `dracut` on the host (`/usr/bin/dracut` or `/usr/sbin/dracut`).
      Bluefin LTS ships dracut; Bluefin stable does not need this step.
    - The Dakota kernel modules are available at
-     `<composefs_mount>/usr/lib/modules/<kver>/` via the bootc composefs overlay
-     mount (real file content, not zero-filled, because the composefs object store
-     is populated by Phase 2).
+     `<composefs_mount>/usr/lib/modules/<kver>/` through the composefs overlay mount.
    - Creates a temporary symlink: `/lib/modules/<kver>` → composefs mount path.
-     On modern Fedora/CentOS, `/lib` → `/usr/lib`, so this resolves to the
-     right location for dracut's module search.
+     On Fedora and CentOS, `/lib` links to `/usr/lib`.
    - Runs: `dracut --kver <kver> --add "lvm dm" --force <initrd_dst>`
-   - Removes the symlink unconditionally (even if dracut fails).
+   - Removes the symlink in all cases (even if dracut fails).
 
-3. The LVM-enabled initrd **replaces** the OCI-fetched one in place. Because this
-   runs before `patch_origin_boot_digest`, the sha256(vmlinuz ‖ initrd) hash in
-   the `.origin` file covers the final LVM-enabled bytes.
+3. The LVM-enabled initrd replaces the downloaded initrd in place. Because this
+   runs before `patch_origin_boot_digest`, the hash in `.origin` covers the final bytes.
 
-If dracut is unavailable or exits non-zero, the tool warns with the exact manual
-command and continues — the migration completes and the user can fix the initrd
-from the OSTree fallback entry.
+If dracut is unavailable or fails, the tool displays a warning with the
+command to run. The migration completes, and the user can fix the initrd from
+the OSTree fallback entry.
 
 ---
 
 ## Dedicated `/var` volume or Btrfs subvolume
 
-Anaconda's default partitioning — and many real-world installs — put `/var` on
-its **own filesystem** (a separate partition or LVM logical volume) or in a
-directly-mounted Btrfs subvolume such as `subvol=/var`. Both layouts are
-load-bearing: composefs must expose that existing data at its stateroot `/var`.
+Standard Anaconda installs often place `/var` on a separate filesystem (or
+logical volume), or in a subvolume like `subvol=/var`. Both layouts are
+important: composefs must expose existing data at `/var`.
 
 ### The problem
 
-bootc's composefs boot bind-mounts the **per-stateroot var**
-(`/sysroot/state/os/default/var`, which lives on the root filesystem) onto `/var`
-and **ignores the `/var` fstab entry entirely**. (Traditional OSTree does the
-opposite — the fstab `var.mount` overmounts the stateroot bind, so the dedicated
-volume wins.) On a composefs boot this means a dedicated `/var` volume is left
-unmounted and `/var` silently falls back to the empty stateroot var — losing the
-user's home directories, flatpaks, container storage, Tailscale state, etc. The
-data is safe (the volume is untouched), but the system boots unusable.
+The composefs boot mounts `/sysroot/state/os/default/var` onto `/var` and
+ignores `/etc/fstab` entries for `/var`. On a composefs boot, a dedicated
+`/var` volume remains unmounted. `/var` falls back to an empty directory, so
+user homes and flatpaks disappear. The data remains safe on disk, but the
+system is unusable.
 
-Two things are needed to fix this, both handled automatically:
+Two automated steps will fix this issue:
 
 ### 1. Activate every LV backing a mounted filesystem
 
-The source OSTree cmdline typically lists only the root LV
-(`rd.lvm.lv=<vg>/root`); non-root volumes like a dedicated `/var` auto-activate
-post-switchroot on the source distro, so they never appear on the cmdline. The
-composefs target may lack that auto-activation path.
+The command line on the source OSTree system usually lists only the root LV
+(`rd.lvm.lv=<vg>/root`). Non-root volumes activate after the switch root on
+the source distribution. The composefs target may lack this auto-activation step.
 
-`get_kernel_options` discovers every LV currently backing a mount
-(`findmnt` → `lvs`) and emits `rd.lvm.lv=<vg>/<lv>` for each, so the initrd
-activates them before their mounts run.
+`get_kernel_options` finds every LV that supports a mount (`findmnt` → `lvs`).
+It adds `rd.lvm.lv=<vg>/<lv>` for each volume, so the initrd activates them
+before mounts run.
 
 ### 2. Mount the dedicated `/var` at the stateroot var path
 
-Activation alone isn't enough, because bootc still binds the stateroot var onto
-`/var` and ignores fstab. `phase5_setup_bootloader` therefore:
+Activation alone is insufficient because bootc still binds the stateroot var
+onto `/var`. `phase5_setup_bootloader` does these steps:
 
 1. **`detect_separate_var()`** — uses
    `findmnt -o TARGET,SOURCE,FSTYPE,FSROOT,OPTIONS /var`. It accepts either a
-   whole filesystem (`FSROOT == "/"`) or a direct Btrfs subvolume whose
-   `subvol=` option matches `FSROOT`. Arbitrary OSTree/bind subtrees are
-   rejected. It returns the volume's UUID, filesystem type, and mount options.
+   whole filesystem (`FSROOT == "/"`) or a direct Btrfs subvolume.
+   The tool will reject arbitrary subtrees. It returns the UUID, filesystem
+   type, and mount options.
 
-2. The generated BLS entry carries an initrd-only
-   `rd.systemd.mount-extra=...:/sysroot/state/os/default/var:...` argument with
-   explicit `Before=` and `RequiredBy=` dependencies on
-   `bootc-root-setup.service`. This mounts the existing filesystem/subvolume at
-   the composefs stateroot before bootc assembles the deployment.
+2. The generated BLS entry adds an initrd option:
+   `rd.systemd.mount-extra=...:/sysroot/state/os/default/var:...` with
+   dependencies on `bootc-root-setup.service`. This mounts the filesystem at the
+   composefs stateroot before bootc prepares the deployment.
 
-   Keeping the mount specification in the BLS arguments is intentional:
-   composefs `bootc upgrade` copies the current arguments to the upgraded
-   deployment while installing that image's new initrd. A unit injected only
-   into the migration's first initrd would be lost on the first upgrade.
+   BLS arguments persist across updates: `bootc upgrade` copies current
+   arguments to new deployments. Units placed only in the initrd would disappear on upgrade.
 
-3. If an initrd rebuild is already required for LVM/DM or XFS, the tool also
-   injects the equivalent `sysroot-state-os-default-var.mount` unit as a
-   redundant compatibility path.
+3. If the tool rebuilds the initrd for LVM or XFS, it also injects the
+   `sysroot-state-os-default-var.mount` unit for compatibility.
 
-`bootc-root-setup` then binds **that path** (now the real `/var` volume) onto
-`/var`, so the user's data appears at `/var` as expected.
+`bootc-root-setup` then binds the target path onto `/var`, so user data appears at `/var`.
 
-For a direct Btrfs `subvol=/var` layout, the subvolume is reused in place. It
-does not need to be moved to top-level subvolume ID 5, and retaining the BLS
-mount argument is compatible with later `bootc upgrade` deployments.
+For a direct Btrfs `subvol=/var` layout, the tool reuses the subvolume in place.
+It does not move data to subvolume ID 5.
 
-This path is exercised by the `xfs+lvm+crypt` e2e scenario (LVM-on-LUKS with
-separate `root` + `var` LVs); its `/var`-persistence assertions verify the
-dedicated volume's data survives the migration.
+The `xfs+lvm+crypt` e2e test exercises this path (LVM-on-LUKS with separate
+`root` and `var` LVs). Its assertions verify that data on the dedicated volume survives.
 
 ## OSTree `/var/home` to native `/home`
 
-OSTree systems commonly expose `/home` as a symlink to `/var/home`. A native
-ComposeFS target can instead ship distinct, real `/home` and `/var/home`
-directories. Mounting a preserved home subvolume at `/home` keeps the data, but
-absolute paths stored in symlinks, script shebangs, desktop settings, and user
-services still point at `/var/home` and become dangling.
+OSTree systems expose `/home` as a symlink to `/var/home`. A ComposeFS target
+can ship separate `/home` and `/var/home` directories. If the system mounts a home
+subvolume at `/home`, symlink paths to `/var/home` become broken.
 
-Phase 4 detects this cross-layout transition and adds one ordered bind mount to
-the staged `/etc/fstab`:
+Phase 4 detects this transition and adds a bind mount to `/etc/fstab`:
 
-- If the preserved fstab mounts a dedicated filesystem or subvolume at
-  `/home`, `/home` is canonical and is also bound at `/var/home`.
-- Otherwise home data remains inside the preserved `/var/home`, which is also
-  bound at `/home`.
+- If fstab mounts a volume at `/home`, `/home` is canonical and binds to `/var/home`.
+- Otherwise home data stays in `/var/home`, which binds to `/home`.
 
-No home files or symlinks are rewritten. Both path spellings resolve to the same
-data, and the fstab entry remains in the deployment `/etc` across later
-`bootc upgrade` deployments.
+The tool does not rewrite home files or symlinks. Both paths resolve to the same
+data, and the fstab entry persists across `bootc upgrade` deployments.
 
 ---
 
 ## Re-running after a failed composefs boot
 
-If the first migration attempt produced a non-LVM initrd and the system is now stuck
-in a dracut emergency shell, boot back to the OSTree fallback (hold ESC at POST,
-select the centos/OSTree GRUB entry) and re-run:
+If the first migration try created a non-LVM initrd, the system stops in a
+dracut shell. Reboot to the OSTree fallback entry and run:
 
 ```bash
 bootc-migrate \
@@ -235,10 +207,9 @@ bootc-migrate \
   --force --skip-import
 ```
 
-- `--skip-import` reuses existing composefs objects from Phase 1 (skips the slow
-  object copy/reflink phase).
-- `--force` bypasses the Phase 5 idempotency check: the existing `bootc_*` BLS
-  entries are removed and Phase 5 re-runs in full, including the LVM initrd rebuild.
+- `--skip-import` reuses existing composefs objects from Phase 1.
+- `--force` bypasses the Phase 5 check: the tool removes existing `bootc_*`
+  BLS entries and runs Phase 5 again.
 
 ---
 
@@ -254,6 +225,5 @@ bootc-migrate \
 | initrd rebuild needed     | no                         | yes — dracut --add "lvm dm"      |
 | dracut on source system   | not present                | present (CentOS Stream 10 base)  |
 
-Dedicated `/var` (separate filesystem/LV or direct Btrfs subvolume) is handled
-independently of the root filesystem type — see
-[Dedicated `/var` volume or Btrfs subvolume](#dedicated-var-volume-or-btrfs-subvolume).
+The tool will support dedicated `/var` partitions on any root filesystem type.
+See [Dedicated `/var` volume or Btrfs subvolume](#dedicated-var-volume-or-btrfs-subvolume).
