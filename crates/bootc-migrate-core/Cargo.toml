@@ -16,7 +16,7 @@ sha2.workspace = true
 rustix.workspace = true
 tempfile.workspace = true
 tini.workspace = true
-composefs = { version = "0.9", optional = true }
+composefs = "0.9"
 composefs-oci = { version = "0.9", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
@@ -29,4 +29,4 @@ workspace = true
 # cfs`. It is the default for modern target images; legacy targets are
 # selected back onto the CLI writer at runtime.
 default = ["composefs-native"]
-composefs-native = ["dep:composefs", "dep:composefs-oci", "dep:tokio"]
+composefs-native = ["dep:composefs-oci", "dep:tokio"]

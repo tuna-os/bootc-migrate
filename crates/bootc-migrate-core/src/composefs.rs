@@ -1,4 +1,7 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use composefs::fsverity::{FsVerityHashValue, FsVerityHasher, Sha512HashValue};
+use std::fs::{self, File};
+use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::OnceLock;
@@ -22,8 +25,9 @@ pub trait ComposefsStore: std::fmt::Debug {
     fn create_image(&self, target_image: &str, image_id: &str) -> Result<String>;
     /// Seal `image_id`; returns the seal output (sealed config digest).
     fn seal_image(&self, target_image: &str, image_id: &str) -> Result<String>;
-    /// Confirm the finished store is readable by the target image's bootc.
-    fn verify_store_target_readable(&self, target_image: &str) -> Result<()>;
+    /// Check store metadata and read every object so fs-verity failures surface
+    /// before the staged deployment can boot.
+    fn verify_store_integrity(&self, target_image: &str) -> Result<()>;
 }
 
 /// The real implementation: drives `bootc internals cfs` — natively when the
@@ -123,10 +127,10 @@ impl ComposefsStore for TargetStore {
         }
     }
 
-    fn verify_store_target_readable(&self, target_image: &str) -> Result<()> {
+    fn verify_store_integrity(&self, target_image: &str) -> Result<()> {
         match self.selected() {
-            TargetStoreBackend::Legacy(store) => store.verify_store_target_readable(target_image),
-            TargetStoreBackend::Native(store) => store.verify_store_target_readable(target_image),
+            TargetStoreBackend::Legacy(store) => store.verify_store_integrity(target_image),
+            TargetStoreBackend::Native(store) => store.verify_store_integrity(target_image),
         }
     }
 }
@@ -171,13 +175,117 @@ impl ComposefsStore for MockComposefsStore {
             .to_string(),
         )
     }
-    fn verify_store_target_readable(&self, _target_image: &str) -> Result<()> {
+    fn verify_store_integrity(&self, _target_image: &str) -> Result<()> {
         self.calls
             .lock()
             .unwrap()
-            .push("verify_store_target_readable".to_string());
+            .push("verify_store_integrity".to_string());
         Ok(())
     }
+}
+
+/// Compute the SHA-512 fs-verity digest of a file while reading its contents.
+pub(crate) fn compute_fsverity_sha512(path: &Path) -> Result<Sha512HashValue> {
+    let mut file = File::open(path)
+        .with_context(|| format!("opening {} for fs-verity hashing", path.display()))?;
+    let mut hasher = FsVerityHasher::<Sha512HashValue>::new();
+    io::copy(&mut file, &mut hasher).with_context(|| {
+        format!(
+            "reading {}; fs-verity rejected its contents",
+            path.display()
+        )
+    })?;
+    Ok(hasher.digest())
+}
+
+/// Read and hash every object in a composefs repository.
+///
+/// `FS_IOC_MEASURE_VERITY` only returns the digest recorded when fs-verity was
+/// enabled; it does not read the file data. Streaming each object through the
+/// fs-verity hasher both forces the kernel to validate protected contents and
+/// catches content-address mismatches on insecure test stores.
+pub(crate) fn verify_object_store_contents(store_path: &Path) -> Result<usize> {
+    let objects_path = store_path.join("objects");
+    let mut checked = 0usize;
+
+    let entries = match fs::read_dir(&objects_path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", objects_path.display()));
+        }
+    };
+
+    for prefix_entry in entries {
+        let prefix_entry = prefix_entry
+            .with_context(|| format!("reading an entry in {}", objects_path.display()))?;
+        let prefix_path = prefix_entry.path();
+        let prefix_name = prefix_entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("composefs object directory has a non-UTF-8 name"))?;
+        if prefix_name.len() != 2 || !prefix_name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!(
+                "composefs object store contains unexpected directory {}",
+                prefix_path.display()
+            );
+        }
+        if !prefix_entry
+            .file_type()
+            .with_context(|| format!("statting {}", prefix_path.display()))?
+            .is_dir()
+        {
+            bail!(
+                "composefs object store entry {} is not a directory",
+                prefix_path.display()
+            );
+        }
+        let first_byte = u8::from_str_radix(&prefix_name, 16)
+            .with_context(|| format!("parsing object directory {}", prefix_path.display()))?;
+
+        for object_entry in fs::read_dir(&prefix_path)
+            .with_context(|| format!("reading {}", prefix_path.display()))?
+        {
+            let object_entry = object_entry
+                .with_context(|| format!("reading an entry in {}", prefix_path.display()))?;
+            let object_path = object_entry.path();
+            let object_name = object_entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow!("composefs object has a non-UTF-8 name"))?;
+            let expected =
+                Sha512HashValue::from_object_dir_and_basename(first_byte, object_name.as_bytes())
+                    .map_err(|error| {
+                    anyhow!(
+                        "invalid composefs object name {}: {error}",
+                        object_path.display()
+                    )
+                })?;
+            if !object_entry
+                .file_type()
+                .with_context(|| format!("statting {}", object_path.display()))?
+                .is_file()
+            {
+                bail!(
+                    "composefs object {} is not a regular file",
+                    object_path.display()
+                );
+            }
+
+            let actual = compute_fsverity_sha512(&object_path)?;
+            if actual != expected {
+                bail!(
+                    "composefs object {} content digest mismatch: expected {}, found {}",
+                    object_path.display(),
+                    expected.to_hex(),
+                    actual.to_hex()
+                );
+            }
+            checked += 1;
+        }
+    }
+
+    Ok(checked)
 }
 
 /// Run `bootc internals cfs --system oci <args>` with the host (source) bootc.
@@ -432,37 +540,34 @@ impl ComposefsStore for BootcCliStore {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Post-build verification (#3): confirm the finished store is readable by the
-    /// TARGET image's bootc — the binary that reads it at runtime — so a bootc
-    /// format skew can never silently ship a migration that boots but breaks
-    /// `bootc status`/`bootc upgrade`.
-    ///
-    /// How we know it's readable:
-    /// - In the rebuild path (`use_target()`), the **target bootc itself** wrote the
-    ///   store (its pull/create/seal succeeded), so it is target-readable by
-    ///   construction.
-    /// - In the host path, we assert the `oci-manifest-*` stream is present — the
-    ///   exact artifact the target's status/upgrade open
-    ///   (`streams/oci-manifest-<digest>`). Its absence is the known symptom of an
-    ///   older source bootc and *guarantees* breakage.
-    ///
-    /// Either way, a missing manifest stream here is a hard failure with a clear
-    /// message — we refuse to declare success on a store the target can't read.
-    /// This also future-proofs us: if a later bootc changes the format such that
-    /// neither path produces the stream, the migration fails loudly instead of
-    /// silently regressing updates.
-    fn verify_store_target_readable(&self, target_image: &str) -> Result<()> {
-        if manifest_stream_present() {
-            return Ok(());
+    /// Post-build verification: validate the store with its writer and then
+    /// read/hash every object. Reading is required because
+    /// `FS_IOC_MEASURE_VERITY` alone only returns the sealed digest metadata;
+    /// the kernel reports backing-data corruption on a subsequent read.
+    fn verify_store_integrity(&self, target_image: &str) -> Result<()> {
+        let output = match self.delegate_image.get().and_then(|d| d.as_deref()) {
+            Some(delegate) => image_cfs(delegate, &["oci", "fsck"])?,
+            None => host_cfs_oci(&["fsck"])?,
+        };
+        if !output.status.success() {
+            return Err(anyhow!(
+                "composefs fsck failed for target image {target_image}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
-        Err(anyhow!(
-            "post-build verification failed: the composefs store has no oci-manifest \
-         stream, so the target image's bootc ({target_image}) cannot read this \
-         deployment — `bootc status`/`bootc upgrade` would break after reboot. \
-         This is a bootc format incompatibility between the source bootc and the \
-         target that was not resolved by rebuilding the store. Refusing to ship a \
-         silently-broken migration; update the source system's bootc and retry."
-        ))
+        if !manifest_stream_present() {
+            return Err(anyhow!(
+                "post-build verification failed: the composefs store has no oci-manifest \
+             stream, so the target image's bootc ({target_image}) cannot read this \
+             deployment — `bootc status`/`bootc upgrade` would break after reboot. \
+             This is a bootc format incompatibility between the source bootc and the \
+             target that was not resolved by rebuilding the store. Refusing to ship a \
+             silently-broken migration; update the source system's bootc and retry."
+            ));
+        }
+        verify_object_store_contents(Path::new(STORE))
+            .context("reading composefs objects for integrity verification")?;
+        Ok(())
     }
 
     fn seal_image(&self, _target_image: &str, image_id: &str) -> Result<String> {
@@ -539,6 +644,28 @@ mod tests {
             generation_for_target(false),
             StoreGeneration::Native,
             "modern target images must not need the pinned legacy builder"
+        );
+    }
+    #[test]
+    fn object_store_integrity_checks_content_against_path_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let content = b"composefs object contents";
+        let digest = FsVerityHasher::<Sha512HashValue>::hash(content);
+        let object_path = temp
+            .path()
+            .join("objects")
+            .join(digest.to_object_pathname());
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::write(&object_path, content).unwrap();
+
+        assert_eq!(verify_object_store_contents(temp.path()).unwrap(), 1);
+
+        fs::write(&object_path, b"corrupted object contents").unwrap();
+        let error = verify_object_store_contents(temp.path()).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("content digest mismatch"),
+            "unexpected integrity error: {message}"
         );
     }
 }

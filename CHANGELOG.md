@@ -26,6 +26,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- ComposeFS migrations now run a post-seal integrity pass: the store fsck
+  validates its structure and every object is read and hashed, so fs-verity
+  backing-store failures are reported before reboot instead of later as EIO.
+- OSTree imports now use the store's SHA-512 fs-verity object IDs and enable
+  fs-verity before the target image is pulled, keeping the imported objects
+  compatible with the integrity check.
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
