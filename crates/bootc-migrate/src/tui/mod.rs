@@ -1899,6 +1899,7 @@ mod tests {
             booted_image: Some("ghcr.io/projectbluefin/dakota:gts".into()),
             pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
             is_uefi: true,
+            secure_boot: bootc_migrate_core::preflight::SecureBootFacts::default(),
             nvram_writable: true,
             esp_path: Some("/boot/efi".into()),
             esp_free_space_bytes: 386 * 1024 * 1024,
@@ -2108,6 +2109,7 @@ mod tests {
                 booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
                 pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
+                secure_boot: bootc_migrate_core::preflight::SecureBootFacts::default(),
                 nvram_writable: true,
                 esp_path: Some("/boot/efi".into()),
                 esp_free_space_bytes: 386 * 1024 * 1024,
@@ -2174,6 +2176,7 @@ mod tests {
                     pending_transaction:
                         bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
                     is_uefi: true,
+                    secure_boot: bootc_migrate_core::preflight::SecureBootFacts::default(),
                     nvram_writable: true,
                     esp_path: Some("/boot/efi".into()),
                     esp_free_space_bytes: 386 * 1024 * 1024,

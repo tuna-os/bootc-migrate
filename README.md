@@ -291,6 +291,10 @@ Things to confirm in the report:
   systemd-boot path; on BIOS-only or locked NVRAM pass `--bootloader grub2`.
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
   target image onto the ESP.
+- `Secure Boot: on (...)` — the preflight reads the firmware `db` and the
+  target loader's Authenticode issuer during the registry scan. A known
+  Microsoft UEFI CA mismatch is refused before the ESP or boot order changes;
+  an unreadable db or unrecognized signer is reported as a warning.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
 - `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the composefs object
   store is built by reflinking your existing OSTree objects.

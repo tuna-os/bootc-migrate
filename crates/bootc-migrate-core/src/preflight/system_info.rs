@@ -5,6 +5,7 @@
 //! OSTree transactions). Direction-specific judgments live in
 //! [`super::validate`].
 
+use super::secure_boot::SecureBootFacts;
 use crate::rebase_plan::Backend;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -325,6 +326,7 @@ pub struct SystemInfo {
     pub booted_image: Option<String>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
+    pub secure_boot: SecureBootFacts,
     pub nvram_writable: bool,
     pub esp_path: Option<String>,
     pub esp_free_space_bytes: u64,
@@ -384,8 +386,9 @@ impl SystemInfo {
 
         // 2. Check UEFI mode
         let is_uefi = Path::new("/sys/firmware/efi").exists();
+        let secure_boot =
+            super::secure_boot::read_from_efivars(Path::new("/sys/firmware/efi/efivars"));
         let nvram_writable = Path::new("/sys/firmware/efi/efivars").exists();
-
         // 3. Locate ESP — check mounted first, then try to find by partition GUID
         let mut esp_path = None;
         let mut esp_free_space_bytes = 0u64;
@@ -528,6 +531,7 @@ impl SystemInfo {
             booted_image,
             pending_transaction,
             is_uefi,
+            secure_boot,
             nvram_writable,
             esp_path,
             esp_free_space_bytes,

@@ -63,6 +63,26 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
             "none"
         }
     );
+    let target_loaders = caps
+        .target_bootloaders
+        .iter()
+        .map(|loader| {
+            let authorities = if loader.authorities.is_empty() {
+                "unrecognized signer".to_string()
+            } else {
+                format!("UEFI CA {}", loader.authorities.join("/"))
+            };
+            format!("{} ({authorities})", loader.path)
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "Target EFI loaders:  {}",
+        if target_loaders.is_empty() {
+            "none".to_string()
+        } else {
+            target_loaders.join(", ")
+        }
+    );
     println!(
         "bootc present:         {}",
         if caps.bootc_present { "yes" } else { "no" }

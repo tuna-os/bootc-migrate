@@ -15,6 +15,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::preflight::secure_boot::{
+    TargetBootloader, TargetBootloaderKind, inspect_target_bootloader,
+};
+
 /// Where layer blobs are staged while they are being unpacked. `/var/tmp` is
 /// disk-backed (unlike `/tmp`, which is a tmpfs on bootc systems and far too
 /// small for a multi-hundred-MB layer).
@@ -473,6 +477,57 @@ fn read_target_kernel(
     })
 }
 
+fn collect_target_bootloaders(root: &Path) -> Vec<TargetBootloader> {
+    let mut loaders = Vec::new();
+
+    let systemd_path = root.join("usr/lib/systemd/boot/efi/systemd-bootx64.efi");
+    if systemd_path.is_file() {
+        loaders.push(inspect_target_bootloader(
+            &systemd_path,
+            "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+            TargetBootloaderKind::SystemdBoot,
+        ));
+    }
+
+    let updates_dir = root.join("usr/lib/bootupd/updates");
+    let mut efi_files = Vec::new();
+    collect_efi_files(&updates_dir, &mut efi_files);
+    efi_files.sort();
+    for path in efi_files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if lower != "shimx64.efi" && lower != "bootx64.efi" {
+            continue;
+        }
+        let logical = path
+            .strip_prefix(root)
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+        loaders.push(inspect_target_bootloader(
+            &path,
+            &logical,
+            TargetBootloaderKind::Shim,
+        ));
+    }
+    loaders
+}
+
+fn collect_efi_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_efi_files(&path, files);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+}
+
 /// Stream probe files for the target image from the registry without pulling full layers.
 /// The target image's compressed size: the sum of its layer sizes in the
 /// manifest for this machine's architecture. Reads the manifest only.
@@ -562,6 +617,7 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .path()
         .join("usr/lib/systemd/boot/efi/systemd-bootx64.efi")
         .exists();
+    probe.target_bootloaders = collect_target_bootloaders(scratch.path());
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
     // bootc's own test (`supports_bootupd`): the binary on PATH and the
