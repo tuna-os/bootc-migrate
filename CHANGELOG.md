@@ -120,6 +120,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- Cross-base OstreeDeploy now remaps ownership in the stateroot's physical,
+  shared `/var` instead of looking for a nonexistent `var` inside the staged
+  deployment. The gating Bluefin → Dakota E2E cell seeds a divergent
+  UID/GID-owned file and a three-way `/etc` conflict, then requires the
+  remapped owner, target default and `.rebase-old` sidecar before and after
+  reboot (#187).
+
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
   deployment through systemd-boot ("Linux Boot Manager") and an
