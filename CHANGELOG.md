@@ -26,6 +26,16 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- TUI route selection on composefs hosts (#312). On an ostree host the
+  wizard flow is unchanged (the conversion route); on a composefs host the
+  wizard scans the selected target in the background and offers a backend
+  choice only when the target is dual-capable (composefs-enabled, ostree-based
+  and shipping bootupd). Single-option targets show a fixed line naming the
+  one route.
+- The OstreeInstall route runs through `bootc-rebase` discovered beside
+  this binary or on `PATH`, and surfaces the source-build hint when missing.
+- The Utah testing image is offered on composefs hosts with an honest
+  maturity note ("pre-alpha; E2E status unknown", docs/support-matrix.md).
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
