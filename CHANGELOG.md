@@ -26,6 +26,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 
+- A versioned application replacement catalog shared with wootc maps Windows
+  display names and rpm, deb, and pacman package names to Flatpak IDs and
+  portability guidance. The typed core reader validates and bundles the table
+  for the package-host software report, while the catalog workflow publishes
+  `apps.json` beside the image feed (#388).
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
