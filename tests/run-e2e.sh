@@ -362,7 +362,8 @@ RUN mkdir -p /etc/ssh && \
 RUN systemctl disable firewalld ufw SuSEfirewall2 2>/dev/null || true
 # The socket-activated sshd can receive the harness's first probe before
 # Fedora's host-key generators finish. Make all key instances members of
-# sshd-keygen.target; e2e-sshd.socket orders itself after that target below.
+# sshd-keygen.target; each e2e-sshd@.service waits for that target before
+# starting sshd.
 RUN mkdir -p /etc/systemd/system/sshd-keygen.target.wants && \
     for key in rsa ecdsa ed25519; do \
         ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
@@ -373,8 +374,6 @@ RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
         '[Unit]' \
         'Description=E2E SSH TCP Socket (port 22)' \
-        'Wants=sshd-keygen.target' \
-        'After=sshd-keygen.target' \
         '[Socket]' \
         'ListenStream=22' \
         'Accept=yes' \
@@ -384,6 +383,8 @@ RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
         '[Unit]' \
         'Description=E2E SSH per-connection service' \
+        'Wants=sshd-keygen.target' \
+        'After=sshd-keygen.target' \
         '[Service]' \
         'ExecStart=-/usr/sbin/sshd -i' \
         'StandardInput=socket' \
@@ -791,10 +792,11 @@ SSHD_CONFIG_DIR="$STATEROOT_VAR/etc/ssh"
 sudo mkdir -p "$SSHD_CONFIG_DIR/sshd_config.d"
 echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.conf" >/dev/null 2>&1 || true
 
-# Add e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
-# Written to the live /etc so it's in `cur` but NOT in the OSTree factory `old`.
-# This ensures the ComposeFS 3-way merge treats it as a user-created file and
-# preserves it across migration.
+# Add e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local and
+# vsock). The per-connection service waits for host-key generation below.
+# Written to the live /etc so it's in `cur` but NOT in the OSTree factory
+# `old`. This ensures the ComposeFS 3-way merge treats it as a user-created
+# file and preserves it across migration.
 ETC_SYSTEMD="$STATEROOT_VAR/etc/systemd/system"
 sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants" "$ETC_SYSTEMD/sshd-keygen.target.wants" "$ETC_SYSTEMD/emergency.target.wants" "$ETC_SYSTEMD/rescue.target.wants"
 for key in rsa ecdsa ed25519; do
@@ -804,8 +806,6 @@ done
 sudo tee "$ETC_SYSTEMD/e2e-sshd.socket" >/dev/null <<'SOCKETEOF'
 [Unit]
 Description=E2E SSH TCP Socket (port 22)
-Wants=sshd-keygen.target
-After=sshd-keygen.target
 [Socket]
 ListenStream=22
 Accept=yes
@@ -815,6 +815,8 @@ SOCKETEOF
 sudo tee "$ETC_SYSTEMD/e2e-sshd@.service" >/dev/null <<'SERVICEEOF'
 [Unit]
 Description=E2E SSH per-connection service
+Wants=sshd-keygen.target
+After=sshd-keygen.target
 [Service]
 ExecStart=-/usr/sbin/sshd -i
 StandardInput=socket
