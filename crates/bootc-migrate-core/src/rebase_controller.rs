@@ -35,6 +35,74 @@ pub struct CoreMigrationConfig<'a> {
     pub accept_cross_base: bool,
 }
 
+/// Everything the standalone bootloader migration needs, translated from
+/// either CLI frontend into one action before any ESP or NVRAM mutation.
+#[derive(Debug, Clone, Copy)]
+pub struct StandaloneBootloaderConfig<'a> {
+    pub to: &'a str,
+    pub dry_run: bool,
+    pub force: bool,
+    pub undo: bool,
+    pub promote: bool,
+    pub resync: bool,
+    pub entry_token: Option<&'a str>,
+    pub kernel_version: Option<&'a str>,
+    pub kernel_image: Option<&'a Path>,
+    pub initrd: Option<&'a Path>,
+    pub title: Option<&'a str>,
+    pub from_image: Option<&'a str>,
+}
+
+impl StandaloneBootloaderConfig<'_> {
+    /// Run the live trial, promotion, undo, or kernel-install resync action.
+    ///
+    /// All filesystem and firmware sequencing stays in
+    /// `migration::bootloader::live`; this controller only validates the
+    /// mutually-exclusive action surface and dispatches it.
+    pub fn run(&self) -> Result<()> {
+        let actions = [self.undo, self.promote, self.resync]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count();
+        if actions > 1 {
+            bail!("--undo, --promote, and --resync are mutually exclusive");
+        }
+        if self.dry_run && actions != 0 {
+            bail!("--dry-run cannot be combined with --undo, --promote, or --resync");
+        }
+        if self.to != "systemd-boot" && actions != 0 {
+            bail!("--undo, --promote, and --resync only apply to --to systemd-boot");
+        }
+
+        let state_path = Path::new(crate::migration::bootloader::live::STATE_PATH);
+        if self.resync {
+            let kernel_version = self
+                .kernel_version
+                .ok_or_else(|| anyhow::anyhow!("--resync requires --kernel-version"))?;
+            return crate::migration::bootloader::live::resync_from_kernel_install(
+                state_path,
+                self.entry_token,
+                self.title,
+                kernel_version,
+                self.kernel_image,
+                self.initrd,
+            );
+        }
+        if self.undo {
+            return crate::migration::bootloader::live::run_undo(state_path);
+        }
+        if self.promote {
+            return crate::migration::bootloader::live::run_promote(state_path);
+        }
+        crate::migration::migrate_bootloader_standalone(
+            self.to,
+            self.dry_run,
+            self.force,
+            self.from_image,
+        )
+    }
+}
+
 /// Reject target images that would corrupt the `.origin` file it is written
 /// into. That file is INI, so an embedded newline or NUL lets a crafted image
 /// reference inject additional keys.
@@ -804,9 +872,9 @@ pub struct OstreeDeployConfig<'a> {
 /// "keep the user's value" is the wrong answer for a path whose vendor
 /// default also moved — see [`cross_base::apply_cross_base_etc_policy`].
 ///
-/// Bootloader: per the decision on issue #64, this route will migrate to
-/// systemd-boot when the system is ready — wired in once #65's audited
-/// bootloader entry point lands. Until then the current bootloader is kept.
+/// Bootloader: the standalone `migrate-bootloader` route owns the audited
+/// systemd-boot trial. Backend re-bases keep their current bootloader because
+/// changing it is an explicit operation rather than an implicit side effect.
 impl OstreeDeployConfig<'_> {
     pub fn run(&self) -> Result<()> {
         validate_target_image(self.target_image)?;
@@ -1186,5 +1254,53 @@ mod tests {
                 "missing target etc path in {joined}"
             );
         }
+    }
+
+    #[test]
+    fn standalone_bootloader_rejects_conflicting_actions_before_io() {
+        let config = StandaloneBootloaderConfig {
+            to: "systemd-boot",
+            dry_run: false,
+            force: false,
+            undo: true,
+            promote: true,
+            resync: false,
+            entry_token: None,
+            kernel_version: None,
+            kernel_image: None,
+            initrd: None,
+            title: None,
+            from_image: None,
+        };
+        let error = config.run().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--undo, --promote, and --resync are mutually exclusive")
+        );
+    }
+
+    #[test]
+    fn standalone_bootloader_rejects_dry_run_actions_before_io() {
+        let config = StandaloneBootloaderConfig {
+            to: "systemd-boot",
+            dry_run: true,
+            force: false,
+            undo: false,
+            promote: false,
+            resync: true,
+            entry_token: None,
+            kernel_version: Some("6.8.0"),
+            kernel_image: None,
+            initrd: None,
+            title: None,
+            from_image: None,
+        };
+        let error = config.run().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--dry-run cannot be combined with")
+        );
     }
 }

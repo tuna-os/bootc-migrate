@@ -70,7 +70,7 @@ Route availability by frontend (mechanism fact, not a support claim):
 | KeepSource on OstreeDeploy (GRUB stays GRUB) | **PROVEN** | gating `bluefin ostree re-base` green on main 33891928677 |
 | KeepSource on ImageSwap (systemd-boot stays) | **UNPROVEN** | route is RED; nothing separable is proven |
 | OstreeInstall GRUB-first + "Linux Boot Manager" rollback entry | **UNPROVEN** | cell is RED; bootloader vs route failure not separated |
-| Standalone `migrate-bootloader` (#65) | refuses by design | pure BLS/karg logic is unit-tested; live ESP/NVRAM mutation is not implemented and no CLI path runs it — no boot claim exists to prove |
+| Standalone `migrate-bootloader` (#65/#382) | **IMPLEMENTED; E2E cell added** | `bootloader-trial` stages GRUB2 → systemd-boot with a one-boot trial, kernel-install resync, guarded promotion, and undo; the cell is the pending live proof, while real-hardware firmware behavior remains outside OVMF |
 | BIOS/CSM (non-UEFI) hosts, any route | **UNPROVEN** | harness boots OVMF/UEFI only; no BIOS cell |
 | GRUB2-BLS as an endpoint (openSUSE default) | **UNPROVEN** | reference note in `docs/references.md` only |
 

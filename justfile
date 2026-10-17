@@ -61,6 +61,18 @@ e2e-luks: build test
       FILESYSTEM="xfs+crypt" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-luks.log
 
+# Bluefin LTS GRUB2 → systemd-boot trial, resync, promote and undo.
+# The encrypted install path is intentional: it lays down a GRUB2 source
+# guest before the standalone bootloader-only operation.
+e2e-bootloader-trial: build-release
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      BASE_IMAGE="ghcr.io/projectbluefin/bluefin:lts" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/dakota:stable" \
+      DISK_SIZE="60G" \
+      FILESYSTEM="xfs+crypt" \
+      E2E_MODE="bootloader-trial" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-bootloader-trial.log
+
 # Bluefin → Dakota, driven through the TUI wizard + drift checklist
 # (E2E_MODE=tui-migrate; see tests/tui-e2e-driver.py).
 e2e-tui: build test

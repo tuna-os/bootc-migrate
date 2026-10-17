@@ -73,6 +73,16 @@
   # because the guest boots with a persistent OVMF VARS pflash and
   # is discarded afterwards.
   boot_entries: true
+- name: bluefin LTS -> dakota (GRUB2 to systemd-boot trial)
+  # The encrypted install path deliberately lays down a GRUB2 source guest.
+  # bootloader-trial then stages systemd-boot through the standalone
+  # rebase_controller path and proves the reversible firmware transition.
+  base: ghcr.io/projectbluefin/bluefin:lts
+  target: ghcr.io/projectbluefin/dakota:stable
+  expect_dm: gdm
+  filesystem: xfs+crypt
+  mode: bootloader-trial
+  disk_size: 60G
 - name: bluefin -> aurora ostree re-base (GNOME -> KDE, OstreeDeploy)
   base: ghcr.io/projectbluefin/bluefin:stable
   # Exploratory, non-gating: Aurora is ublue-os's KDE spin
