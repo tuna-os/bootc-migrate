@@ -1461,6 +1461,7 @@ mod tests {
             filesystem_expectation: None,
             kernel_version: None,
             kernel: None,
+            software: Default::default(),
         }
     }
 

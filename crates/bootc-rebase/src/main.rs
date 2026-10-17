@@ -500,9 +500,9 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
-/// package -> ostree (#372): print the package-host readiness report and the
-/// hardware report, then the decision. The install step itself is #373, so a
-/// run that passes every check still stops here before changing anything.
+/// package -> ostree (#372, #377): print the package-host readiness,
+/// software and hardware reports, then the decision. The install step itself
+/// is #373, so a run that passes every check still stops before changing the OS.
 fn run_package_install_preflight(args: &Args) -> Result<()> {
     use bootc_migrate_core::package_host::{self, Verdict};
     let image_size = match bootc_migrate_core::registry::image_compressed_size(&args.target_image) {
@@ -515,8 +515,29 @@ fn run_package_install_preflight(args: &Args) -> Result<()> {
             None
         }
     };
+    let target = bootc_migrate_core::scan::scan_target_image(&args.target_image)?;
+    let software =
+        bootc_migrate_core::software_report::gather_live(&target.software, &args.target_image)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "software report requires a positively detected package-managed source host"
+                )
+            })?;
     let checks = package_host::assess(&package_host::PackageHostFacts::gather(), image_size);
     print!("{}", package_host::render(&checks));
+    println!();
+    print!("{}", software.to_markdown());
+    if !args.dry_run {
+        let (json, markdown) = bootc_migrate_core::software_report::write_reports(
+            &software,
+            std::path::Path::new(bootc_migrate_core::software_report::STATE_DIR),
+        )?;
+        println!(
+            "Software reports written to {} and {}",
+            json.display(),
+            markdown.display()
+        );
+    }
     // The hardware gate prints its own decision and, on a real run, refuses
     // BLOCKING findings itself (unless --accept-hardware-gaps).
     bootc_migrate_core::hardware::check_and_gate(

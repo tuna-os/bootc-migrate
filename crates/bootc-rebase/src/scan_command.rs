@@ -14,8 +14,13 @@ use crate::ScanArgs;
 
 /// Scan the target image and render the result as JSON or a table.
 pub fn run(args: &ScanArgs) -> Result<()> {
-    println!("Scanning target image {}...", args.image);
+    if args.json {
+        eprintln!("Scanning target image {}...", args.image);
+    } else {
+        println!("Scanning target image {}...", args.image);
+    }
     let caps = bootc_migrate_core::scan::scan_target_image(&args.image)?;
+    let software = bootc_migrate_core::software_report::gather_live(&caps.software, &args.image)?;
     // The hardware check compares *this* machine with the image, so it is
     // only meaningful where the scan runs on the machine to be migrated.
     let hardware = caps
@@ -25,6 +30,7 @@ pub fn run(args: &ScanArgs) -> Result<()> {
     if args.json {
         let mut value = serde_json::to_value(&caps)?;
         value["hardware"] = serde_json::to_value(&hardware)?;
+        value["software_report"] = serde_json::to_value(&software)?;
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_capabilities_table(&args.image, &caps);
@@ -35,6 +41,10 @@ pub fn run(args: &ScanArgs) -> Result<()> {
                 "{}",
                 hw::render_unknown(&args.image, "the target image ships no kernel modules")
             ),
+        }
+        if let Some(report) = software {
+            println!();
+            print!("{}", report.to_markdown());
         }
     }
     Ok(())

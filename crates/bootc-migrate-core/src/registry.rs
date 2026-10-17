@@ -419,6 +419,16 @@ const PROBE_PATHS: &[&str] = &[
     "usr/bin/dpkg",
     "usr/bin/pacman",
     "usr/bin/apk",
+    // Package databases used by the package-host software report (#377).
+    "usr/lib/sysimage/rpm",
+    "var/lib/rpm",
+    "var/lib/dpkg/status",
+    "var/lib/dpkg/info",
+    "var/lib/pacman/local",
+    // Units may be generated into the image without package ownership.
+    "usr/lib/systemd/system",
+    "lib/systemd/system",
+    "etc/systemd/system",
 ];
 
 /// The kernel inventory files ([`crate::hardware::TargetKernel`]'s sources)
@@ -513,6 +523,10 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
                 ..k
             }
         }),
+        software: std::sync::Arc::new(crate::software_report::target_inventory_from_root(
+            scratch.path(),
+            skipped,
+        )),
         ..Default::default()
     };
 
