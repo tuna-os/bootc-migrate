@@ -357,10 +357,30 @@ pub fn parse_booted_deployment_root(admin_status_stdout: &str) -> Result<PathBuf
     deployment_root_from_line(deploy_line)
 }
 
-/// Apply the cross-base remap plan (chown /var + preserved /etc in the
-/// staged deployment to the target's ids) after `bootc switch` has staged
-/// it. No-op when `plan` is empty (same-base re-base, or no accounts
-/// diverged even though the bases differ).
+/// Physical `/var` shared by every deployment in `deployment_root`'s
+/// stateroot. An OSTree deployment root does not contain its own `/var`;
+/// prepare-root bind-mounts `<stateroot>/var` there at boot.
+fn shared_var_dir(deployment_root: &Path) -> Result<PathBuf> {
+    let deploy_dir = deployment_root
+        .parent()
+        .context("deployment root has no parent deploy directory")?;
+    if deploy_dir.file_name().and_then(|name| name.to_str()) != Some("deploy") {
+        bail!(
+            "deployment root is not under a stateroot deploy directory: {}",
+            deployment_root.display()
+        );
+    }
+    let stateroot = deploy_dir
+        .parent()
+        .context("deployment deploy directory has no parent stateroot")?;
+    Ok(stateroot.join("var"))
+}
+
+/// Apply the cross-base remap plan over the stateroot's shared `/var` and
+/// the staged deployment's preserved `/etc` after `bootc switch` has staged
+/// it. An OSTree deployment has no physical `staged_root/var`; its `/var` is
+/// bind-mounted from `<stateroot>/var` at boot. No-op when `plan` is empty
+/// (same-base re-base, or no accounts diverged even though the bases differ).
 /// File written to the staged deployment root recording the remap plan and
 /// its outcome, so the JSON twin of the printed report survives the reboot.
 const REMAP_REPORT_FILE: &str = "bootc-migrate-remap-report.json";
@@ -375,11 +395,15 @@ pub fn apply_cross_base_remap(staged_root: &Path, plan: &remap::RemapPlan) -> Re
     if plan.is_empty() {
         return Ok(());
     }
-    let changed = remap::apply_remap_plan(staged_root, plan)
+    let shared_var = shared_var_dir(staged_root)
+        .context("failed to locate the stateroot's shared /var for cross-base remap")?;
+    let staged_etc = staged_root.join("etc");
+    let changed = remap::apply_remap_plan_to_dirs(&[&shared_var, &staged_etc], plan)
         .context("failed to apply cross-base UID/GID remap")?;
     println!(
-        "Cross-base remap applied: {changed} file(s)/dir(s) rechowned under {}",
-        staged_root.display()
+        "Cross-base remap applied: {changed} file(s)/dir(s) rechowned under {} and {}",
+        shared_var.display(),
+        staged_etc.display()
     );
     Ok(())
 }
@@ -542,6 +566,16 @@ mod tests {
     fn booted_deployment_root_errors_when_nothing_is_booted() {
         assert!(parse_booted_deployment_root("  bluefin def456.1\n").is_err());
         assert!(parse_booted_deployment_root("* only-one-field\n").is_err());
+    }
+
+    #[test]
+    fn shared_var_is_the_stateroot_var_not_a_deployment_child() {
+        let deployment = Path::new("/ostree/deploy/default/deploy/abc123.0");
+        assert_eq!(
+            shared_var_dir(deployment).unwrap(),
+            PathBuf::from("/ostree/deploy/default/var")
+        );
+        assert!(shared_var_dir(Path::new("/tmp/not-a-deployment")).is_err());
     }
 
     /// bootc-migrate#191. The table is the whole point: "we checked and the
