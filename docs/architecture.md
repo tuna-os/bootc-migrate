@@ -259,13 +259,15 @@ sshd -i exits before even offering public key authentication.
 
 ### Fix 1: Early sshd-keygen
 
-Enable sshd-keygen before the socket accepts connections:
+Enable every host-key generator as a member of `sshd-keygen.target`, then make
+`e2e-sshd.socket` want and start after that target. Target ordering guarantees
+the socket cannot accept a connection until all three generators finish:
 ```bash
 mkdir -p /etc/systemd/system/sshd-keygen.target.wants
-ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
-       /etc/systemd/system/sshd-keygen.target.wants/sshd-keygen@rsa.service
-ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
-       /etc/systemd/system/sshd-keygen.target.wants/sshd-keygen@ed25519.service
+for key in rsa ecdsa ed25519; do
+    ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
+        "/etc/systemd/system/sshd-keygen.target.wants/sshd-keygen@${key}.service"
+done
 ```
 
 ### Fix 2: Serial console auto-login

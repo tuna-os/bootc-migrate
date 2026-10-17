@@ -360,11 +360,21 @@ RUN mkdir -p /etc/ssh && \
     echo 'Port 22' >> /etc/ssh/sshd_config
 # Disable firewalld / ufw / SuSEfirewall (CentOS Stream 10 / Ubuntu block SSH by default)
 RUN systemctl disable firewalld ufw SuSEfirewall2 2>/dev/null || true
+# The socket-activated sshd can receive the harness's first probe before
+# Fedora's host-key generators finish. Make all key instances members of
+# sshd-keygen.target; e2e-sshd.socket orders itself after that target below.
+RUN mkdir -p /etc/systemd/system/sshd-keygen.target.wants && \
+    for key in rsa ecdsa ed25519; do \
+        ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
+            "/etc/systemd/system/sshd-keygen.target.wants/sshd-keygen@${key}.service"; \
+    done
 # e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
 RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
         '[Unit]' \
         'Description=E2E SSH TCP Socket (port 22)' \
+        'Wants=sshd-keygen.target' \
+        'After=sshd-keygen.target' \
         '[Socket]' \
         'ListenStream=22' \
         'Accept=yes' \
@@ -786,10 +796,16 @@ echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.con
 # This ensures the ComposeFS 3-way merge treats it as a user-created file and
 # preserves it across migration.
 ETC_SYSTEMD="$STATEROOT_VAR/etc/systemd/system"
-sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants" "$ETC_SYSTEMD/emergency.target.wants" "$ETC_SYSTEMD/rescue.target.wants"
+sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants" "$ETC_SYSTEMD/sshd-keygen.target.wants" "$ETC_SYSTEMD/emergency.target.wants" "$ETC_SYSTEMD/rescue.target.wants"
+for key in rsa ecdsa ed25519; do
+    sudo ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
+        "$ETC_SYSTEMD/sshd-keygen.target.wants/sshd-keygen@${key}.service"
+done
 sudo tee "$ETC_SYSTEMD/e2e-sshd.socket" >/dev/null <<'SOCKETEOF'
 [Unit]
 Description=E2E SSH TCP Socket (port 22)
+Wants=sshd-keygen.target
+After=sshd-keygen.target
 [Socket]
 ListenStream=22
 Accept=yes
