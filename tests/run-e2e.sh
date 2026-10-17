@@ -2027,7 +2027,7 @@ COMMITCHECK
         ATTEMPT=$((ATTEMPT + 1))
     done
     if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-        echo "ERROR: VM did not boot back after bootc-rebase commit."
+        echo "ERROR: SSH did not answer within $((SECONDS - WAIT_START))s after the bootc-rebase commit reboot (after $MAX_ATTEMPTS attempts)."
         serial_failure_lines | tail -40 || true
         tail -120 qemu.log
         exit 1
