@@ -65,12 +65,12 @@ Route availability by frontend (mechanism fact, not a support claim):
 
 ## Package-based source hosts
 
-These rows are intentionally separate. Detecting rpm, dpkg or pacman and
-passing the pure readiness checks does not prove that a package host can
-migrate or boot. Each row remains **UNPROVEN** until its own cell is green on
-`main`; [#380](https://github.com/tuna-os/bootc-migrate/issues/380) owns those
-cells. A green Fedora row never promotes an Ubuntu, Debian or Arch row, and a
-green UEFI/ext4 row never promotes btrfs, XFS or BIOS.
+These rows are separate from the general route table.
+Detection of rpm, dpkg, or pacman plus the readiness checks does not prove
+that a package host can migrate or boot. A row stays **UNPROVEN** until its
+cell turns green on `main`. Issue #380 owns these cells.
+A green Fedora row does not promote Ubuntu, Debian, or Arch.
+A green UEFI/ext4 row does not promote btrfs, XFS, or BIOS.
 
 | Source | Package database | Root filesystem | Boot mode | Storage stack | Status | Proof needed |
 |---|---|---|---|---|---|---|
@@ -83,11 +83,11 @@ green UEFI/ext4 row never promotes btrfs, XFS or BIOS.
 | Fedora, Ubuntu, Debian or Arch | matching database above | btrfs, XFS or ext4 | BIOS/CSM | plain | **UNPROVEN; preflight refuses** | per-distribution BIOS cell plus implementation that passes preflight |
 | Fedora, Ubuntu, Debian or Arch | matching database above | btrfs, XFS or ext4 | UEFI | LUKS and/or LVM | **UNPROVEN; preflight refuses** | per-layout cell plus implementation that passes preflight |
 
-Package-host readiness currently allows only UEFI, btrfs/XFS/ext4 and no
-LUKS/LVM. That is an input gate, not a support claim. The software report
-(#377), rollback entry (#374), guided commit (#378) and first-boot verification
-(#379) are also unimplemented, so no row can become PROVEN solely by making
-`PackageInstall` run.
+Package-host readiness now allows only UEFI, btrfs/XFS/ext4, and no LUKS/LVM.
+That gate does not claim support.
+PackageInstall alone cannot make a row PROVEN.
+The software report (#377), rollback entry (#374), guided commit (#378), and
+first-boot verification (#379) are not ready.
 
 ## Bootloader
 

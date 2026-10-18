@@ -48,21 +48,17 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   the `package -> ostree` route (`PackageInstall`, not implemented yet).
   `--target-backend` now defaults to `auto`: composefs from a bootc
   deployment, as before, and ostree from a package host (#371, part of #370).
-- The TUI now recognizes package-managed hosts as a read-only preview route,
-  limits their target picker to OSTree images and runs the existing
-  `bootc-rebase --dry-run` readiness/hardware reports. Live PackageInstall
-  remains disabled until #373. Package-host guidance, per-distribution /
-  filesystem / boot-mode evidence rows and the roadmap's unvalidated-path
-  entry make that boundary explicit (#381).
+- The TUI now shows a read-only preview for package-managed hosts.
+  It limits the target picker to OSTree images and runs the readiness and hardware reports.
+  Live `PackageInstall` waits for #373. Guidance, evidence rows, and the roadmap entry define the #381 boundary.
 - Hardware and firmware check before every migration, on every route of
   `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
-  compares the devices that work today, the out-of-tree drivers in use
-  (NVIDIA, VirtualBox, ZFS), their firmware and the CPU microcode with the
-  target image's kernel and `/usr/lib/firmware`. It refuses when a storage,
-  display, network, wireless or USB controller would lose its driver or
-  firmware, unless you add `--accept-hardware-gaps`. A display controller
-  only gets a warning when the target kernel has a firmware framebuffer
-  driver (`simpledrm`, `efifb`). The registry scan
+  compares today's devices and out-of-tree drivers (NVIDIA, VirtualBox, ZFS) with
+  the target image's kernel, firmware, and CPU microcode.
+  The check refuses a storage, display, network, wireless, or USB controller when
+  it would lose a driver or firmware. Use `--accept-hardware-gaps` to allow that loss.
+  A display controller only gets a warning when the target kernel has a firmware
+  framebuffer driver (`simpledrm`, `efifb`). The registry scan
   collects the target data in its single pass over the layers. Within a run,
   the tool caches the scan, so it no longer downloads the image once for each
   check.

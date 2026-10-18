@@ -333,29 +333,39 @@ request; non-experts can read what will happen before it happens.
 ### M6 — Package-host onboarding — **detection and readiness only**
 
 [#370](https://github.com/tuna-os/bootc-migrate/issues/370) extends the engine
-to regular rpm-, dpkg- and pacman-managed installs. The work is deliberately
-sequenced: package hosts have more varied disk layouts and no OSTree factory
-`/etc`, so detecting one is not evidence that installing beside it is safe.
+to regular rpm-, dpkg-, and pacman-managed installs. We use this order because
+package hosts have varied disk layouts and lack an OSTree factory `/etc`.
+Detection alone does not prove that a side-by-side install is safe.
 
 The two read-only pieces have landed:
 
-- #371 detects `Backend::Package`, plans `PackageInstall` and defaults its
+- #371 detects `Backend::Package`, plans `PackageInstall`, and defaults its
   target backend to OSTree.
 - #372 reports boot mode, filesystems, LUKS/LVM, btrfs subvolumes, `/boot`,
-  `/home`, free space, active package managers, SELinux and target hardware.
+  `/home`, free space, active package managers, SELinux, and target hardware.
 
-Everything that mutates or completes the contract remains open: the install
-engine (#373), old-system rollback and undo (#374), package-database `/etc`
-classification (#375), home and data carry (#376), software report (#377),
-guided commit (#378), first-boot verification (#379), and package-source E2E
-cells (#380). #381 documents that boundary, adds evidence rows, and gives the
-TUI an OSTree-only **dry-run** entry; its live confirmation and software-report
-screens cannot graduate until #373 and #377 supply them.
+Mutation and completion remain open. Tracked work includes:
 
-**Exit criteria (not yet met)**: the Fedora Cloud → fedora-bootc cell is green
-on `main`; the TUI shows target-specific readiness and software reports before
-live confirmation; the old OS boots after staging and after undo; first-boot
-verification passes; guided commit removes only the verified old system.
+- #373: install engine.
+- #374: old-system rollback and undo.
+- #375: package-database `/etc` classification.
+- #376: home and data carry.
+- #377: software report.
+- #378: guided commit.
+- #379: first-boot verification.
+- #380: package-source E2E cells.
+
+#381 records that boundary and adds evidence rows. It adds an OSTree-only
+**dry-run** entry to the TUI. Live confirmation and software reports need #373
+and #377.
+
+**Exit criteria (not yet met):**
+
+- The Fedora Cloud → fedora-bootc cell is green on `main`.
+- The TUI shows target-specific readiness and software reports before live confirmation.
+- The old OS boots after staging and after undo.
+- First-boot verification passes.
+- Guided commit removes only the verified old system.
 
 ### Deferred extensions (raised on #30, not yet scoped into a milestone)
 
