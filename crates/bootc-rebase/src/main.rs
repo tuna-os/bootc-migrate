@@ -43,6 +43,9 @@ enum Commands {
     Rebase(Args),
     /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
     Rollback(RollbackArgs),
+    /// Make the previous package-host system the default without removing the
+    /// new bootc deployment (issue #374).
+    Undo(UndoArgs),
     /// GRUB2 -> systemd-boot bootloader migration (issue #65). NOT YET
     /// IMPLEMENTED: the ESP/NVRAM mutation and the kernel-install resync
     /// hook (without which a flipped system would silently boot stale
@@ -230,6 +233,17 @@ struct RollbackArgs {
     reboot: bool,
 
     /// Dry-run: print every action without executing
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct UndoArgs {
+    /// Reboot immediately into the package-host rollback entry.
+    #[arg(long)]
+    reboot: bool,
+
+    /// Dry-run: print the bootloader action without executing it.
     #[arg(long)]
     dry_run: bool,
 }
@@ -570,6 +584,15 @@ fn run() -> Result<()> {
                 rollback_args.dry_run,
             )
         }
+        Some(Commands::Undo(ref undo_args)) => {
+            check_root_privilege()?;
+            bootc_migrate_core::package_rollback::run_undo(
+                std::path::Path::new(bootc_migrate_core::package_rollback::STATE_DIR),
+                std::path::Path::new("/boot"),
+                undo_args.dry_run,
+                undo_args.reboot,
+            )
+        }
         Some(Commands::MigrateBootloader(ref args)) => run_migrate_bootloader(args),
         Some(Commands::BootEntries(ref args)) => boot_entries::run_boot_entries(args),
         Some(Commands::DeMigrate(ref args)) => de_migrate_command::run(args),
@@ -799,6 +822,18 @@ mod tests {
                 assert!(args.dry_run);
             }
             _ => panic!("expected Commands::Rollback"),
+        }
+    }
+
+    #[test]
+    fn test_package_undo_subcommand_parsing() {
+        let cli = Cli::parse_from(["bootc-rebase", "undo", "--reboot", "--dry-run"]);
+        match cli.command {
+            Some(Commands::Undo(args)) => {
+                assert!(args.reboot);
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Commands::Undo"),
         }
     }
 
