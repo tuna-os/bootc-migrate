@@ -598,20 +598,23 @@ Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
-A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It installs Bluefin
-into a disk image, runs the migration against a registry mirror of the
-Dakota target image, reboots, and validates the full round-trip.
+A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It either installs an
+OSTree/ComposeFS base image with bootc or, for `E2E_MODE=package-install`,
+boots an official Fedora Cloud or Ubuntu Cloud disk prepared by
+`tests/package-base.sh`, runs the package → OSTree migration, reboots, and
+validates the target plus its `Previous system` entry.
 
 ```
 sudo ./tests/run-e2e.sh
 ```
 
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
-`FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
+`FILESYSTEM`, `E2E_MODE`, `E2E_PACKAGE_BASE`, and
+`E2E_PACKAGE_CROSS_FAMILY`.
 
-The full matrix has seventeen cells (see `.github/e2e-scenarios.yml`, which is
-authoritative). It runs nightly; each PR and push to `main` runs a
-round-robin slice of the gating cells (see `docs/testing.md`):
+The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs
+nightly; each PR and push to `main` runs a round-robin slice of the gating
+cells (see [docs/testing.md](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -630,6 +633,9 @@ round-robin slice of the gating cells (see `docs/testing.md`):
 | composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |
+| package install (exploratory) | Fedora Cloud → fedora-bootc:43 | btrfs | 40G |
+| package install (exploratory) | Fedora Workstation → Bluefin | btrfs + separate /boot | 60G |
+| package install (exploratory) | Ubuntu Cloud → fedora-bootc:43 (cross-family) | ext4 | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place.
