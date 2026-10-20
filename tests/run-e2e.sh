@@ -1322,6 +1322,55 @@ TRIAL_BIN_SETUP
         > /tmp/bootloader-trial-stage.log 2>&1; then
         sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
         echo "FAIL: migrate-bootloader staging failed"
+        # Read-only layout evidence for discovery failures; retain the stage failure.
+        if ! ssh $SSH_OPTS root@localhost bash -s <<'TRIAL_DISCOVERY_DIAGNOSTICS'
+set -uo pipefail
+diagnostic_status=0
+collect() {
+    if ! "$@"; then
+        diagnostic_status=1
+    fi
+}
+echo '--- deployment identities ---'
+collect ostree admin status
+command_line=()
+if ! read -r -a command_line < /proc/cmdline; then
+    diagnostic_status=1
+fi
+for argument in "${command_line[@]}"; do
+    case "$argument" in
+        ostree=/*) printf '%s\n' "$argument"; collect readlink -e "/sysroot${argument#ostree=}" ;;
+        composefs=*) printf '%s\n' "$argument" ;;
+    esac
+done
+echo '--- physical deployment directories ---'
+if ! find /sysroot/ostree/deploy -maxdepth 3 -type d | head -80; then
+    diagnostic_status=1
+fi
+echo '--- running kernel files ---'
+collect uname -r
+if ! find /usr/lib/modules -maxdepth 2 \( -name 'vmlinuz*' -o -name 'initramfs*' \) -ls | head -40; then
+    diagnostic_status=1
+fi
+echo '--- deployed kernel files ---'
+for modules in /sysroot/ostree/deploy/*/deploy/*/usr/lib/modules/*; do
+    [ -d "$modules" ] || continue
+    collect ls -ld "$modules" "$modules/vmlinuz" "$modules/initramfs.img"
+done
+echo '--- boot kernel files and BLS entries ---'
+if ! find /boot/ostree -maxdepth 2 \( -type f -o -type l \) -ls | head -80; then
+    diagnostic_status=1
+fi
+for entry in /boot/loader/entries/*.conf; do
+    [ -f "$entry" ] || continue
+    echo "--- $entry ---"
+    collect cat "$entry"
+done
+exit "$diagnostic_status"
+TRIAL_DISCOVERY_DIAGNOSTICS
+        then
+            echo "WARN: could not collect all deployment discovery diagnostics"
+        fi
         exit 1
     fi
     sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log

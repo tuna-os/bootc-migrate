@@ -74,6 +74,91 @@ class HarnessRegressions(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIn("$TRIAL_BIN_DIR/bootc-rebase", calls[0])
 
+    def test_discovery_diagnostics_preserve_stage_failure(self):
+        start = HARNESS.index(
+            "    if ! ssh $SSH_OPTS root@localhost",
+            HARNESS.index('step "=== bootloader-trial: staging'),
+        )
+        end = HARNESS.index("    TRIAL_ID=", start)
+        block = HARNESS[start:end]
+        for stage_status, diagnostic_status in [(1, 0), (1, 23), (0, 0)]:
+            with self.subTest(stage=stage_status, diagnostic=diagnostic_status):
+                with tempfile.TemporaryDirectory() as directory:
+                    script = block.replace(
+                        "/tmp/bootloader-trial-stage.log", str(Path(directory) / "stage.log")
+                    )
+                    stubs = """
+ssh() {
+    case "$*" in
+        *migrate-bootloader*) echo stage-output; return "$STAGE_STATUS" ;;
+        *) cat >/dev/null; echo diagnostic-output; return "$DIAGNOSTIC_STATUS" ;;
+    esac
+}
+"""
+                    result = subprocess.run(
+                        ["bash", "-euc", stubs + script],
+                        env={
+                            **os.environ,
+                            "SSH_OPTS": "",
+                            "TRIAL_BIN_DIR": "/fixture",
+                            "VM_TARGET_IMAGE": "example.invalid/test",
+                            "STAGE_STATUS": str(stage_status),
+                            "DIAGNOSTIC_STATUS": str(diagnostic_status),
+                        },
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, stage_status)
+                    self.assertIn("[bootloader-stage] stage-output", result.stdout)
+                    self.assertEqual("diagnostic-output" in result.stdout, stage_status != 0)
+                    self.assertEqual(
+                        "WARN: could not collect" in result.stdout, diagnostic_status != 0
+                    )
+
+    def test_remote_diagnostics_retain_early_failures_and_continue(self):
+        body = HARNESS.split("<<'TRIAL_DISCOVERY_DIAGNOSTICS'\n", 1)[1].split(
+            "\nTRIAL_DISCOVERY_DIAGNOSTICS", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            (fixture / "cmdline").write_text("ostree=/fixture/deployment\n")
+            bls = fixture / "boot/loader/entries"
+            bls.mkdir(parents=True)
+            (bls / "fixture.conf").write_text("title test fixture\n")
+            body = body.replace("/proc/cmdline", str(fixture / "cmdline"))
+            for path in ["/sysroot", "/usr/lib/modules", "/boot"]:
+                body = body.replace(path, str(fixture / path.lstrip("/")))
+            stubs = """
+ostree() { echo ostree-attempt; return "$OSTREE_STATUS"; }
+readlink() { echo readlink-attempt; return "$READLINK_STATUS"; }
+find() { echo find-attempt; return "$FIND_STATUS"; }
+uname() { echo fixture-kernel; }
+"""
+            for failures in [(0, 0, 0), (7, 0, 0), (0, 7, 0), (0, 0, 7)]:
+                with self.subTest(failures=failures):
+                    result = subprocess.run(
+                        ["bash", "-uc", stubs + body],
+                        env={
+                            **os.environ,
+                            **dict(
+                                zip(
+                                    ["OSTREE_STATUS", "READLINK_STATUS", "FIND_STATUS"],
+                                    map(str, failures),
+                                    strict=True,
+                                )
+                            ),
+                        },
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, int(any(failures)))
+                    self.assertIn("ostree-attempt", result.stdout)
+                    self.assertIn("readlink-attempt", result.stdout)
+                    self.assertIn("fixture-kernel", result.stdout)
+                    self.assertIn("title test fixture", result.stdout)
+
     def test_remote_setup_propagates_failed_executable_staging(self):
         setup = HARNESS.split("<<'TRIAL_BIN_SETUP'\n", 1)[1].split("\nTRIAL_BIN_SETUP", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
