@@ -296,7 +296,7 @@ Things to confirm in the report:
   copies of the target image (ComposeFS and podman fallback storage), and 5 GiB
   of temporary headroom for the initrd rebuild.
 
-Optionally, preview what Phase 4's `/etc` merge will see before running it:
+Optionally, preview what Phase 4's `/etc` merge will see before you run it:
 
 ```bash
 sudo bootc-migrate etc-drift
