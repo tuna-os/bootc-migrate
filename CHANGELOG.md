@@ -31,6 +31,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   → OSTree migration, and verifies the target plus the `Previous system`
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
+- Cross-family `/etc` policy on the `bootc switch` routes (#258, #259). `OstreeDeploy`
+  now reconciles the staged deployment after OSTree finalization, preserving
+  target defaults, identity-DB ordering and displaced-edit sidecars while
+  scheduling `/.autorelabel`; `ImageSwap` applies the same policy after
+  composefs finalization and preserves its sysusers/ldconfig first-boot work.
+  A non-gating OstreeDeploy cross-family E2E cell covers the route.
 
 - Standalone `migrate-bootloader` now stages a systemd-boot kernel/BLS
   generation as a one-boot `BootNext` trial while preserving GRUB, with

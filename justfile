@@ -153,6 +153,20 @@ e2e-cross-family target="ghcr.io/bootcrew/opensuse-bootc:latest" expect_os_id="o
       E2E_EXPECT_OS_ID="{{expect_os_id}}" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-cross-family.log
 
+# Cross-family native OSTree re-base (#259). Finalize bootc's merge first,
+# then assert the target-first policy before and after the reboot.
+e2e-cross-family-ostree: build test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo -E BASE_IMAGE="ghcr.io/projectbluefin/bluefin:stable" \
+      TARGET_IMAGE="ghcr.io/bootcrew/opensuse-bootc:latest" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_MODE="ostree-rebase" \
+      E2E_CROSS_FAMILY="1" \
+      E2E_EXPECT_OS_ID="opensuse-tumbleweed" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-cross-family-ostree.log
+
 # Composefs image swap across distributions: dakota (composefs-native)
 # -> utah (Bluefin on Fedora Hummingbird) through bootc-rebase's ImageSwap
 # route. Asserts the reboot lands in utah with the base kept as rollback.
