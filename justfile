@@ -198,7 +198,7 @@ e2e-debug: build
 # === Linting ===
 
 # Run every check CI runs (clippy, rustfmt, unit tests, shellcheck)
-check: clippy fmt-check test test-all-features lint-shell
+check: clippy fmt-check test test-all-features lint-shell test-harness
 
 # Unit tests + clippy with every cargo feature enabled (feature-gated code
 # like composefs-native is invisible to the default build — this is its
@@ -365,3 +365,7 @@ clean-build:
 # Commit with conventional commit format
 commit msg:
     git add -A && git commit -m "{{msg}}" && git push
+
+# Regression checks for E2E seed data and executable staging (no VM required).
+test-harness:
+    python3 -m unittest discover -s tests -p 'test_harness_regressions.py' -v

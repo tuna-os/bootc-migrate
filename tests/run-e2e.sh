@@ -1281,13 +1281,25 @@ if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
 fi
 
 if [ "$E2E_MODE" = "bootloader-trial" ]; then
-    scp $SCP_OPTS target/release/bootc-rebase root@localhost:/var/tmp/bootc-rebase
-    scp $SCP_OPTS target/release/bootc-migrate root@localhost:/var/tmp/bootc-migrate
-    ssh $SSH_OPTS root@localhost '
-        install -m 0755 /var/tmp/bootc-rebase /usr/local/bin/bootc-rebase
-        install -m 0755 /var/tmp/bootc-migrate /usr/local/bin/bootc-migrate
-        test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
-    '
+    # Keep the executables across reboot without writing immutable /usr/local.
+    # A private root-owned directory prevents other guest users swapping files.
+    TRIAL_BIN_DIR=$(ssh $SSH_OPTS root@localhost 'umask 077; mktemp -d /var/tmp/bootc-trial.XXXXXXXX')
+    [[ "$TRIAL_BIN_DIR" =~ ^/var/tmp/bootc-trial\.[a-zA-Z0-9]{8}$ ]] || {
+        echo "FAIL: invalid bootloader-trial staging directory"; exit 1;
+    }
+    scp $SCP_OPTS target/release/bootc-rebase "root@localhost:$TRIAL_BIN_DIR/bootc-rebase"
+    scp $SCP_OPTS target/release/bootc-migrate "root@localhost:$TRIAL_BIN_DIR/bootc-migrate"
+    ssh $SSH_OPTS root@localhost bash -s -- "$TRIAL_BIN_DIR" <<'TRIAL_BIN_SETUP'
+set -euo pipefail
+dir=$1
+[[ -d "$dir" && ! -L "$dir" && "$(stat -c '%u:%a' "$dir")" = 0:700 ]]
+for binary in "$dir/bootc-rebase" "$dir/bootc-migrate"; do
+    [[ -f "$binary" && ! -L "$binary" && "$(stat -c '%u' "$binary")" = 0 ]]
+    chmod 0755 "$binary"
+    test -x "$binary"
+done
+test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
+TRIAL_BIN_SETUP
 
     ORIGINAL_EFIBOOTMGR=$(ssh $SSH_OPTS root@localhost "efibootmgr -v")
     ORIGINAL_ORDER=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
@@ -1306,7 +1318,7 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
 
     step "=== bootloader-trial: staging the systemd-boot trial through rebase_controller ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "/usr/local/bin/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
+        "$TRIAL_BIN_DIR/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
         > /tmp/bootloader-trial-stage.log 2>&1; then
         sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
         echo "FAIL: migrate-bootloader staging failed"
@@ -1420,7 +1432,7 @@ echo "resync staged kernel version $NEW_VERSION"
 TRIAL_RESYNC
 
     step "=== bootloader-trial: promoting the tested trial ==="
-    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --promote
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --promote
     PROMOTED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "${PROMOTED_ORDER%%,*}" = "$TRIAL_ID" ] || {
@@ -1433,7 +1445,7 @@ TRIAL_RESYNC
     fi
 
     step "=== bootloader-trial: undoing the promoted migration ==="
-    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --undo
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --undo
     RESTORED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "$RESTORED_ORDER" = "$ORIGINAL_ORDER" ] || {
@@ -2874,7 +2886,7 @@ method=ignore
 NMEOF
     chmod 600 /etc/NetworkManager/system-connections/e2e-package.nmconnection
     if command -v dnf >/dev/null 2>&1; then
-        echo "e2e-package-manager-edit" >> /etc/dnf/dnf.conf
+        echo "# e2e-package-manager-edit" >> /etc/dnf/dnf.conf
         dnf -y install cowsay
     elif command -v apt-get >/dev/null 2>&1; then
         mkdir -p /etc/apt/apt.conf.d

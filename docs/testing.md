@@ -500,3 +500,26 @@ the known flake class above.)
 3. **Merge-queue discipline**: once the stacked fleet lands, enable GitHub
    merge queue with `required-checks` as the single required context (it
    already tolerates skipped optional jobs).
+
+## E2E input regressions
+
+Run `just test-harness` for the cloud-init package list, package-manager fixture,
+and bootloader-trial staging checks. `just check` also runs these tests without
+a VM. The tests execute the shell snippets that produce the inputs; they do not
+substitute for booting the scenario.
+
+[Run 39227338849](https://github.com/tuna-os/bootc-migrate/actions/runs/39227338849)
+failed before migration in three harness paths:
+
+- Fedora package install appended a bare marker to `dnf.conf`; `dnf` rejected
+  line 4 with `Missing '='`. Use a comment marker and retain the sidecar check.
+- Ubuntu cloud-init requested `NetworkManager`, the Fedora package name.
+  Ubuntu requires `network-manager`.
+- Bootloader trial copied binaries into read-only `/usr/local/bin`. The remote
+  shell continued after failed `install` commands. Keep binaries in a unique root-owned `0700` directory under `/var/tmp`.
+  Reject symlinks and wrong ownership, check executable bits, and stop if setup fails.
+  Stage, promote, and undo use that same directory across the trial reboot.
+
+The remaining failures in that run (read-only stateroot `/var`, failed service
+health, and SSH readiness) require separate diagnosis. These input fixes do not
+waive those checks or establish that the full migration passes.
