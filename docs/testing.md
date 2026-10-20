@@ -38,6 +38,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (ext4) | legacy fast path, ext4 fs-verity | active |
 | bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
+| bluefin LTS → dakota (xfs+LUKS, `bootloader-trial`) | GRUB2 source → systemd-boot one-boot trial, OVMF `BootOrder` swap, kernel-install ESP resync, guarded promotion and undo | added for #382; pending first green run |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
 | bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
 | bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
@@ -48,6 +49,37 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin stable → bootcrew/debian-bootc (`E2E_CROSS_FAMILY=1`) | cross-family migration to Debian (apt package family, `/etc/apt`, `/etc/dpkg`) | active, non-gating |
 | bluefin stable → bootcrew/ubuntu-bootc (`E2E_CROSS_FAMILY=1`) | cross-family migration to Ubuntu (`ID_LIKE=debian`) | active, non-gating |
 | bluefin stable → bootcrew/arch-bootc (`E2E_CROSS_FAMILY=1`) | cross-family migration to Arch Linux (pacman package family, no `ID_LIKE`) | active, non-gating |
+| Fedora Cloud → `fedora-bootc:43` (`package-install`) | official Fedora Cloud btrfs image → package host → OSTree target, `/home` + `/var` fixtures and Previous system | exploratory (#380) |
+| Fedora Workstation → Bluefin (`package-install`) | Fedora Workstation package layout with separate `/boot`, GNOME/GDM, desktop state and Flatpak fixtures | exploratory (#380) |
+| Ubuntu Cloud → `fedora-bootc:43` (`package-install`) | official Ubuntu ext4/dpkg cloud image, `--accept-cross-base`, and cross-family `/etc` policy | exploratory (#380) |
+
+### Package-based base images (`E2E_MODE=package-install`)
+
+The package cells do not run `bootc install to-disk`. `tests/package-base.sh`
+downloads the pinned official cloud image, verifies its SHA-256, converts it
+to `disk.raw`, grows the root filesystem, and attaches a `cloud-localds` seed.
+The seed installs the root SSH key and the harness socket before the live
+fixture step. `fedora-workstation` starts from the Fedora Cloud image, installs
+the Workstation environment with `dnf`, and creates a separate ext4 `/boot`
+partition so the bootloader layout is not accidentally tested only on a
+single btrfs root.
+
+Select the source with `E2E_PACKAGE_BASE=fedora-cloud`,
+`fedora-workstation`, or `ubuntu-cloud`. The Ubuntu cell additionally sets
+`E2E_PACKAGE_CROSS_FAMILY=1`, which adds `--accept-cross-base` to the
+package → OSTree command. The matrix skips the base-image `podman pull` for
+these cells but still pulls the target image used by the migration.
+
+Each package cell creates and checks a real human password and SSH key, a
+`/home` marker, modified package-manager configuration plus an unpackaged
+`/etc` file, a NetworkManager profile, a rootless Podman image, a system and
+user Flatpak fixture, and the package-only `cowsay` CLI. After the target
+reboot it checks the target `bootc status`, health, software report, target
+vendor `/etc` precedence, and then selects the generated `Previous system`
+entry, verifies the old distribution and data, and returns to the target.
+The three rows remain exploratory until the package route (#373–#379) is
+implemented and the first run is green; promote the Fedora Cloud row to a
+gating cell at that point.
 
 ### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
 
@@ -229,15 +261,17 @@ This is the first cell to mutate real UEFI NVRAM (#189). Until it existed,
 #31's `efibootmgr` executor had only unit tests of the *plan*; the write path
 and the snapshot-restore path had never run against real firmware variables.
 
-**Scope limit:** #189 also names #65's live bootloader flip. That is *not*
-covered and cannot be — `migrate-bootloader` currently bails with "not
-implemented yet (issue #65)", so there is no flip to exercise.
+The separate `bootloader-trial` cell covers #65/#382. It installs the
+standalone systemd-boot path on a GRUB2 Bluefin guest, saves and swaps
+`BootOrder` because OVMF does not honor `BootNext`, reboots through the trial,
+calls the installed `kernel-install` resync hook for a second kernel version,
+then exercises `--promote` and `--undo`. The final assertion requires the
+original firmware order, GRUB fallback, migration-owned ESP files and hook to
+be restored.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
 - **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`), active as the non-gating cell above
-- **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
-  kernel update asserting ESP resync; `--undo` restores GRUB
 - **M3**: the cross-base cell above covers centos-family → fedora-family.
   The exit criterion names the *other* direction (fedora → centos), which
   needs a CentOS-family target image the harness does not currently install;
