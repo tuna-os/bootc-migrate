@@ -3,10 +3,10 @@
 [![CI](https://github.com/tuna-os/bootc-migrate/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna-os/bootc-migrate/actions/workflows/ci.yml)
 [![E2E](https://github.com/tuna-os/bootc-migrate/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/tuna-os/bootc-migrate/actions/workflows/e2e-tests.yml?query=branch%3Amain)
 
-In-place migration utility that converts an OSTree-backend bootc system
-(e.g. Bluefin) into a ComposeFS-backend bootc system (e.g. Dakota), without
-reinstalling and without losing `/home`, `/var`, `/etc` customizations,
-flatpaks, container storage, or user accounts.
+In-place conversion tool for an OSTree-backend bootc system (for example,
+Bluefin) to a ComposeFS-backend bootc system (for example, Dakota). It keeps
+`/home`, `/var`, and `/etc` customizations, flatpaks, container storage, and
+user accounts.
 
 <!-- hive-contribute-plea: donated-compute appeal, keep in sync across repos -->
 ## Contribute compute — no code needed
@@ -34,12 +34,12 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 **1. Get the migrator.** Download the latest prebuilt binary (x86_64; for arm64
 swap in `aarch64-unknown-linux-gnu`):
 
-> **Release-naming note.** This repo was renamed from `bootc-migrate-composefs`
-> to `bootc-migrate` after v0.2.0. `release.yml` already publishes under the
-> new name, so from **v0.6.0** the tarball, the binary inside it, and the
-> container image are all `bootc-migrate`. The commands below reflect that.
-> To install the older v0.2.0 artifacts, substitute `bootc-migrate-composefs`
-> in the paths.
+> **Release-naming note.** The project name changed from
+> `bootc-migrate-composefs` to `bootc-migrate` after v0.2.0.
+> `release.yml` already publishes under the new name. From **v0.6.0**, the
+> tarball, binary, and container image are all `bootc-migrate`. The commands
+> below reflect that. To install older v0.2.0 artifacts, substitute
+> `bootc-migrate-composefs` in the paths.
 
 ```bash
 curl -fsSL -o bmc.tar.gz \
@@ -71,14 +71,14 @@ sudo install -m755 target/release/bootc-migrate /usr/local/bin/
 ```
 </details>
 
-**2. Dry-run** — makes no changes, just checks your system is ready:
+**2. Dry-run** — makes no changes; checks your system is ready:
 
 ```bash
 sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable --dry-run
 ```
 
-**3. Migrate** (~5–25 min depending on cache/network):
+**3. Migrate** (~5–25 min based on cache/network):
 
 ```bash
 sudo bootc-migrate \
@@ -99,13 +99,13 @@ cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
 sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 
-> ⚠️ **Note:** Phase 4 copies `/var` to the composefs side. After migration,
-> the two `/var` trees are **independent** — changes you make on the composefs
-> side won't be reflected if you roll back to OSTree (and vice versa). Commit
-> only when you're satisfied with the new system.
+> **Note:** Phase 4 copies `/var` to the composefs side. The two `/var`
+> trees are **independent** after migration. Changes on the composefs side do
+> not appear after an OSTree rollback, and the reverse also applies. Commit only
+> when you're satisfied with the new system.
 
-That's it. For flags, rollback, troubleshooting, and the full phase-by-phase
-breakdown, see [Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
+For flags, rollback, problems, and the full phase-by-phase breakdown, see
+[Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
 On **Bluefin LTS** (XFS) or systems with **LVM / LUKS / a dedicated `/var`
 partition**, the tool handles those automatically — see
 [docs/filesystem-support.md](docs/filesystem-support.md).
@@ -120,10 +120,9 @@ partition**, the tool handles those automatically — see
 
 ## Interactive wizard (TUI)
 
-Prefer a guided walkthrough over flags? Run the tool with no `--target-image`
-(or `tui` explicitly) to launch a terminal wizard that walks through target
-image selection, options, a plain-English review of what's about to happen,
-and a live phase-by-phase progress view with scrollable logs:
+Prefer a guided walkthrough? Run `bootc-migrate` with no `--target-image`
+or with `tui` to open the terminal wizard. It guides target image selection,
+options, the review, and live phase logs:
 
 ```bash
 sudo bootc-migrate tui
@@ -131,19 +130,19 @@ sudo bootc-migrate tui
 
 ![bootc-migrate TUI wizard](docs/images/tui-review.png)
 
-The image picker fetches the latest CI-published catalog, then falls back to a
-cached or bundled JSON snapshot if offline. It lists published Bluefin,
-Universal Blue, TunaOS, and Zirconium images; Utah appears as coming soon until
-its registry tag is published. The selected image reference and backend are
-shown before you continue. OSTree targets use `bootc-rebase` (which must be
-installed alongside `bootc-migrate`); ComposeFS targets use the normal migrate
-path. Returning from ComposeFS to OSTree is not yet supported.
+The image picker fetches the latest CI-published catalog, then uses a cached
+or bundled JSON snapshot if offline. It lists published Bluefin, Universal
+Blue, TunaOS, and Zirconium images. Utah stays marked as coming soon until its
+registry tag appears. You see the selected image reference and backend before
+you continue. OSTree targets use `bootc-rebase`, which you must install
+alongside `bootc-migrate`; ComposeFS targets use the normal migrate path. The
+tool does not support a return from ComposeFS to OSTree.
 
 The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
 to choose an image, and press Space on the options page to change a setting.
-For a live run, turn off dry-run there. The final review requires typing
-`CONFIRM` and Enter before anything changes. Root is needed to run a migration,
-though you can browse the catalog without it.
+For a live run, turn off dry-run there. The final review needs `CONFIRM` and
+Enter before anything changes. You need root for a migration, but you can
+browse the catalog without it.
 
 ## Architecture
 
@@ -205,11 +204,11 @@ flowchart TB
     class RUN,NVRAM run;
 ```
 
-**Key insight:** Phase 3 runs `bootc internals cfs oci seal` which prints the
+**Key insight:** Phase 3 runs `bootc internals cfs oci seal` and prints the
 sealed manifest's config digest. Phases 4 and 5 pass that **sealed config
-digest** (not the rootfs verity) to `bootc cfs oci mount` — the overlay then
-exposes real file content for `/etc`, kernel, initrd, systemd-boot, and kernel
-modules, eliminating the need to re-stream OCI layers at runtime.
+digest** (not rootfs verity) to `bootc cfs oci mount`. The overlay exposes
+`/etc`, kernel, initrd, systemd-boot, and kernel modules without another OCI
+layer stream.
 
 ## What it does
 
@@ -217,24 +216,23 @@ Six phases (numbered 0–5 to match the console output), run as one command:
 
 - **Phase 0 — Preflight** — free-space, reflink/CoW, UEFI, NVRAM-writable, ESP
   capacity.
-- **Phase 1 — OSTree import** *(optional)* — reflinks existing OSTree file
-  objects into the composefs object store so the pull in Phase 2 is mostly
-  dedup. Skipped with `--skip-import`.
+- **Phase 1 — OSTree import** *(optional)* — reflinks OSTree file objects into
+  the composefs store. This reduces duplicate data in Phase 2. Skip it with
+  `--skip-import`.
 - **Phase 2 — OCI pull** — `bootc internals cfs oci pull` of the target bootc
   image into the composefs store.
-- **Phase 3 — EROFS seal** — builds and seals the EROFS image, capturing the
-  sealed config digest that Phases 4 and 5 mount.
-- **Phase 4 — Stage deploy** — 3-way `/etc` merge (read from the sealed mount,
-  no registry streaming), identity-DB line-union, dangling `/usr/*` symlink
-  pruning, `/home` ↔ `/var/home` compatibility for native-home targets, `/var`
-  preservation (copy or in-place dedicated subvolume), and `.origin`
-  (boot_digest, manifest_digest) written via tini.
-- **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed mount
-  to the ESP (no registry streaming), verifies that the target kernel resolves
-  the current wireless devices, writes BLS entries (including a durable
-  stateroot mount argument for a dedicated `/var`), and registers `Linux Boot
-  Manager` in UEFI NVRAM. The original GRUB entry is left as a rollback escape
-  hatch.
+- **Phase 3 — EROFS seal** — builds and seals the EROFS image. It saves the
+  sealed config digest for Phases 4 and 5.
+- **Phase 4 — Stage deploy** — merges `/etc` and unions identity
+  database lines. It reads from the sealed mount and removes broken
+  `/usr/*` symlinks. It keeps `/home` ↔ `/var/home` compatibility and
+  preserves `/var`. `.origin` stores `boot_digest` and `manifest_digest`;
+  `tini` writes it.
+- **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed
+  mount to the ESP. It verifies that the target kernel resolves current
+  wireless devices. It writes BLS entries and adds a stateroot mount argument
+  for dedicated `/var`. It registers `Linux Boot Manager` in UEFI NVRAM. The
+  original GRUB entry stays as a rollback escape hatch.
 
 After a successful reboot into the composefs entry, `bootc-migrate
 commit` removes the OSTree fallback and makes composefs permanent.
