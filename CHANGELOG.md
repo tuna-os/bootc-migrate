@@ -44,12 +44,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   target image's size, running package managers and SELinux. It prints a
   reason for each refusal, then the hardware report.
 - Package-host software report (#377): `bootc-rebase scan` and package-host
-  `--dry-run` compare rpm, dpkg or pacman package databases with the target
-  image, classify packages the image lacks, and suggest Flatpak, Homebrew,
+  `--dry-run` compare rpm, dpkg or pacman package databases with target image.
+  They classify packages absent from image. They suggest Flatpak, Homebrew,
   toolbox/distrobox or derived-image replacements. The report also records
-  third-party repositories, enabled services absent from the image, and
-  DKMS/akmods packages. Non-dry package-host invocations persist JSON and
-  Markdown copies under `/var/lib/bootc-rebase`.
+  third-party repositories, enabled services absent from image, and DKMS/akmods
+  packages. Non-dry commands write the report to JSON and Markdown files under
+  `/var/lib/bootc-rebase`.
 - `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
   database, no ostree or composefs state) as `Backend::Package` and plans
   the `package -> ostree` route (`PackageInstall`, not implemented yet).

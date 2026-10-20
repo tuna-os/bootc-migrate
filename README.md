@@ -717,8 +717,8 @@ than treating missing evidence as an empty image.
 
 A non-dry package-host invocation writes the machine-readable report and its
 Markdown twin to `/var/lib/bootc-rebase/software-report.json` and
-`/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report
-without changing the host.
+`/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report.
+They make no host changes.
 
 ## Roadmap
 

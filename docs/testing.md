@@ -2,8 +2,8 @@
 
 How this project stays trustworthy: what runs where, what gates what, and
 what is automated so humans don't have to remember it. Companion to
-ROADMAP.md (what we're building) and docs/cfs-cli-generations.md (the
-evidence-gathering method this strategy grew out of).
+ROADMAP.md (the build plan) and docs/cfs-cli-generations.md (the evidence
+method for this strategy).
 
 ## The pyramid
 
@@ -60,7 +60,7 @@ nothing whenever it declines to act, so silence is indistinguishable from
 success and an unasserted cell would pass vacuously.
 
 **There is still no matrix cell using it** (#187), but the blocker is now
-identified and it is *not* what this file previously claimed.
+identified and it is *not* what this file claimed before.
 
 The diagnostic below produced its first real output on 2026-08-28:
 
@@ -70,8 +70,8 @@ could not reach registry ghcr.io
  ; http: unexpected status from http://ghcr.io/v2/: 301)
 ```
 
-ghcr.io **is** reachable from the guest. The `http` attempt got ghcr.io's
-redirect to HTTPS; the `https` attempt got a `401` challenge, parsed it, and
+ghcr.io **is** reachable from the guest. The `http` request got ghcr.io's
+redirect to HTTPS; the `https` request got a `401` challenge, parsed it, and
 requested a token — and that token request returned **403**. So `curl` is
 present, DNS resolves, TLS works, and `/v2/` round-trips. What fails is
 specifically `fetch_bearer_token`.
