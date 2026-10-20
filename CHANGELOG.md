@@ -25,10 +25,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
-- Secure Boot / UEFI CA preflight (#386): the existing registry scan inspects
-  target `systemd-boot` and bootupd shim payloads, compares their
-  Authenticode issuers with the firmware's `db` CA generations, and refuses a
-  known mismatch before the migration can mutate the ESP or boot order.
+- Secure Boot / UEFI CA preflight (#386): the preflight checks the target
+  `systemd-boot` and bootupd shim payloads. It compares their Authenticode
+  issuers with the firmware's `db` CA generations. It refuses known mismatches
+  before migration changes the ESP or boot order.
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
