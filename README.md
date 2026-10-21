@@ -598,20 +598,23 @@ Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
-A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It installs Bluefin
-into a disk image, runs the migration against a registry mirror of the
-Dakota target image, reboots, and validates the full round-trip.
+A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It either installs an
+OSTree/ComposeFS base image with bootc or, for `E2E_MODE=package-install`,
+boots an official Fedora Cloud or Ubuntu Cloud disk prepared by
+`tests/package-base.sh`, runs the package → OSTree migration, reboots, and
+validates the target plus its `Previous system` entry.
 
 ```
 sudo ./tests/run-e2e.sh
 ```
 
 Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
-`FILESYSTEM`, `SKIP_SETUP`, `E2E_MODE`.
+`FILESYSTEM`, `E2E_MODE`, `E2E_PACKAGE_BASE`, and
+`E2E_PACKAGE_CROSS_FAMILY`.
 
-The full matrix has seventeen cells (see `.github/e2e-scenarios.yml`, which is
-authoritative). It runs nightly; each PR and push to `main` runs a
-round-robin slice of the gating cells (see `docs/testing.md`):
+The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs
+nightly; each PR and push to `main` runs a round-robin slice of the gating
+cells (see [docs/testing.md](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -630,6 +633,9 @@ round-robin slice of the gating cells (see `docs/testing.md`):
 | composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
 | tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |
+| package install (exploratory) | Fedora Cloud → fedora-bootc:43 | btrfs | 40G |
+| package install (exploratory) | Fedora Workstation → Bluefin | btrfs + separate /boot | 60G |
+| package install (exploratory) | Ubuntu Cloud → fedora-bootc:43 (cross-family) | ext4 | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place.
@@ -674,7 +680,7 @@ cargo build --release -p bootc-rebase
 | `commit [--apply] [--yes] [--force]` | After a composefs → ostree re-base has booted, remove the composefs state it kept as rollback (#315). **Dry run by default**: checks that the system booted the OSTree deployment the install report names, that the ESP snapshot and a shim/GRUB firmware entry exist, and that every path of the old `/var` is present in the live `/var`. It then lists every path it would delete, with sizes. `--apply` deletes after a typed confirmation. First it copies the install report and ESP snapshot into the live `/var/lib/bootc-rebase`. Then it removes the old `/var`, the composefs store and the composefs deployments. It never touches the OSTree repo, `/boot`, the ESP or NVRAM. `--force` accepts failed checks. It never accepts a composefs boot or a filesystem mounted inside a path to delete. | Unit-tested against a fixture physical root. The non-gating composefs → ostree cell runs the dry run, then `--apply`, then reboots and checks system health |
 | `de-migrate stash\|restore` | Move a user's desktop-environment config (GNOME dconf/gnome-shell, KDE kdeglobals/plasma, COSMIC, niri, XFCE) into or out of a stash directory around a cross-DE re-base — union of paths per issue [#68](https://github.com/tuna-os/bootc-migrate/issues/68), never deletes. `--run-hooks` executes `pre-switch.d`/`post-switch.d` scripts with `REBASE_FROM_DE`/`REBASE_TO_DE`/`REBASE_STASH_DIR`/`REBASE_HOME` set. `--dry-run` previews without touching anything. | Done. Also runs automatically inside `rebase --de-migrate`; this subcommand remains the manual escape hatch for images shipping several desktops (which detection refuses to guess between) |
 | `rebase --de-migrate` | Detects the desktop environment the target image ships (registry-streamed session files, session binaries, and display-manager default session — no `podman pull`) and the one this host runs. When they differ, stashes every human account's outgoing DE config before staging and re-exposes any stash a previous re-base in the other direction left behind, running the `pre-switch.d`/`post-switch.d` hooks around each. | Done, unit-tested; **off by default** — a re-base never touches per-user desktop state unless asked to. The non-gating Bluefin→Aurora E2E cell passes `--de-migrate`, seeds GNOME config, and asserts that the cross-DE plan and stash are created. Because target desktop detection uses the registry scan, this evidence depends on that exploratory cell completing successfully ([#68](https://github.com/tuna-os/bootc-migrate/issues/68), [#188](https://github.com/tuna-os/bootc-migrate/issues/188)) |
-| `migrate-bootloader --to systemd-boot` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Not implemented** — the subcommand exists and always refuses; only the pure BLS-entry/kernel-arg/entry-token logic it will use has landed. Live ESP populate + NVRAM cutover + the kernel-install resync hook (without which a flipped system would silently boot stale kernels) are deliberately deferred pending explicit sign-off and a dedicated E2E cell — see [#65](https://github.com/tuna-os/bootc-migrate/issues/65) for the full implementation plan |
+| `migrate-bootloader --to systemd-boot [--promote\|--undo]` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Implemented** — stages every existing deployment on the ESP, installs systemd-boot, creates a one-boot `BootNext` trial without changing `BootOrder`, and installs a `kernel-install` resync hook. `--promote` requires that the running system booted from the trial before making it persistent; `--undo` restores the prior firmware order and removes only the migration-owned files. The `bootloader-trial` QEMU cell covers the OVMF BootOrder swap, reboot, resync, promotion, and undo path. |
 
 `rebase`'s routing table (`crates/bootc-migrate-core/src/rebase_plan.rs` is the single
 source of truth the CLI consults before touching anything):

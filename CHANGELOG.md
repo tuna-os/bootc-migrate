@@ -25,6 +25,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Package-based base-image E2E coverage (#380): `package-install` boots
+  checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
+  through cloud-init, creates package/home/desktop fixtures, runs the package
+  → OSTree migration, and verifies the target plus the `Previous system`
+  round-trip. The new matrix cells are exploratory until the package route is
+  complete and its first Fedora Cloud run is green.
 
 - TUI route selection on composefs hosts (#312). On an ostree host the
   wizard flow is unchanged (the conversion route); on a composefs host the
@@ -36,6 +42,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   this binary or on `PATH`, and surfaces the source-build hint when missing.
 - The Utah testing image is offered on composefs hosts with an honest
   maturity note ("pre-alpha; E2E status unknown", docs/support-matrix.md).
+- Standalone `migrate-bootloader` now stages a systemd-boot kernel/BLS
+  generation as a one-boot `BootNext` trial while preserving GRUB, with
+  guarded `--promote` and `--undo` actions and a `kernel-install` ESP resync
+  hook. Both `bootc-migrate` and `bootc-rebase` route through the same live
+  controller, and the QEMU E2E matrix covers the OVMF trial, resync,
+  promotion, and undo path (#382).
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the

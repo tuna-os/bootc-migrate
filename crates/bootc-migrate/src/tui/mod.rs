@@ -514,6 +514,15 @@ impl App {
         }
     }
 
+    // A scan is evidence only for the image it actually inspected. Keep this
+    // gate at both navigation and execution so stale UI state cannot run.
+    fn route_ready(&self) -> bool {
+        !self.composefs_host()
+            || (self.scan_image == self.selected_image()
+                && matches!(self.scan, ScanState::Done(_))
+                && self.viable_backends().contains(&self.target_backend))
+    }
+
     fn start_scan(&mut self) {
         let image = self.selected_image();
         if image == self.scan_image && matches!(self.scan, ScanState::Done(_) | ScanState::Running)
@@ -895,7 +904,7 @@ impl App {
             }
             Screen::SelectImage => Screen::ConfigureOptions,
             // The route is decided only once the scan has answered.
-            Screen::SelectRoute if matches!(self.scan, ScanState::NotRun | ScanState::Running) => {
+            Screen::SelectRoute if !self.route_ready() => {
                 Screen::SelectRoute
             }
             Screen::SelectRoute => {
@@ -904,7 +913,7 @@ impl App {
             }
             Screen::ConfigureOptions => Screen::Review,
             // Nothing to run: the review screen shows the install hint.
-            Screen::Review if self.engine_missing() => Screen::Review,
+            Screen::Review if self.engine_missing() || !self.route_ready() => Screen::Review,
             Screen::Review => {
                 self.start_migration();
                 Screen::Running
@@ -1226,7 +1235,7 @@ impl App {
             self.show_quit_dialog = true;
             return false;
         }
-        if self.engine_missing() {
+        if self.engine_missing() || !self.route_ready() {
             return false;
         }
         if !self.opt_dry_run {

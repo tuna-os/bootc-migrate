@@ -197,7 +197,19 @@ pub fn render_select_route(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
     lines.push(Line::raw(""));
 
-    if matches!(app.scan, ScanState::Done(_) | ScanState::Failed(_)) {
+    if matches!(app.scan, ScanState::Done(_) | ScanState::Failed(_)) && !app.route_ready() {
+        lines.push(Line::from(Span::styled(
+            "  Cannot continue: no verified route for this target. Go back to choose another image.",
+            Style::default().fg(AMBER),
+        )));
+        if matches!(app.scan, ScanState::Failed(_)) {
+            lines.push(Line::from(Span::styled(
+                "  Target capabilities unknown. Press r to retry the scan.",
+                Style::default().fg(MUTED),
+            )));
+        }
+    }
+    if app.route_ready() {
         let viable = app.viable_backends();
         let backend_value = if viable.len() > 1 {
             // A real choice: the target is dual-capable.
@@ -532,6 +544,52 @@ mod tests {
     }
 
     #[test]
+    fn unverified_routes_cannot_advance_or_execute() {
+        for (scan, stale, selected) in [
+            (ScanState::NotRun, false, Backend::Composefs),
+            (ScanState::Running, false, Backend::Composefs),
+            (
+                ScanState::Failed("offline".into()),
+                false,
+                Backend::Composefs,
+            ),
+            (
+                ScanState::Done(Box::new(caps(false, false, false))),
+                false,
+                Backend::Composefs,
+            ),
+            (
+                ScanState::Done(Box::new(caps(true, true, true))),
+                true,
+                Backend::Composefs,
+            ),
+            (
+                ScanState::Done(Box::new(caps(true, false, false))),
+                false,
+                Backend::Ostree,
+            ),
+        ] {
+            let mut app = composefs_app(dual_capable);
+            app.scan = scan;
+            app.scan_image = if stale {
+                "different-image".into()
+            } else {
+                app.selected_image()
+            };
+            app.target_backend = selected;
+            for screen in [Screen::SelectRoute, Screen::Review] {
+                app.screen = screen;
+                app.next_screen();
+                assert_eq!(app.screen, screen);
+                assert!(
+                    app.rx.is_none(),
+                    "unverified route must not launch a migration"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn single_capable_target_shows_a_fixed_line() {
         let mut app = composefs_app(composefs_only);
         key(&mut app, KeyCode::Enter);
@@ -564,10 +622,40 @@ mod tests {
         let text = draw(&mut app);
         assert!(text.contains("registry unreachable"), "{text}");
         assert!(text.contains("capabilities unknown"), "{text}");
+        for next in [KeyCode::Enter, KeyCode::Char('n')] {
+            key(&mut app, next);
+            assert_eq!(app.screen, Screen::SelectRoute);
+            assert!(app.rx.is_none(), "failed scans must not launch a migration");
+        }
         app.scanner = dual_capable;
         key(&mut app, KeyCode::Char('r'));
         finish_scan(&mut app);
         assert_eq!(app.viable_backends().len(), 2);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.screen, Screen::ConfigureOptions);
+    }
+
+    #[test]
+    fn reselecting_image_discards_the_old_pending_scan() {
+        let mut app = composefs_app(dual_capable);
+        let (old_tx, old_rx) = mpsc::channel();
+        app.screen = Screen::SelectRoute;
+        app.scan = ScanState::Running;
+        app.scan_image = app.selected_image();
+        app.scan_rx = Some(old_rx);
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.screen, Screen::SelectImage);
+        app.image_list_state.select(Some(app.image_choices.len() - 1));
+        app.custom_image = "ghcr.io/example/new-target:latest".into();
+        app.scanner = composefs_only;
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.screen, Screen::SelectRoute);
+        assert!(old_tx.send(Ok(caps(false, true, true))).is_err());
+        finish_scan(&mut app);
+        assert_eq!(app.scan_image, app.selected_image());
+        assert_eq!(app.viable_backends(), vec![Backend::Composefs]);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.screen, Screen::ConfigureOptions);
     }
 
     #[test]
