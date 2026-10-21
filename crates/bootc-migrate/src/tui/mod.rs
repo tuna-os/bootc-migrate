@@ -904,9 +904,7 @@ impl App {
             }
             Screen::SelectImage => Screen::ConfigureOptions,
             // The route is decided only once the scan has answered.
-            Screen::SelectRoute if !self.route_ready() => {
-                Screen::SelectRoute
-            }
+            Screen::SelectRoute if !self.route_ready() => Screen::SelectRoute,
             Screen::SelectRoute => {
                 self.options_cursor = 0;
                 Screen::ConfigureOptions

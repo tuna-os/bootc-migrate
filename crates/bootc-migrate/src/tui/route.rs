@@ -645,7 +645,8 @@ mod tests {
         app.scan_rx = Some(old_rx);
         key(&mut app, KeyCode::Esc);
         assert_eq!(app.screen, Screen::SelectImage);
-        app.image_list_state.select(Some(app.image_choices.len() - 1));
+        app.image_list_state
+            .select(Some(app.image_choices.len() - 1));
         app.custom_image = "ghcr.io/example/new-target:latest".into();
         app.scanner = composefs_only;
         key(&mut app, KeyCode::Enter);
