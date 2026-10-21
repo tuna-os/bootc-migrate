@@ -1314,7 +1314,10 @@ impl App {
     }
 
     fn live_source_ready(&self) -> bool {
-        matches!(self.booted_backend, Some(Backend::Ostree | Backend::Composefs))
+        matches!(
+            self.booted_backend,
+            Some(Backend::Ostree | Backend::Composefs)
+        )
     }
 
     fn can_review_live_run(&self) -> bool {
