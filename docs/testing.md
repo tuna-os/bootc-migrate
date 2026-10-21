@@ -377,12 +377,16 @@ a variable change, never a workflow edit.
 ### Which cells run when
 
 The scenarios live in `.github/e2e-scenarios.yml`. Cells without
-`allow_failure: true` are gating. Pull requests and pushes to `main` run
-`E2E_ROUND_ROBIN_SIZE` gating cells (repo variable, default 2), starting at
-`(run_number × size) mod <gating cells>`, so consecutive CI runs walk the
-whole gating list. The nightly schedule and `workflow_dispatch` run every
-cell, exploratory ones included. A regression in a cell a PR did not draw
-surfaces on the next runs that draw it, or in the nightly run at the latest.
+`allow_failure: true` are gating. Pull requests and pushes to `main` keep
+`E2E_ROUND_ROBIN_SIZE` baseline cells (default 2). The first cell is
+`(run_number × size) mod <gating cells>`.
+
+TUI source, entry point, drift review, harness, dependency, or selector changes
+also require the existing `tui-migrate` cell. The path list is in
+`scripts/select_e2e.py`. This adds at most one VM; it keeps every baseline cell.
+PRs compare the merge base with the head. Pushes compare `before` with `after`.
+A failed diff stops the plan. Tests run with `just test-ci-selection`.
+The nightly schedule and `workflow_dispatch` run every cell.
 
 ### Timeouts, and why they are what they are
 

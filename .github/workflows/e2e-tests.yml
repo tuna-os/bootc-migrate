@@ -6,8 +6,8 @@ permissions:
 # Pull requests and pushes to main reach this workflow through ci.yml, which
 # calls it (workflow_call) so `required-checks` can depend on the matrix
 # directly instead of a runner sitting in a polling loop for hours. Those
-# calls run a round-robin slice of the gating cells; the nightly schedule and
-# manual dispatch run every cell. See .github/e2e-scenarios.yml.
+# calls keep a round-robin baseline and add the TUI cell for TUI changes.
+# Nightly and manual runs use every cell. See .github/e2e-scenarios.yml.
 on:
   workflow_call: {}
   workflow_dispatch: {}
@@ -41,9 +41,9 @@ concurrency:
 # to skip the whole matrix (required-checks treats a skipped job as a
 # pass). Unset or 'true' both run.
 #
-# E2E_ROUND_ROBIN_SIZE (repo variable, default 2) is how many gating cells a
-# pull request or push runs. The slice starts at (run_number * size) mod the
-# number of gating cells, so consecutive runs walk the whole gating list.
+# E2E_ROUND_ROBIN_SIZE (repo variable, default 2) sets the baseline size.
+# It starts at (run_number * size) mod the gating count. TUI changes add
+# the existing tui-migrate cell if absent: at most one extra VM job.
 jobs:
   plan:
     if: >-
@@ -56,7 +56,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          sparse-checkout: .github/e2e-scenarios.yml
+          # Exact PR/push ranges can span multiple commits.
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/e2e-scenarios.yml
+            scripts/select_e2e.py
           sparse-checkout-cone-mode: false
       - name: Pick scenarios
         id: pick
@@ -66,20 +70,14 @@ jobs:
           SIZE: ${{ vars.E2E_ROUND_ROBIN_SIZE || '2' }}
         run: |
           set -euo pipefail
-          all=$(yq -o=json -I=0 '.' .github/e2e-scenarios.yml)
-          if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_dispatch ]; then
-            picked=$all
-          else
-            picked=$(jq -c --argjson run "$RUN_NUMBER" --argjson size "$SIZE" '
-              [.[] | select(.allow_failure != true)] as $g
-              | ($g | length) as $n
-              | [range(0; [$size, $n] | min)
-                 | $g[(($run * $size) + .) % $n]]' <<<"$all")
-          fi
+          plan=$(yq -o=json -I=0 '.' .github/e2e-scenarios.yml | \
+            python3 scripts/select_e2e.py --event "$EVENT" \
+              --event-path "$GITHUB_EVENT_PATH" --run-number "$RUN_NUMBER" --size "$SIZE")
+          picked=$(jq -c '.scenarios' <<<"$plan")
           echo "scenarios=$picked" >> "$GITHUB_OUTPUT"
           {
             echo "## E2E cells for this run ($EVENT, run $RUN_NUMBER)"
-            jq -r '.[] | "- " + .name' <<<"$picked"
+            jq -r '.reason, (.scenarios[] | "- " + .name)' <<<"$plan"
           } >> "$GITHUB_STEP_SUMMARY"
 
   e2e:

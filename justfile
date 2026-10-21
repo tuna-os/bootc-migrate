@@ -198,7 +198,11 @@ e2e-debug: build
 # === Linting ===
 
 # Run every check CI runs (clippy, rustfmt, unit tests, shellcheck)
-check: clippy fmt-check test test-all-features lint-shell
+check: clippy fmt-check test test-all-features lint-shell test-ci-selection
+
+# Test CI selection and exact Git change ranges without a VM.
+test-ci-selection:
+    python3 -m unittest discover -s tests -p test_select_e2e.py -v
 
 # Unit tests + clippy with every cargo feature enabled (feature-gated code
 # like composefs-native is invisible to the default build — this is its
