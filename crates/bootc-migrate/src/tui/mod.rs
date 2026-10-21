@@ -2082,7 +2082,7 @@ mod tests {
             (Screen::Complete, Some(Backend::Package), true, true, true),
             (Screen::Complete, None, true, true, true),
         ] {
-            let mut app = app_on(screen);
+            let mut app = app_on(screen.clone());
             app.booted_backend = backend;
             app.opt_dry_run = dry_run;
             app.migration_done = done;
