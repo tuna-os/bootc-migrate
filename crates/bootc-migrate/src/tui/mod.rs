@@ -401,6 +401,7 @@ pub struct App {
     rx: Option<mpsc::Receiver<MigMsg>>,
     migration_done: bool,
     migration_success: bool,
+    run_command: Option<Vec<String>>,
 
     // Quit confirmation dialog
     show_quit_dialog: bool,
@@ -463,6 +464,7 @@ impl App {
             rx: None,
             migration_done: false,
             migration_success: false,
+            run_command: None,
             show_quit_dialog: false,
             quit_dialog_yes: false,
             term_height: 40,
@@ -659,6 +661,7 @@ impl App {
     /// through an mpsc channel as [`MigMsg`] values.
     fn start_migration(&mut self) {
         let args = self.build_command_args();
+        self.run_command = Some(args.clone());
         // args[0] is the executable path; args[1..] are the arguments.
         let exe = args[0].clone();
         let rest: Vec<String> = args[1..].to_vec();
@@ -911,7 +914,13 @@ impl App {
             }
             Screen::ConfigureOptions => Screen::Review,
             // Nothing to run: the review screen shows the install hint.
-            Screen::Review if self.engine_missing() || !self.route_ready() => Screen::Review,
+            Screen::Review
+                if self.engine_missing()
+                    || !self.route_ready()
+                    || (!self.opt_dry_run && !self.live_source_ready()) =>
+            {
+                Screen::Review
+            }
             Screen::Review => {
                 self.start_migration();
                 Screen::Running
@@ -1209,6 +1218,7 @@ impl App {
 
     fn toggle_option(&mut self, row: OptRow) {
         match row {
+            OptRow::DryRun if !self.live_source_ready() => {}
             OptRow::DryRun => self.opt_dry_run = !self.opt_dry_run,
             OptRow::SkipImport => self.opt_skip_import = !self.opt_skip_import,
             OptRow::Bootloader => {
@@ -1233,7 +1243,10 @@ impl App {
             self.show_quit_dialog = true;
             return false;
         }
-        if self.engine_missing() || !self.route_ready() {
+        if self.engine_missing()
+            || !self.route_ready()
+            || (!self.opt_dry_run && !self.live_source_ready())
+        {
             return false;
         }
         if !self.opt_dry_run {
@@ -1300,8 +1313,46 @@ impl App {
         false
     }
 
+    fn live_source_ready(&self) -> bool {
+        matches!(self.booted_backend, Some(Backend::Ostree | Backend::Composefs))
+    }
+
+    fn can_review_live_run(&self) -> bool {
+        self.screen == Screen::Complete
+            && self.opt_dry_run
+            && self.migration_done
+            && self.migration_success
+            && self.run_command.as_ref() == Some(&self.build_command_args())
+            && self.live_source_ready()
+    }
+
+    fn review_live_run(&mut self) {
+        if !self.can_review_live_run() {
+            return;
+        }
+        // A successful preview is not approval to modify the system. Retain
+        // the target and options, but require new checks and typed consent.
+        self.opt_dry_run = false;
+        self.opt_skip_preflight = false;
+        self.opt_force = false;
+        self.confirmation.clear();
+        self.rx = None;
+        self.run_command = None;
+        self.migration_done = false;
+        self.migration_success = false;
+        if self.composefs_host() {
+            self.scan = ScanState::NotRun;
+            self.scan_rx = None;
+            self.start_scan();
+            self.screen = Screen::SelectRoute;
+        } else {
+            self.screen = Screen::Review;
+        }
+    }
+
     fn handle_end_key(&mut self, key: KeyCode) -> bool {
         match key {
+            KeyCode::Enter if self.can_review_live_run() => self.review_live_run(),
             KeyCode::Char('q') | KeyCode::Enter | KeyCode::Esc => {
                 return true;
             }
@@ -1442,6 +1493,9 @@ fn render_statusbar(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ("Enter", "Continue (when done)"),
             ("q", "Quit"),
         ],
+        Screen::Complete if app.can_review_live_run() => {
+            &[("Enter", "Review and apply"), ("q / Esc", "Exit")]
+        }
         Screen::Complete | Screen::Failed => &[("q / Enter", "Exit")],
     };
 
@@ -1823,6 +1877,7 @@ mod tests {
     #[test]
     fn option_toggles_and_bootloader_arrows() {
         let mut app = app_on(Screen::ConfigureOptions);
+        app.booted_backend = Some(Backend::Ostree);
         assert!(app.opt_dry_run);
         app.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(!app.opt_dry_run);
@@ -1844,6 +1899,7 @@ mod tests {
     #[test]
     fn live_review_blocks_enter_until_exact_confirmation() {
         let mut app = app_on(Screen::Review);
+        app.booted_backend = Some(Backend::Ostree);
         app.opt_dry_run = false;
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.screen, Screen::Review);
@@ -1979,6 +2035,169 @@ mod tests {
         assert_eq!(app.screen, Screen::Welcome);
         app.prev_screen();
         assert_eq!(app.screen, Screen::Welcome);
+    }
+
+    #[test]
+    fn successful_preview_returns_to_fresh_live_review_in_session() {
+        let mut app = app_on(Screen::Complete);
+        app.booted_backend = Some(Backend::Ostree);
+        app.migration_done = true;
+        app.migration_success = true;
+        app.confirmation = "CONFIRM".into();
+        app.opt_skip_preflight = true;
+        app.opt_force = true;
+        app.run_command = Some(app.build_command_args());
+        let target = app.selected_image();
+        assert!(draw_to_text(&mut app).contains("review and apply"));
+        assert!(!app.handle_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.screen, Screen::Review);
+        assert_eq!(app.selected_image(), target);
+        assert!(!app.opt_dry_run);
+        assert!(!app.opt_skip_preflight);
+        assert!(!app.opt_force);
+        let live_args = app.build_command_args();
+        assert!(!live_args.contains(&"--dry-run".into()));
+        assert!(!live_args.contains(&"--skip-preflight".into()));
+        assert!(!live_args.contains(&"--force".into()));
+        assert!(app.confirmation.is_empty());
+        assert!(!app.migration_done);
+        assert!(!app.migration_success);
+        assert!(app.rx.is_none());
+        // Repeated Enter must never inherit the old confirmation.
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        assert!(app.rx.is_none());
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::ConfigureOptions);
+        assert!(app.confirmation.is_empty());
+    }
+
+    #[test]
+    fn live_review_requires_success_and_a_bootc_source() {
+        for (screen, backend, dry_run, done, success) in [
+            (Screen::Failed, Some(Backend::Ostree), true, true, false),
+            (Screen::Complete, Some(Backend::Ostree), false, true, true),
+            (Screen::Complete, Some(Backend::Ostree), true, false, true),
+            (Screen::Complete, Some(Backend::Ostree), true, true, false),
+            (Screen::Complete, Some(Backend::Package), true, true, true),
+            (Screen::Complete, None, true, true, true),
+        ] {
+            let mut app = app_on(screen);
+            app.booted_backend = backend;
+            app.opt_dry_run = dry_run;
+            app.migration_done = done;
+            app.migration_success = success;
+            app.run_command = Some(app.build_command_args());
+            assert!(!app.can_review_live_run());
+            app.review_live_run();
+            assert_eq!(app.screen, screen);
+            assert_eq!(app.opt_dry_run, dry_run);
+            assert!(app.rx.is_none());
+        }
+    }
+
+    #[test]
+    fn successful_preview_is_bound_to_the_command_that_ran() {
+        let mut app = app_on(Screen::Complete);
+        app.booted_backend = Some(Backend::Ostree);
+        app.migration_done = true;
+        app.migration_success = true;
+        app.run_command = Some(app.build_command_args());
+        assert!(app.can_review_live_run());
+        app.opt_accept_cross_base = !app.opt_accept_cross_base;
+        assert!(!app.can_review_live_run());
+        app.review_live_run();
+        assert!(app.opt_dry_run);
+        assert!(app.rx.is_none());
+    }
+
+    #[test]
+    fn back_and_edit_requires_a_new_confirmation() {
+        for typed in ["CON", "CONFIRM"] {
+            let mut app = app_on(Screen::Review);
+            app.booted_backend = Some(Backend::Ostree);
+            app.opt_dry_run = false;
+            app.confirmation = typed.into();
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            assert!(app.confirmation.is_empty());
+            app.toggle_option(OptRow::AcceptCrossBase);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(app.screen, Screen::Review);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(app.screen, Screen::Review);
+            assert!(app.rx.is_none());
+        }
+    }
+
+    #[test]
+    fn unready_sources_remain_preview_only() {
+        for backend in [None, Some(Backend::Package)] {
+            let mut app = app_on(Screen::ConfigureOptions);
+            app.booted_backend = backend;
+            app.toggle_option(OptRow::DryRun);
+            assert!(app.opt_dry_run);
+            assert!(draw_to_text(&mut app).contains("preview only"));
+            // Force cannot override this UI gate, even with stale consent.
+            app.screen = Screen::Review;
+            app.opt_dry_run = false;
+            app.opt_force = true;
+            app.confirmation = "CONFIRM".into();
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(app.screen, Screen::Review);
+            assert!(app.rx.is_none());
+            app.next_screen();
+            assert_eq!(app.screen, Screen::Review);
+            assert!(app.rx.is_none());
+        }
+    }
+
+    #[test]
+    fn preview_child_result_promotes_without_reusing_confirmation() {
+        let mut app = app_on(Screen::Running);
+        app.booted_backend = Some(Backend::Ostree);
+        app.run_command = Some(app.build_command_args());
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(MigMsg::Line("preview checked".into())).unwrap();
+        tx.send(MigMsg::Done(true)).unwrap();
+        app.drain_migration_channel();
+        assert!(app.migration_done && app.migration_success);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Complete);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        assert!(!app.opt_dry_run);
+        assert!(app.rx.is_none());
+        assert!(app.confirmation.is_empty());
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Review);
+        for c in "CONFIRM".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.confirmation, "CONFIRM");
+        // Stop before Enter: this test must never spawn the real migrator.
+        assert!(app.rx.is_none());
+    }
+
+    #[test]
+    fn composefs_preview_rechecks_target_before_live_review() {
+        let mut app = app_on(Screen::Complete);
+        app.booted_backend = Some(Backend::Composefs);
+        app.migration_done = true;
+        app.migration_success = true;
+        app.scanner = |_| anyhow::bail!("offline during recheck");
+        app.scan_image = app.selected_image();
+        app.confirmation = "CONFIRM".into();
+        app.run_command = Some(app.build_command_args());
+        app.review_live_run();
+        assert_eq!(app.screen, Screen::SelectRoute);
+        assert!(matches!(app.scan, ScanState::Running));
+        assert!(app.scan_rx.is_some());
+        assert!(app.confirmation.is_empty());
+        assert!(!app.route_ready());
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::SelectRoute);
+        assert!(app.rx.is_none());
     }
 
     #[test]
@@ -2172,6 +2391,7 @@ mod tests {
     #[test]
     fn options_screen_shows_dry_run_tag_in_title() {
         let mut app = app_on(Screen::ConfigureOptions);
+        app.booted_backend = Some(Backend::Ostree);
         let text = draw_to_text(&mut app);
         assert!(text.contains("DRY-RUN"), "missing dry-run tag:\n{text}");
         app.opt_dry_run = false;

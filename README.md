@@ -141,8 +141,12 @@ path. Returning from ComposeFS to OSTree is not yet supported.
 
 The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
 to choose an image, and press Space on the options page to change a setting.
-For a live run, turn off dry-run there. The final review requires typing
-`CONFIRM` and Enter before anything changes. Root is needed to run a migration,
+
+After a successful dry-run, press Enter to review and apply in the same
+session. The wizard clears the old confirmation and enables readiness checks
+again. The final review requires typing `CONFIRM` and Enter before anything
+changes. You can also turn off dry-run on the options page.
+Root is needed to run a migration,
 though you can browse the catalog without it.
 
 ## Architecture
