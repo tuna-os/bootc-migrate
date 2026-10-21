@@ -578,7 +578,7 @@ mod tests {
             };
             app.target_backend = selected;
             for screen in [Screen::SelectRoute, Screen::Review] {
-                app.screen = screen;
+                app.screen = screen.clone();
                 app.next_screen();
                 assert_eq!(app.screen, screen);
                 assert!(
