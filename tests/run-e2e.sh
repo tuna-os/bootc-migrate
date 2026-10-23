@@ -41,6 +41,10 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # the ImageSwap route stages the target with the host's own `bootc switch`
 # and the reboot must land in the target's deployment with the base kept
 # as rollback. The matrix pair is dakota -> utah (Fedora Hummingbird).
+# "bootloader-trial" installs the encrypted GRUB2 source path, then runs
+# standalone `migrate-bootloader` through the shared rebase controller. It
+# swaps OVMF BootOrder around the one-boot trial, reboots, exercises the
+# kernel-install resync hook, promotes, undoes, and reboots back to GRUB.
 # "package-install" boots an official cloud image with cloud-init, creates
 # package-managed fixtures, and runs bootc-rebase's package -> OSTree route.
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
@@ -1276,6 +1280,221 @@ if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
     exit 0
 fi
 
+if [ "$E2E_MODE" = "bootloader-trial" ]; then
+    scp $SCP_OPTS target/release/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+    scp $SCP_OPTS target/release/bootc-migrate root@localhost:/var/tmp/bootc-migrate
+    ssh $SSH_OPTS root@localhost '
+        install -m 0755 /var/tmp/bootc-rebase /usr/local/bin/bootc-rebase
+        install -m 0755 /var/tmp/bootc-migrate /usr/local/bin/bootc-migrate
+        test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
+    '
+
+    ORIGINAL_EFIBOOTMGR=$(ssh $SSH_OPTS root@localhost "efibootmgr -v")
+    ORIGINAL_ORDER=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
+        | sed -n 's/^BootOrder: *//p')
+    ORIGINAL_FIRST=$(printf '%s\n' "$ORIGINAL_ORDER" \
+        | sed 's/,.*//')
+    ORIGINAL_FIRST_LINE=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
+        | grep "^Boot${ORIGINAL_FIRST}" | head -1 || true)
+    [ -n "$ORIGINAL_ORDER" ] || { echo "FAIL: no initial BootOrder"; exit 1; }
+    [ -n "$ORIGINAL_FIRST_LINE" ] || {
+        echo "FAIL: initial BootOrder entry $ORIGINAL_FIRST has no firmware record"
+        exit 1
+    }
+    echo "  original BootOrder: $ORIGINAL_ORDER"
+    echo "  original first entry: $ORIGINAL_FIRST_LINE"
+
+    step "=== bootloader-trial: staging the systemd-boot trial through rebase_controller ==="
+    if ! ssh $SSH_OPTS root@localhost \
+        "/usr/local/bin/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
+        > /tmp/bootloader-trial-stage.log 2>&1; then
+        sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
+        echo "FAIL: migrate-bootloader staging failed"
+        exit 1
+    fi
+    sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
+
+    TRIAL_ID=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"boot_id\": \"\\([0-9A-Fa-f]\\{4\\}\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json")
+    ESP_PATH=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"esp_path\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json")
+    ENTRY_TOKEN=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"entry_token\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json")
+    FIRST_KVER=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"kernel_version\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json" \
+        | head -1)
+    FIRST_ENTRY=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"bls_filename\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json" \
+        | head -1)
+    [ -n "$TRIAL_ID" ] && [ -n "$ESP_PATH" ] && [ -n "$ENTRY_TOKEN" ] \
+        && [ -n "$FIRST_KVER" ] && [ -n "$FIRST_ENTRY" ] || {
+        echo "FAIL: migration state did not contain trial identifiers"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost \
+        "efibootmgr -v | grep -F 'Boot${TRIAL_ID}' | grep -F 'bootc-migrate trial'"
+    ssh $SSH_OPTS root@localhost \
+        "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
+         test -f '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux' && \
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+
+    # OVMF does not honor BootNext consistently in this path. Deliberately
+    # make the trial first in BootOrder so the reboot proves the same
+    # firmware selection that real hardware performs after an operator's
+    # trial, while keeping the pre-migration order for --undo.
+    TRIAL_REST=$(printf '%s\n' "$ORIGINAL_ORDER" \
+        | tr ',' '\n' | { grep -vi "^${TRIAL_ID}$" || true; } | paste -sd, -)
+    TRIAL_ORDER="$TRIAL_ID"
+    [ -z "$TRIAL_REST" ] || TRIAL_ORDER="$TRIAL_ORDER,$TRIAL_REST"
+    step "=== bootloader-trial: swapping OVMF BootOrder to the trial ==="
+    ssh $SSH_OPTS root@localhost "efibootmgr --bootorder '$TRIAL_ORDER'"
+    SWAPPED_ORDER=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootOrder: *//p'")
+    [ "${SWAPPED_ORDER%%,*}" = "$TRIAL_ID" ] || {
+        echo "FAIL: OVMF BootOrder did not put trial Boot${TRIAL_ID} first"
+        exit 1
+    }
+
+    step "=== bootloader-trial: rebooting into the trial ==="
+    vm_tail bootloader-trial &
+    TAIL_PID=$!
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "VM accessible via systemd-boot trial after $((SECONDS - WAIT_START))s."
+            kill "$TAIL_PID" 2>/dev/null || true
+            TAIL_PID=""
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for trial SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "FAIL: SSH did not answer after the systemd-boot trial reboot"
+        serial_failure_lines | tail -40 || true
+        exit 1
+    fi
+    CURRENT_TRIAL=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootCurrent: *//p'")
+    [ "$CURRENT_TRIAL" = "$TRIAL_ID" ] || {
+        echo "FAIL: BootCurrent=$CURRENT_TRIAL, expected trial Boot$TRIAL_ID"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost \
+        "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+
+    step "=== bootloader-trial: invoking the kernel-install resync hook ==="
+    ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
+set -euo pipefail
+export PATH=/usr/local/bin:/usr/bin:/bin
+STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
+ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
+TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
+KVER=$(uname -r)
+KERNEL=$(readlink -f "/usr/lib/modules/$KVER/vmlinuz" 2>/dev/null || true)
+if [ -z "$KERNEL" ] || [ ! -f "$KERNEL" ]; then
+    KERNEL=$(find "/usr/lib/modules/$KVER" -maxdepth 1 -type f -name 'vmlinuz*' -print -quit)
+fi
+INITRD=$(find "/usr/lib/modules/$KVER" -maxdepth 1 -type f \
+    -name 'initramfs*' ! -name '*kdump*' -print | sort | head -1)
+[ -f "$KERNEL" ] || { echo "no kernel image for $KVER"; exit 1; }
+[ -f "$INITRD" ] || { echo "no initramfs image for $KVER"; exit 1; }
+NEW_VERSION="${KVER}-e2e-resync"
+cp "$KERNEL" /var/tmp/e2e-resync-vmlinuz
+cp "$INITRD" /var/tmp/e2e-resync-initrd
+/etc/kernel/install.d/95-bootc-migrate-esp-sync.install \
+    add "$NEW_VERSION" "$TOKEN" \
+    /var/tmp/e2e-resync-vmlinuz /var/tmp/e2e-resync-initrd
+test -f "$ESP/$TOKEN/$NEW_VERSION/linux"
+test -f "$ESP/loader/entries/bootc-migrate-$TOKEN-$NEW_VERSION.conf"
+test "$(sed -n 's/^default //p' "$ESP/loader/loader.conf")" \
+    = "bootc-migrate-$TOKEN-$NEW_VERSION"
+echo "resync staged kernel version $NEW_VERSION"
+TRIAL_RESYNC
+
+    step "=== bootloader-trial: promoting the tested trial ==="
+    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --promote
+    PROMOTED_ORDER=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootOrder: *//p'")
+    [ "${PROMOTED_ORDER%%,*}" = "$TRIAL_ID" ] || {
+        echo "FAIL: --promote did not keep trial Boot${TRIAL_ID} first"
+        exit 1
+    }
+    if ssh $SSH_OPTS root@localhost "efibootmgr | grep -q '^BootNext: *${TRIAL_ID}$'"; then
+        echo "FAIL: --promote left BootNext pointing at the trial"
+        exit 1
+    fi
+
+    step "=== bootloader-trial: undoing the promoted migration ==="
+    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --undo
+    RESTORED_ORDER=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootOrder: *//p'")
+    [ "$RESTORED_ORDER" = "$ORIGINAL_ORDER" ] || {
+        echo "FAIL: --undo restored '$RESTORED_ORDER', expected '$ORIGINAL_ORDER'"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost bash <<'TRIAL_UNDO_CHECK'
+set -euo pipefail
+! efibootmgr -v | grep -Fq 'bootc-migrate trial'
+! test -e /var/lib/bootc-migrate/migrate-bootloader-state.json
+! test -e /etc/kernel/install.d/95-bootc-migrate-esp-sync.install
+TRIAL_UNDO_CHECK
+ssh $SSH_OPTS root@localhost \
+    "test ! -e '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
+     test ! -e '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux'"
+
+    step "=== bootloader-trial: rebooting back through restored GRUB ==="
+    vm_tail bootloader-trial-undo &
+    TAIL_PID=$!
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "VM accessible after restored-GRUB reboot ($((SECONDS - WAIT_START))s)."
+            kill "$TAIL_PID" 2>/dev/null || true
+            TAIL_PID=""
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for restored-GRUB SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "FAIL: SSH did not answer after the restored-GRUB reboot"
+        serial_failure_lines | tail -40 || true
+        exit 1
+    fi
+    FINAL_CURRENT=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootCurrent: *//p'")
+    [ "$FINAL_CURRENT" = "$ORIGINAL_FIRST" ] || {
+        echo "FAIL: final BootCurrent=$FINAL_CURRENT, expected GRUB Boot$ORIGINAL_FIRST"
+        exit 1
+    }
+    FINAL_LINE=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr -v | grep '^Boot${FINAL_CURRENT}' | head -1" || true)
+    [ "$FINAL_LINE" = "$ORIGINAL_FIRST_LINE" ] || {
+        echo "FAIL: restored firmware entry differs from the original"
+        echo "  before: $ORIGINAL_FIRST_LINE"
+        echo "  after:  $FINAL_LINE"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg"
+    step "=== bootloader-trial PASSED: trial, resync, promote, undo, GRUB fallback ==="
+    exit 0
+fi
+
 # Full ostree→ostree re-base mode (#63/#64): stage the target as a plain
 # OSTree deployment via Strategy::OstreeDeploy, reboot into it, and assert
 # the image switched while /etc edits and /var data survived (OSTree's
@@ -1533,9 +1752,9 @@ REBASEFIX
         # The apply/undo round trip is what proves the executor and its
         # snapshot restore actually work against real firmware variables.
         #
-        # Scope note: #189 also names #65's live bootloader flip. That is NOT
-        # covered here and cannot be — `migrate-bootloader` currently bails
-        # with "not implemented yet (issue #65)", so there is no flip to test.
+        # Scope note: this cell keeps boot-entry cleanup separate. The
+        # standalone #65/#382 live flip is covered by the dedicated
+        # bootloader-trial cell above, including its OVMF order swap.
         step "=== boot-entries: audit is read-only and machine-readable (#31) ==="
         if ! ssh $SSH_OPTS root@localhost \
             "/var/tmp/bootc-rebase boot-entries --json" > /tmp/be-audit.json 2>/tmp/be-audit.err; then

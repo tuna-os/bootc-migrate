@@ -1111,8 +1111,10 @@ pub(crate) fn get_esp_disk_and_part(esp_path: &str) -> Option<(String, String)> 
 
 // ---- Standalone migrate-bootloader (issue #65) ----
 
-/// Standalone `migrate-bootloader` — convert GRUB→systemd-boot or systemd-boot→GRUB2
-/// without touching the rootfs backend (issue #65).
+/// Standalone `migrate-bootloader` — stage GRUB→systemd-boot without touching
+/// the rootfs backend (issue #65/#382). The systemd-boot path leaves GRUB in
+/// place, arms a one-boot firmware trial, and installs the kernel-install
+/// resync hook; promotion and undo are dispatched by `rebase_controller`.
 ///
 /// * `to` — "systemd-boot" or "grub2"
 /// * `dry_run` — print actions without executing
@@ -1181,8 +1183,9 @@ pub fn migrate_bootloader_standalone(
     }
 }
 
-/// Migrate to systemd-boot: install EFI loader, copy kernel/initrd to ESP,
-/// write BLS entries, register NVRAM entry, keep GRUB fallback.
+/// Migrate to systemd-boot using the live trial path. The existing GRUB
+/// artifacts are deliberately left in place; `bootc-migrate --promote` is the
+/// only operation that changes the persistent firmware priority.
 fn migrate_to_systemd_boot(
     _sys: &SystemInfo,
     deps: &[BootDeployment],
@@ -1190,75 +1193,18 @@ fn migrate_to_systemd_boot(
     from_image: Option<&str>,
 ) -> Result<()> {
     let esp_path = find_esp_or_mount()?;
-    println!("ESP mounted at: {}", esp_path);
+    let esp_path = PathBuf::from(esp_path);
+    println!("ESP mounted at: {}", esp_path.display());
 
-    // 1. Install systemd-boot EFI binary.
-    let esp_path = Path::new(&esp_path);
-    let sd_dir = esp_path.join("EFI/systemd");
-    let removable_dir = esp_path.join("EFI/BOOT");
-
-    if dry_run {
-        println!("[DRY RUN] Would install systemd-bootx64.efi to ESP.");
-    } else {
-        fs::create_dir_all(&sd_dir)?;
-        fs::create_dir_all(&removable_dir)?;
-
-        // Source the systemd-boot binary: from --from-image (registry), or from the
-        // running system's /usr/lib/systemd/boot/efi.
-        let sd_src = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-        if let Some(img) = from_image {
-            println!(
-                "Extracting systemd-boot from image '{}' via registry...",
-                img
-            );
-            let sd_dst = sd_dir.join("systemd-bootx64.efi");
-            crate::registry::extract_files_via_registry(
-                img,
-                &[(
-                    Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi"),
-                    &sd_dst,
-                )],
-            )
-            .context("failed to extract systemd-boot from image")?;
-            fs::copy(&sd_dst, removable_dir.join("BOOTX64.EFI"))?;
-        } else if sd_src.exists() {
-            println!(
-                "Copying systemd-boot from running system: {}",
-                sd_src.display()
-            );
-            fs::copy(sd_src, sd_dir.join("systemd-bootx64.efi"))?;
-            fs::copy(sd_src, removable_dir.join("BOOTX64.EFI"))?;
-        } else {
-            anyhow::bail!(
-                "systemd-boot binary not found in the running system at {}. \
-                 Use --from-image <image> to extract it from a container image.",
-                sd_src.display()
-            );
-        }
-        println!("systemd-boot installed to ESP.");
-    }
-
-    // 2. Derive entry-token (for $BOOT/<token>/<version> layout).
     let machine_id =
         fs::read_to_string("/etc/machine-id").context("failed to read /etc/machine-id")?;
     let entry_token_file = fs::read_to_string("/etc/kernel/entry-token").ok();
     let entry_token =
         bootloader::systemd_boot::derive_entry_token(entry_token_file.as_deref(), &machine_id);
+    bootloader::live::validate_entry_token(&entry_token)?;
 
-    // 3. Read live kernel cmdline for karg carry-over.
     let live_cmdline =
         fs::read_to_string("/proc/cmdline").context("failed to read /proc/cmdline")?;
-
-    // 4. Copy kernel+initrd for each deployment to ESP, write BLS entries.
-    let entries_dir = esp_path.join("loader/entries");
-    let staged_dir = esp_path.join("loader/entries.staged");
-    if !dry_run {
-        fs::create_dir_all(&entries_dir)?;
-    }
-
-    let mut entries: Vec<bootloader::BlsEntry> = Vec::new();
-
-    // Read os-release from the first deployment for naming.
     let os = os_release::read_os_release(&deps[0].root).unwrap_or_else(|_| os_release::OsRelease {
         id: "linux".into(),
         version_id: String::new(),
@@ -1266,8 +1212,8 @@ fn migrate_to_systemd_boot(
         pretty_name: String::new(),
     });
 
-    for (i, dep) in deps.iter().enumerate() {
-        let priority = i as u32;
+    let mut entries = Vec::with_capacity(deps.len());
+    for (index, dep) in deps.iter().enumerate() {
         let kind = if dep.is_composefs {
             "composefs"
         } else {
@@ -1277,86 +1223,75 @@ fn migrate_to_systemd_boot(
             "{} ({}:{})",
             os_release::bls_entry_title(&os, kind),
             dep.checksum.get(..12).unwrap_or(&dep.checksum),
-            priority
+            index
         );
-        let filename = format!(
-            "bootc_{}-{}-{}.conf",
-            os.id.replace('-', "_"),
-            dep.checksum.get(..12).unwrap_or(&dep.checksum),
-            priority
-        );
-        let sort_key = format!("bootc-{}-{}", os.id, priority);
-
-        if dry_run {
-            println!(
-                "[DRY RUN] Would copy kernel {} -> ESP/{}/{}/linux",
-                dep.vmlinuz.display(),
-                entry_token,
-                dep.kver
-            );
-            println!("[DRY RUN] Would write BLS entry: {}", filename);
-            continue;
-        }
-
-        // Copy kernel + initrd to ESP under <entry-token>/<kver>.
-        let esp_kernel_dir = esp_path.join(&entry_token).join(&dep.kver);
-        fs::create_dir_all(&esp_kernel_dir)?;
-        fs::copy(&dep.vmlinuz, esp_kernel_dir.join("linux"))
-            .with_context(|| format!("copying kernel {} to ESP", dep.vmlinuz.display()))?;
-        if dep.initrd.exists() {
-            fs::copy(&dep.initrd, esp_kernel_dir.join("initrd"))
-                .with_context(|| format!("copying initrd {} to ESP", dep.initrd.display()))?;
-        }
-
-        // Carry over kargs, stripping composefs= for OSTree entries.
-        let strip: &[&str] = if dep.is_composefs {
-            &[]
+        let filename = format!("bootc-migrate-{}-{}-{}.conf", entry_token, dep.kver, index);
+        let sort_key = format!("bootc-migrate-{}-{}", os.id, index);
+        let (linux, initrd) = bootloader::systemd_boot::esp_kernel_paths(&entry_token, &dep.kver);
+        let strip = if dep.is_composefs {
+            &[][..]
         } else {
-            &["composefs="]
+            &["composefs="][..]
         };
-        let options = bootloader::systemd_boot::carry_over_kargs(&live_cmdline, strip);
-
-        let entry = bootloader::BlsEntry {
+        entries.push(bootloader::BlsEntry {
             title,
             version: dep.kver.clone(),
-            linux: format!("/{}/{}/linux", entry_token, dep.kver),
-            initrds: vec![format!("/{}/{}/initrd", entry_token, dep.kver)],
-            options,
-            filename: filename.clone(),
+            linux,
+            initrds: vec![initrd],
+            options: bootloader::systemd_boot::carry_over_kargs(&live_cmdline, strip),
+            filename,
             sort_key,
-        };
-        entries.push(entry);
+        });
     }
 
-    if !dry_run && !entries.is_empty() {
-        // Write entries atomically via staged directory.
-        fs::create_dir_all(&staged_dir)?;
-        for entry in &entries {
-            fs::write(staged_dir.join(&entry.filename), entry.render())
-                .with_context(|| format!("writing staged BLS entry: {}", entry.filename))?;
-            fs::rename(
-                staged_dir.join(&entry.filename),
-                entries_dir.join(&entry.filename),
-            )
-            .with_context(|| format!("promoting BLS entry: {}", entry.filename))?;
+    if dry_run {
+        println!("[DRY RUN] Would install systemd-boot to the ESP.");
+        for (dep, entry) in deps.iter().zip(&entries) {
+            println!(
+                "[DRY RUN] Would copy {} and {} for kernel {} to the ESP.",
+                dep.vmlinuz.display(),
+                dep.initrd.display(),
+                dep.kver
+            );
+            println!("[DRY RUN] Would write BLS entry {}.", entry.filename);
         }
-
-        // Write loader.conf: default to first entry, 3s timeout.
-        let default_id = entries[0].filename.trim_end_matches(".conf");
-        let loader_conf = format!("default {}\ntimeout 3\nconsole-mode keep\n", default_id);
-        fs::write(esp_path.join("loader/loader.conf"), loader_conf)
-            .context("failed to write loader.conf")?;
-
-        // Register NVRAM entry.
-        register_systemd_boot_nvram(esp_path.to_str().unwrap_or("/boot/efi"));
-
         println!(
-            "{} BLS entr{} written to ESP. GRUB retained as fallback.",
-            entries.len(),
-            if entries.len() == 1 { "y" } else { "ies" }
+            "[DRY RUN] Would install {} and create a one-boot BootNext trial; \
+             BootOrder would remain unchanged.",
+            bootloader::live::RESYNC_HOOK_PATH
         );
+        return Ok(());
     }
 
+    let artifacts = deps
+        .iter()
+        .zip(&entries)
+        .map(|(dep, entry)| bootloader::live::ArtifactInput {
+            kernel_version: &dep.kver,
+            vmlinuz: &dep.vmlinuz,
+            initrd: dep.initrd.exists().then_some(dep.initrd.as_path()),
+            entry,
+        })
+        .collect::<Vec<_>>();
+    let loader_conf = format!(
+        "default {}\ntimeout 3\nconsole-mode keep\n",
+        entries[0].filename.trim_end_matches(".conf")
+    );
+    bootloader::live::stage_artifacts(
+        Path::new(bootloader::live::STATE_PATH),
+        &esp_path,
+        &entry_token,
+        &entries[0].title,
+        !deps[0].is_composefs,
+        &artifacts,
+        &loader_conf,
+        from_image,
+    )?;
+    println!(
+        "{} BLS entr{} written to the ESP. GRUB remains available as the fallback.",
+        entries.len(),
+        if entries.len() == 1 { "y" } else { "ies" }
+    );
     Ok(())
 }
 

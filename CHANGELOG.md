@@ -32,6 +32,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
 
+- Standalone `migrate-bootloader` now stages a systemd-boot kernel/BLS
+  generation as a one-boot `BootNext` trial while preserving GRUB, with
+  guarded `--promote` and `--undo` actions and a `kernel-install` ESP resync
+  hook. Both `bootc-migrate` and `bootc-rebase` route through the same live
+  controller, and the QEMU E2E matrix covers the OVMF trial, resync,
+  promotion, and undo path (#382).
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the

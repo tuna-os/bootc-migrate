@@ -38,6 +38,7 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin LTS → dakota (ext4) | legacy fast path, ext4 fs-verity | active |
 | bluefin LTS → dakota (xfs+LUKS) | loopback store, passphrase injection | active |
 | bluefin LTS → dakota (xfs+LVM+LUKS, split /var) | worst-case storage stack | active |
+| bluefin LTS → dakota (xfs+LUKS, `bootloader-trial`) | GRUB2 source → systemd-boot one-boot trial, OVMF `BootOrder` swap, kernel-install ESP resync, guarded promotion and undo | added for #382; pending first green run |
 | bluefin stable → bluefin gts (ostree-rebase mode) | OstreeDeploy strategy + rollback presence | PR #69/#70 |
 | bluefin stable → aurora (ostree-rebase mode) | cross-DE native `/etc` merge probe (#80) | active, non-gating |
 | bluefin stable → dakota (tui-migrate mode) | TUI wizard + Config Drift Review event loops on a pty (`tests/tui-e2e-driver.py`), then the full composefs pipeline + all default-mode assertions | active, gating |
@@ -260,15 +261,17 @@ This is the first cell to mutate real UEFI NVRAM (#189). Until it existed,
 #31's `efibootmgr` executor had only unit tests of the *plan*; the write path
 and the snapshot-restore path had never run against real firmware variables.
 
-**Scope limit:** #189 also names #65's live bootloader flip. That is *not*
-covered and cannot be — `migrate-bootloader` currently bails with "not
-implemented yet (issue #65)", so there is no flip to exercise.
+The separate `bootloader-trial` cell covers #65/#382. It installs the
+standalone systemd-boot path on a GRUB2 Bluefin guest, saves and swaps
+`BootOrder` because OVMF does not honor `BootNext`, reboots through the trial,
+calls the installed `kernel-install` resync hook for a second kernel version,
+then exercises `--promote` and `--undo`. The final assertion requires the
+original firmware order, GRUB fallback, migration-owned ESP files and hook to
+be restored.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
 - **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`), active as the non-gating cell above
-- **M2**: ostree-rebase cell + `--bootloader systemd-boot` + simulated
-  kernel update asserting ESP resync; `--undo` restores GRUB
 - **M3**: the cross-base cell above covers centos-family → fedora-family.
   The exit criterion names the *other* direction (fedora → centos), which
   needs a CentOS-family target image the harness does not currently install;

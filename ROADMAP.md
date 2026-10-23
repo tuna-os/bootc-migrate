@@ -108,7 +108,7 @@ validation named in that issue's own scope never shipped.
 
 | Path | State | Validation gap | Tracking |
 |---|---|---|---|
-| `migrate-bootloader` live GRUB2→sd-boot | `run` refuses "not implemented"; PR #115 open | no cell installs a GRUB2 guest and flips it | #65, #189 |
+| `migrate-bootloader` live GRUB2→sd-boot | implemented: stages ESP kernels/BLS entries, leaves GRUB as fallback, arms a one-boot `BootNext` trial, and supports guarded `--promote`, `--undo`, plus a `kernel-install` resync hook | the gating `bootloader-trial` cell swaps OVMF `BootOrder` around the trial reboot and asserts resync, promotion, and undo | #65, #189, #382 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
 | Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is now covered — #191 shipped (2026-08-28) and the OSTree re-base cell asserts the re-base refuses without `--accept-cross-base`; the remap and `/etc` reconciliation walks still never execute, because every matrix pair is same-lineage Fedora | #67, #187 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
@@ -150,25 +150,28 @@ closed.
 backend-pair routes; ostree→ostree proven by its own E2E cell; scan output
 drives route refusal with evidence.
 
-### M2 — Bootloader migration (scenario B) — **skeleton landed, live mutation deferred**
+### M2 — Bootloader migration (scenario B) — **implemented; live cell added**
 
 [#65](https://github.com/tuna-os/bootc-migrate/issues/65) — the
 pure core (BLS entry assembly, kernel-arg carry-over, entry-token derivation)
-merged and is unit-tested; `bootc-rebase migrate-bootloader` exists as a CLI
-shape but its `run` always refuses with "not implemented."
+and the standalone live path are implemented in both CLI frontends. The live
+path copies every existing deployment to the ESP, writes BLS entries, keeps
+GRUB as a fallback, installs a `kernel-install` drop-in, and arms a one-boot
+`BootNext` trial without changing the persistent `BootOrder`.
 
-**Why stopped here**: the remaining work — ESP populate, NVRAM cutover via
-`efibootmgr` with a `BootNext` one-boot trial before `BootOrder` promotion,
-and the kernel-install resync hook (without which a flipped system silently
-boots stale kernels after the next update) — is boot-critical and currently
-unvalidatable: no E2E cell exercises it yet, and this isn't something a
-compile+unit-test loop can prove correct. A full implementation plan (ESP
-layout, NVRAM sequencing, resync-hook mechanism, phase-5 interplay, E2E cell
-design) is posted on the issue for whoever picks it up with real
-E2E-iteration budget and explicit sign-off on the risk.
+`--promote` refuses unless `BootCurrent` identifies the trial entry, then
+makes that entry persistent. `--undo` restores the saved firmware order and
+`BootNext`, removes the migration-owned NVRAM entry and ESP files, and restores
+any pre-existing loader configuration and hook.
 
-**Exit criteria (not yet met)**: a GRUB2 bluefin VM re-bases, boots via
-sd-boot, survives a kernel update, and `--undo` restores GRUB cleanly.
+The `bootloader-trial` QEMU cell deliberately swaps the saved `BootOrder` to
+the trial entry because OVMF does not honor `BootNext` in this scenario. It
+reboots through systemd-boot, invokes the installed kernel-install resync hook
+with a second kernel version, promotes the trial, then undoes it and verifies
+the original order and GRUB fallback.
+
+**Exit criteria**: a GRUB2 Bluefin VM stages, trials, resyncs, promotes, and
+undoes the systemd-boot path in the dedicated QEMU cell.
 
 ### M3 — Cross-base re-base (scenario C) — **both parts landed, neither exercised by CI**
 
@@ -380,7 +383,7 @@ recovery, hooks). Version and deprecation policy published.
 ```mermaid
 graph TD
   M0["M0 MVP hardening — done"] --> M1["M1 same-backend engine — done"]
-  M1 --> M2["M2 #65 migrate-bootloader — skeleton done, live mutation deferred"]
+  M1 --> M2["M2 #65 migrate-bootloader — live trial, resync, promote/undo landed"]
   M1 --> M3P1["M3 #67 pt1 remap — done, wired into OstreeDeploy"]
   M3P1 --> M3P2["M3 #67 pt2 /etc conflict policy — landed post-switch, no cross-base E2E cell"]
   M1 --> GAP80["#80 identity-DB merge gap — confirmed, tracked separately"]
