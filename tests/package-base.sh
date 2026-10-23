@@ -23,12 +23,14 @@ UBUNTU_CLOUD_NAME="ubuntu-24.04-server-cloudimg-amd64.img"
 
 case "$PACKAGE_BASE" in
     fedora-cloud|fedora-workstation)
+        NETWORK_MANAGER_PACKAGE=NetworkManager
         SOURCE_URL="${E2E_PACKAGE_BASE_URL:-$FEDORA_CLOUD_URL}"
         SOURCE_SHA256="${E2E_PACKAGE_BASE_SHA256:-$FEDORA_CLOUD_SHA256}"
         SOURCE_NAME="${SOURCE_URL##*/}"
         [ -n "$SOURCE_NAME" ] || SOURCE_NAME="$FEDORA_CLOUD_NAME"
         ;;
     ubuntu-cloud)
+        NETWORK_MANAGER_PACKAGE=network-manager
         SOURCE_URL="${E2E_PACKAGE_BASE_URL:-$UBUNTU_CLOUD_URL}"
         SOURCE_SHA256="${E2E_PACKAGE_BASE_SHA256:-$UBUNTU_CLOUD_SHA256}"
         SOURCE_NAME="${SOURCE_URL##*/}"
@@ -112,7 +114,7 @@ write_files:
 packages:
   - openssh-server
   - podman
-  - NetworkManager
+  - $NETWORK_MANAGER_PACKAGE
 runcmd:
   - [bash, -c, 'systemctl disable --now sshd.service || systemctl disable --now ssh.service || true']
   - [bash, -c, 'systemctl enable --now e2e-sshd.socket']

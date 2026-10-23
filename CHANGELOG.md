@@ -149,6 +149,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   remapped owner, target default and `.rebase-old` sidecar before and after
   reboot (#187).
 
+- The `migrate-bootloader` resync hook and `--undo` find the ESP again
+  when the recorded mount is gone. When the image does not mount its ESP,
+  staging mounts it privately under `/run`, and that mount does not survive
+  the trial reboot. After the reboot, a kernel update wrote the new kernel
+  into an empty tmpfs directory instead of the ESP, and `--undo` deleted
+  nothing from the ESP.
+
 - `migrate-bootloader` and the bootloader setup step pick the kernel
   directory under `usr/lib/modules` that has a `vmlinuz`. They used to take
   the first directory that `read_dir` returned. `bluefin:lts` keeps the

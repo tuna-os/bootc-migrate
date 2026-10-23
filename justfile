@@ -198,7 +198,7 @@ e2e-debug: build
 # === Linting ===
 
 # Run every check CI runs (clippy, rustfmt, unit tests, shellcheck)
-check: clippy fmt-check test test-all-features lint-shell test-ci-selection
+check: clippy fmt-check test test-all-features lint-shell test-harness test-ci-selection
 
 # Test CI selection and exact Git change ranges without a VM.
 test-ci-selection:
@@ -369,3 +369,7 @@ clean-build:
 # Commit with conventional commit format
 commit msg:
     git add -A && git commit -m "{{msg}}" && git push
+
+# Regression checks for E2E seed data and executable staging (no VM required).
+test-harness:
+    python3 -m unittest discover -s tests -p 'test_harness_regressions.py' -v
