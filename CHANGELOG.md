@@ -132,6 +132,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- `migrate-bootloader` and the bootloader setup step pick the kernel
+  directory under `usr/lib/modules` that has a `vmlinuz`. They used to take
+  the first directory that `read_dir` returned. `bluefin:lts` keeps the
+  module directory of an older kernel next to the kernel that boots, so the
+  trial could stop with `No bootable deployments found`, and the OSTree
+  fallback entry could have no kernel.
+
 - The `migrate-bootloader` resync hook now runs its own copy of the binary,
   stored under `/var/lib/bootc-migrate/bin`, by absolute path. It used to run
   `bootc-migrate` from `PATH`. On Bluefin LTS, `/usr/local` is part of the
