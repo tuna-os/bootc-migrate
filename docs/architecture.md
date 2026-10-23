@@ -261,9 +261,9 @@ sshd -i exits before even offering public key authentication.
 
 Enable every host-key generator as a member of `sshd-keygen.target`. Keep
 `e2e-sshd.socket` free to start with `sockets.target`; make each
-`e2e-sshd@.service` wait for that target before starting `sshd -i`. This
-prevents the first connection from racing key generation without creating an
-ordering cycle during boot:
+`e2e-sshd@.service` wait for that target before it starts `sshd -i`. This
+makes the first connection wait for key creation. It also avoids a unit-order
+cycle during boot:
 ```bash
 mkdir -p /etc/systemd/system/sshd-keygen.target.wants
 for key in rsa ecdsa ed25519; do
@@ -273,8 +273,8 @@ done
 ```
 Put `Wants=sshd-keygen.target` and `After=sshd-keygen.target` on the
 per-connection service, not the socket. Socket units start before
-`sockets.target`, and making one wait on the keygen target can cycle through
-`basic.target`.
+`sockets.target`. If a socket waits for the keygen target, systemd can create a
+cycle through `basic.target`.
 
 ### Fix 2: Serial console auto-login
 
