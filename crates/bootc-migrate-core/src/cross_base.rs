@@ -423,11 +423,17 @@ const LIVE_ETC: &str = "/etc";
 /// pass running afterwards could mistake one of those ids for a stale
 /// source id and renumber it a second time.
 ///
+/// This step plans the policy, prints the report and writes its JSON twin.
+/// [`EtcPolicy::apply`] rewrites the files, and the caller runs it after the
+/// staged deployment is finalized: libostree's finalization merges the live
+/// `/etc` into the deployment again, which puts back every locally modified
+/// value that a rewrite before it had replaced.
+///
 /// Degrades to a warning rather than an error when one of the three trees
 /// is missing: the re-base is already staged and sound by this point, and
 /// the only consequence of skipping is that the local value stays in place
 /// — exactly the pre-#67 behavior.
-pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
+pub fn plan_cross_base_etc_policy(staged_root: &Path) -> Result<Option<EtcPolicy>> {
     let booted_root = booted_deployment_root()
         .context("failed to locate the booted deployment for the cross-base /etc policy")?;
     let source_defaults = etc_conflict::vendor_etc_dir(&booted_root);
@@ -448,7 +454,7 @@ pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
                  local value.",
                 dir.display()
             );
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -466,17 +472,41 @@ pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
         )
     })?;
 
-    let rewritten =
-        etc_conflict::apply_etc_conflict_plan(&staged_etc, current, &target_defaults, &plan)
-            .context("failed to apply the cross-base /etc conflict policy")?;
-    if rewritten > 0 {
-        println!(
-            "Cross-base /etc policy applied: {rewritten} path(s) under {} now hold the \
-             target image's default; the displaced value is beside each one.",
-            staged_etc.display()
-        );
+    Ok(Some(EtcPolicy {
+        staged_etc,
+        target_defaults,
+        plan,
+    }))
+}
+
+/// A planned cross-base `/etc` rewrite; see [`plan_cross_base_etc_policy`].
+#[derive(Debug)]
+pub struct EtcPolicy {
+    staged_etc: PathBuf,
+    target_defaults: PathBuf,
+    plan: etc_conflict::EtcConflictPlan,
+}
+
+impl EtcPolicy {
+    /// Write the target default and the `.rebase-old` sidecar for each
+    /// planned path. Run it after the staged deployment is finalized.
+    pub fn apply(&self) -> Result<()> {
+        let rewritten = etc_conflict::apply_etc_conflict_plan(
+            &self.staged_etc,
+            Path::new(LIVE_ETC),
+            &self.target_defaults,
+            &self.plan,
+        )
+        .context("failed to apply the cross-base /etc conflict policy")?;
+        if rewritten > 0 {
+            println!(
+                "Cross-base /etc policy applied: {rewritten} path(s) under {} now hold the \
+                 target image's default; the displaced value is beside each one.",
+                self.staged_etc.display()
+            );
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
