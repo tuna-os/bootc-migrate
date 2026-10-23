@@ -1398,6 +1398,15 @@ TRIAL_DISCOVERY_DIAGNOSTICS
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
          test -f '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux' && \
          test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+    # The hook must run its own copy of the binary by absolute path: the
+    # staging directory is not on PATH and /usr/local is read-only here.
+    ssh $SSH_OPTS root@localhost \
+        "grep -qF \"exec '/var/lib/bootc-migrate/bin/bootc-rebase' migrate-bootloader --resync\" \
+             /etc/kernel/install.d/95-bootc-migrate-esp-sync.install && \
+         test -x /var/lib/bootc-migrate/bin/bootc-rebase" || {
+        echo "FAIL: the resync hook does not run /var/lib/bootc-migrate/bin/bootc-rebase"
+        exit 1
+    }
 
     # OVMF does not honor BootNext consistently in this path. Deliberately
     # make the trial first in BootOrder so the reboot proves the same
@@ -1454,7 +1463,8 @@ TRIAL_DISCOVERY_DIAGNOSTICS
     step "=== bootloader-trial: invoking the kernel-install resync hook ==="
     ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
 set -euo pipefail
-export PATH=/usr/local/bin:/usr/bin:/bin
+# No bootc-rebase on PATH: the hook has to find its own copy.
+export PATH=/usr/bin:/bin
 STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
 ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
 TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
@@ -1506,6 +1516,7 @@ set -euo pipefail
 ! efibootmgr -v | grep -Fq 'bootc-migrate trial'
 ! test -e /var/lib/bootc-migrate/migrate-bootloader-state.json
 ! test -e /etc/kernel/install.d/95-bootc-migrate-esp-sync.install
+! test -e /var/lib/bootc-migrate/bin
 TRIAL_UNDO_CHECK
 ssh $SSH_OPTS root@localhost \
     "test ! -e '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
