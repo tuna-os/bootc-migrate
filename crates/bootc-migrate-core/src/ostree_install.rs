@@ -53,6 +53,7 @@ use crate::preflight;
 use crate::rebase_controller::validate_target_image;
 use crate::registry;
 use crate::scan;
+use crate::sysroot::{SYSROOT, SysrootWritable};
 use crate::xattr;
 
 pub(crate) mod esp_resident;
@@ -597,6 +598,13 @@ impl OstreeInstallConfig<'_> {
             );
         }
 
+        // Everything from here writes under /sysroot (the stateroot /var, the
+        // install, the /etc merge), which is read-only by its mount flag on a
+        // composefs host. Hold it writable until the run ends; preflight no
+        // longer leaves it writable by accident (#419).
+        let _sysroot = SysrootWritable::acquire(SYSROOT)
+            .context("cannot write the OSTree deployment under /sysroot")?;
+
         // A previous failed attempt may have removed the stateroot /var while
         // the repo layout survives; `bootc install` reuses extant layouts
         // verbatim and fails opening it. The install expects it empty — the
@@ -617,9 +625,6 @@ impl OstreeInstallConfig<'_> {
             )
         );
         println!("[deploy] streaming `bootc install` output below (OSTree import takes minutes)…");
-        let _ = Command::new("mount")
-            .args(["-o", "remount,rw", PHYSICAL_ROOT])
-            .status();
         let _boot_binds = bind_boot_into_physical_root(&esp)?;
         let argv = install_command(self.target_image, &carry_over_kargs(&cmdline));
         println!("[deploy] {}", argv.join(" "));

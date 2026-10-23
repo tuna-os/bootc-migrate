@@ -89,12 +89,27 @@ fn enumerate_deployments_from(
     Ok(deployments)
 }
 
-fn find_kver_in_modules(modules_dir: &Path) -> Option<String> {
-    fs::read_dir(modules_dir)
+/// Pick the kernel version directory under `usr/lib/modules`.
+///
+/// An image can keep a module directory without a kernel, for example
+/// `bluefin:lts` keeps the directory of an older kernel next to the one that
+/// boots. The last directory by name that has a `vmlinuz` is used. If no
+/// directory has a `vmlinuz`, the last directory by name is used. The
+/// `read_dir` order does not change the result.
+pub(super) fn find_kver_in_modules(modules_dir: &Path) -> Option<String> {
+    let mut kvers: Vec<(bool, String)> = fs::read_dir(modules_dir)
         .ok()?
         .filter_map(|entry| entry.ok())
-        .find(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            (
+                entry.path().join("vmlinuz").is_file(),
+                entry.file_name().to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    kvers.sort();
+    kvers.pop().map(|(_, kver)| kver)
 }
 
 #[cfg(test)]
@@ -132,5 +147,47 @@ mod tests {
         assert_eq!(deployments[1].checksum, "0123456789abcdef");
         assert_eq!(deployments[1].kver, "6.16.0");
         assert!(deployments[1].is_composefs);
+    }
+
+    #[test]
+    fn kernel_dir_with_vmlinuz_wins_over_a_module_only_dir() {
+        let temp = tempdir().unwrap();
+        let modules = temp.path().join("usr/lib/modules");
+        // bluefin:lts keeps an older kernel's module directory without a vmlinuz.
+        fs::create_dir_all(modules.join("6.12.0-225.el10.x86_64/kernel")).unwrap();
+        let booting = modules.join("6.12.0-233.el10.x86_64");
+        fs::create_dir_all(&booting).unwrap();
+        fs::write(booting.join("vmlinuz"), "kernel").unwrap();
+        // A newer module-only directory must not win either.
+        fs::create_dir_all(modules.join("6.99.0")).unwrap();
+
+        assert_eq!(
+            find_kver_in_modules(&modules).as_deref(),
+            Some("6.12.0-233.el10.x86_64")
+        );
+
+        let ostree = temp.path().join("ostree");
+        let deploy_modules = ostree.join("abc.0/usr/lib/modules");
+        fs::create_dir_all(deploy_modules.join("6.12.0-225.el10.x86_64")).unwrap();
+        fs::create_dir_all(deploy_modules.join("6.12.0-233.el10.x86_64")).unwrap();
+        fs::write(
+            deploy_modules.join("6.12.0-233.el10.x86_64/vmlinuz"),
+            "kernel",
+        )
+        .unwrap();
+        let deployments = enumerate_deployments_from(&ostree, &temp.path().join("none")).unwrap();
+        assert_eq!(deployments.len(), 1);
+        assert_eq!(deployments[0].kver, "6.12.0-233.el10.x86_64");
+    }
+
+    #[test]
+    fn newest_kernel_dir_is_used_when_none_has_vmlinuz() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("6.15.0")).unwrap();
+        fs::create_dir_all(temp.path().join("6.16.0")).unwrap();
+        fs::write(temp.path().join("not-a-dir"), "").unwrap();
+
+        assert_eq!(find_kver_in_modules(temp.path()).as_deref(), Some("6.16.0"));
+        assert_eq!(find_kver_in_modules(&temp.path().join("missing")), None);
     }
 }
