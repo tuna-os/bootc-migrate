@@ -48,6 +48,37 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 | bluefin stable → bootcrew/debian-bootc (`E2E_CROSS_FAMILY=1`) | cross-family migration to Debian (apt package family, `/etc/apt`, `/etc/dpkg`) | active, non-gating |
 | bluefin stable → bootcrew/ubuntu-bootc (`E2E_CROSS_FAMILY=1`) | cross-family migration to Ubuntu (`ID_LIKE=debian`) | active, non-gating |
 | bluefin stable → bootcrew/arch-bootc (`E2E_CROSS_FAMILY=1`) | cross-family migration to Arch Linux (pacman package family, no `ID_LIKE`) | active, non-gating |
+| Fedora Cloud → `fedora-bootc:43` (`package-install`) | official Fedora Cloud btrfs image → package host → OSTree target, `/home` + `/var` fixtures and Previous system | exploratory (#380) |
+| Fedora Workstation → Bluefin (`package-install`) | Fedora Workstation package layout with separate `/boot`, GNOME/GDM, desktop state and Flatpak fixtures | exploratory (#380) |
+| Ubuntu Cloud → `fedora-bootc:43` (`package-install`) | official Ubuntu ext4/dpkg cloud image, `--accept-cross-base`, and cross-family `/etc` policy | exploratory (#380) |
+
+### Package-based base images (`E2E_MODE=package-install`)
+
+The package cells do not run `bootc install to-disk`. `tests/package-base.sh`
+downloads the pinned official cloud image, verifies its SHA-256, converts it
+to `disk.raw`, grows the root filesystem, and attaches a `cloud-localds` seed.
+The seed installs the root SSH key and the harness socket before the live
+fixture step. `fedora-workstation` starts from the Fedora Cloud image, installs
+the Workstation environment with `dnf`, and creates a separate ext4 `/boot`
+partition so the bootloader layout is not accidentally tested only on a
+single btrfs root.
+
+Select the source with `E2E_PACKAGE_BASE=fedora-cloud`,
+`fedora-workstation`, or `ubuntu-cloud`. The Ubuntu cell additionally sets
+`E2E_PACKAGE_CROSS_FAMILY=1`, which adds `--accept-cross-base` to the
+package → OSTree command. The matrix skips the base-image `podman pull` for
+these cells but still pulls the target image used by the migration.
+
+Each package cell creates and checks a real human password and SSH key, a
+`/home` marker, modified package-manager configuration plus an unpackaged
+`/etc` file, a NetworkManager profile, a rootless Podman image, a system and
+user Flatpak fixture, and the package-only `cowsay` CLI. After the target
+reboot it checks the target `bootc status`, health, software report, target
+vendor `/etc` precedence, and then selects the generated `Previous system`
+entry, verifies the old distribution and data, and returns to the target.
+The three rows remain exploratory until the package route (#373–#379) is
+implemented and the first run is green; promote the Fedora Cloud row to a
+gating cell at that point.
 
 ### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
 

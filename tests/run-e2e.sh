@@ -28,20 +28,32 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # lands (#64). "tui-migrate" is the composefs pipeline with the human at
 # the controls simulated: the interactive Config Drift Review checklist
 # (#15) and then the whole migration are driven through the TUI wizard by
-# tests/tui-e2e-driver.py on the VM, and every downstream assertion of
-# the default mode runs unchanged — this is the cell that proves the
+# tests/tui-e2e-driver.py on the VM, and every downstream assertion of the
+# default mode runs unchanged — this is the cell that proves the
 # terminal event loops CI could previously only compile (ROADMAP M5).
 # "composefs-to-ostree" (#260) installs the BASE image composefs-native,
 # then runs bootc-rebase --target-backend ostree: the target's own bootc
 # builds an OSTree deployment beside the composefs root (`bootc install
-# to-existing-root`), /etc and /var are carried over, the composefs entry
-# is kept as rollback, and the reboot must land in the OSTree deployment.
+# to-existing-root`), /etc and /var are carried over, the composefs entry is
+# kept as rollback, and the reboot must land in the OSTree deployment.
 # "image-swap" installs the BASE image composefs-native and runs bootc-rebase
 # --target-backend composefs against a different composefs-capable image:
 # the ImageSwap route stages the target with the host's own `bootc switch`
 # and the reboot must land in the target's deployment with the base kept
 # as rollback. The matrix pair is dakota -> utah (Fedora Hummingbird).
+# "package-install" boots an official cloud image with cloud-init, creates
+# package-managed fixtures, and runs bootc-rebase's package -> OSTree route.
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
+E2E_PACKAGE_BASE="${E2E_PACKAGE_BASE:-}"
+E2E_PACKAGE_CROSS_FAMILY="${E2E_PACKAGE_CROSS_FAMILY:-0}"
+IS_PACKAGE_INSTALL=false
+if [ "$E2E_MODE" = "package-install" ]; then
+    IS_PACKAGE_INSTALL=true
+    case "$E2E_PACKAGE_BASE" in
+        fedora-cloud|fedora-workstation|ubuntu-cloud) ;;
+        *) echo "ERROR: E2E_PACKAGE_BASE must be fedora-cloud, fedora-workstation, or ubuntu-cloud"; exit 1 ;;
+    esac
+fi
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
 # patching, skipping host-side SSH injection); the lvm variant additionally
@@ -228,6 +240,145 @@ heartbeat() {
             "$(date +%H:%M:%S)" "$label" "$((SECONDS - started))"
     done
 }
+# Package-install cells use an official cloud image instead of bootc
+# to-disk. The cloud-init seed installs the same root SSH socket used by the
+# other cells, so the package assertions can exercise the real VM lifecycle.
+wait_for_package_ssh() {
+    local label="$1"
+    local max="${2:-240}"
+    local start=$SECONDS
+    local attempt=1
+
+    while [ $((SECONDS - start)) -le "$max" ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "$label after $((SECONDS - start))s."
+            return 0
+        fi
+        if [ $((attempt % 10)) -eq 0 ]; then
+            step "still waiting for $label ($((SECONDS - start))s elapsed, max ${max}s)"
+        fi
+        sleep 3
+        attempt=$((attempt + 1))
+    done
+    echo "ERROR: $label timeout ($((SECONDS - start))s)" >&2
+    serial_failure_lines | tail -80 || true
+    tail -100 qemu.log || true
+    return 1
+}
+
+assert_package_install() {
+    step "=== package-install: target status and package fixtures ==="
+    STATUS_OUT=$(ssh $SSH_OPTS root@localhost "bootc status")
+    echo "$STATUS_OUT" | sed 's/^/  /'
+    BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" \
+        | jq -r '.status.booted.image.image.image // empty')
+    [ -n "$BOOTED_IMG" ] || { echo "FAIL: package target has no booted image"; exit 1; }
+    echo "  booted image: $BOOTED_IMG"
+    echo "$BOOTED_IMG" | grep -qF "$TARGET_REPO_TAG" || {
+        echo "FAIL: booted image is '$BOOTED_IMG', expected $VM_TARGET_IMAGE"; exit 1; }
+    BOOTED_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"
+        exit 1
+    fi
+
+    # The package route must emit its route and software inventory before the
+    # reboot. This guards against a successful no-op that merely leaves the
+    # cloud image running.
+    grep -Eiq 'package[[:space:]]*(->|install)|PackageInstall' /tmp/e2e-migrate.log || {
+        echo "FAIL: migration output did not identify the package-install route"; exit 1; }
+    SOFTWARE_REPORT=$(ssh $SSH_OPTS root@localhost \
+        "for report in /var/lib/bootc-rebase/software-report.json /var/lib/bootc-rebase/software-report.md; do [ -f \"\$report\" ] && { printf '%s' \"\$report\"; break; }; done")
+    [ -n "$SOFTWARE_REPORT" ] || { echo "FAIL: software report was not written"; exit 1; }
+    ssh $SSH_OPTS root@localhost "grep -qi 'cowsay' '$SOFTWARE_REPORT'" || {
+        echo "FAIL: software report does not list the package-only cowsay CLI"; exit 1; }
+
+    HOME_MARKER=$(ssh $SSH_OPTS root@localhost \
+        "for p in /var/home/realuser/home-package-marker /home/realuser/home-package-marker; do [ -f \"\$p\" ] && { cat \"\$p\"; break; }; done")
+    [ "$HOME_MARKER" = "package-home-data" ] || {
+        echo "FAIL: /home fixture was not carried to /var/home (got: $HOME_MARKER)"; exit 1; }
+    VAR_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/rebase-test/marker.txt 2>/dev/null || true")
+    [ "$VAR_MARKER" = "var-rebase-value" ] || { echo "FAIL: /var fixture was not carried"; exit 1; }
+    REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || true")
+    [ -n "$REALUSER" ] || { echo "FAIL: realuser was not carried"; exit 1; }
+    PASS_STATE=$(ssh $SSH_OPTS root@localhost "passwd -S realuser | awk '{print \$2}'")
+    case "$PASS_STATE" in
+        P|PS) ;;
+        *) echo "FAIL: realuser password is not usable (passwd state: $PASS_STATE)"; exit 1 ;;
+    esac
+    USER_HOME=$(ssh $SSH_OPTS root@localhost "getent passwd realuser | cut -d: -f6")
+    USER_UID=$(ssh $SSH_OPTS root@localhost "id -u realuser")
+    ssh $SSH_OPTS root@localhost \
+        "grep -qF \"$(cat ./test_key.pub)\" '$USER_HOME/.ssh/authorized_keys'" || {
+        echo "FAIL: realuser SSH key was not carried"; exit 1; }
+
+    ssh $SSH_OPTS root@localhost "test -f /etc/e2e-package/unpackaged.conf" || {
+        echo "FAIL: unpackaged /etc fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /etc/NetworkManager/system-connections/e2e-package.nmconnection" || {
+        echo "FAIL: NetworkManager connection fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /var/lib/flatpak/app/com.example.SystemApp/current/active/metadata" || {
+        echo "FAIL: system Flatpak fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /var/home/realuser/.local/share/flatpak/app/org.gnome.Calculator/current/active/metadata" || {
+        echo "FAIL: user Flatpak fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "install -d -m700 -o realuser -g realuser /run/user/$USER_UID && runuser -u realuser -- env HOME='$USER_HOME' XDG_RUNTIME_DIR=/run/user/$USER_UID podman image exists docker.io/library/alpine:3.22" || {
+        echo "FAIL: rootless Podman image fixture was not carried"; exit 1; }
+
+    # The target vendor file wins, while the source edit remains auditable in
+    # a sidecar. The exact vendor path differs between dnf and apt sources.
+    TARGET_MANAGER_CONFIG=$(ssh $SSH_OPTS root@localhost \
+        "if [ -f /etc/dnf/dnf.conf ]; then cat /etc/dnf/dnf.conf; elif [ -f /etc/apt/apt.conf.d/99-e2e-package ]; then cat /etc/apt/apt.conf.d/99-e2e-package; fi")
+    if echo "$TARGET_MANAGER_CONFIG" | grep -q 'e2e-package-manager-edit'; then
+        echo "FAIL: target vendor package-manager config was overwritten by the source edit"
+        exit 1
+    fi
+    PACKAGE_SIDECAR=$(ssh $SSH_OPTS root@localhost \
+        "find /etc -type f \\( -name 'dnf.conf.rebase-old' -o -name 'dnf.conf.rebase-new' -o -name '99-e2e-package.rebase-old' -o -name '99-e2e-package.rebase-new' \\) -print -quit")
+    [ -n "$PACKAGE_SIDECAR" ] || { echo "FAIL: source package-manager edit has no /etc sidecar"; exit 1; }
+    ssh $SSH_OPTS root@localhost "grep -q 'e2e-package-manager-edit' '$PACKAGE_SIDECAR'" || {
+        echo "FAIL: package-manager sidecar does not contain the source edit"; exit 1; }
+    ssh $SSH_OPTS root@localhost "test -f /etc/nsswitch.conf" || {
+        echo "FAIL: target nsswitch.conf is missing"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /etc/pam.d/system-auth || test -f /etc/pam.d/common-auth" || {
+        echo "FAIL: target PAM configuration is missing"; exit 1; }
+
+    assert_system_healthy "package-install target"
+
+    step "=== package-install: booting Previous system with fixtures ==="
+    PREVIOUS_ENTRY=$(ssh $SSH_OPTS root@localhost \
+        "grep -il 'previous system' /boot/loader/entries/*.conf /boot/efi/loader/entries/*.conf /efi/loader/entries/*.conf 2>/dev/null | head -1")
+    [ -n "$PREVIOUS_ENTRY" ] || { echo "FAIL: no 'Previous system' boot entry was generated"; exit 1; }
+    PREVIOUS_ID=$(basename "$PREVIOUS_ENTRY" .conf)
+    ssh $SSH_OPTS root@localhost \
+        "if command -v bootctl >/dev/null 2>&1 && bootctl set-oneshot '$PREVIOUS_ID' 2>/dev/null; then :; elif command -v grub2-reboot >/dev/null 2>&1; then grub2-reboot '$PREVIOUS_ID'; elif command -v grub-reboot >/dev/null 2>&1; then grub-reboot '$PREVIOUS_ID'; else echo 'no bootloader one-shot selector' >&2; exit 1; fi"
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "Previous system SSH" 240
+    SOURCE_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    case "$E2E_PACKAGE_BASE" in
+        ubuntu-cloud) [ "$SOURCE_ID" = ubuntu ] || {
+            echo "FAIL: Previous system ID is '$SOURCE_ID', expected ubuntu"; exit 1; } ;;
+        *) [ "$SOURCE_ID" = fedora ] || {
+            echo "FAIL: Previous system ID is '$SOURCE_ID', expected fedora"; exit 1; } ;;
+    esac
+    OLD_HOME_MARKER=$(ssh $SSH_OPTS root@localhost \
+        "cat /var/home/realuser/home-package-marker /home/realuser/home-package-marker 2>/dev/null | head -1")
+    [ "$OLD_HOME_MARKER" = "package-home-data" ] || {
+        echo "FAIL: Previous system did not retain the user home fixture"; exit 1; }
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "target return SSH" 240
+    FINAL_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" \
+        | jq -r '.status.booted.image.image.image // empty')
+    echo "$FINAL_IMG" | grep -qF "$TARGET_REPO_TAG" || {
+        echo "FAIL: return boot did not select target image (got: $FINAL_IMG)"; exit 1; }
+    echo "OK: package source, target, fixtures, software report, and Previous system round-trip passed."
+}
+
 
 # Kill any stray QEMU/tail processes from a previous interrupted run so this
 # invocation isn't competing for SSH_PORT or polluting qemu.log with stale tails.
@@ -261,6 +412,7 @@ rm -f "$WORKSPACE_DIR"/disk.raw "$WORKSPACE_DIR"/qemu.log "$WORKSPACE_DIR"/test_
 step "=== E2E Test Configuration ==="
 echo "Base Image (OSTree):   $BASE_IMAGE"
 echo "Target Image (Cfs):    $TARGET_IMAGE"
+echo "Package Base:         ${E2E_PACKAGE_BASE:-n/a}"
 echo "Disk Size:             $DISK_SIZE"
 echo "Workspace:             $WORKSPACE_DIR"
 
@@ -323,6 +475,24 @@ step "=== Generating SSH test key ==="
 rm -f ./test_key ./test_key.pub
 ssh-keygen -t rsa -N "" -f ./test_key
 
+declare -a PACKAGE_QEMU_ARGS=()
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== Preparing official package-managed base image ==="
+    PACKAGE_CLOUD_INIT_ISO="$WORKSPACE_DIR/package-cloud-init.iso"
+    PACKAGE_IMAGE_CACHE="${E2E_PACKAGE_CACHE:-$WORKSPACE_DIR/.e2e-package-images}"
+    PACKAGE_QEMU_ARGS=(
+        -drive "file=$PACKAGE_CLOUD_INIT_ISO,format=raw,if=virtio,readonly=on"
+    )
+    sudo env \
+        E2E_PACKAGE_BASE="$E2E_PACKAGE_BASE" \
+        E2E_PACKAGE_DISK="$WORKSPACE_DIR/disk.raw" \
+        E2E_PACKAGE_SEED="$PACKAGE_CLOUD_INIT_ISO" \
+        E2E_PACKAGE_DISK_SIZE="$DISK_SIZE" \
+        E2E_PACKAGE_CACHE="$PACKAGE_IMAGE_CACHE" \
+        E2E_SSH_PUBLIC_KEY="$(cat ./test_key.pub)" \
+        "$SCRIPT_DIR/package-base.sh"
+    INSTALL_IMAGE=""
+else
 # 4. Prepare bootable image with sshd enabled (some OSTree images like Bluefin disable sshd by default)
 step "=== Preparing bootable image with sshd ==="
 MODIFIED_IMAGE="localhost/e2e-bluefin-ssh:latest"
@@ -405,11 +575,15 @@ echo "Using install image: $INSTALL_IMAGE"
 # harmless deviation on the target image is out of scope for the E2E's sshd
 # setup: post-merge injection (below, mirroring the ostree-rebase path) covers
 # it without touching what the migration actually pulls.
+fi
 
 # 5. Create and initialize disk image (or restore checkpoint)
 # LUKS: checkpoint has plain partition layout, not LUKS — always full setup.
 CHECKPOINT="$WORKSPACE_DIR/disk.raw.pre-migration"
-if [ "$IS_LUKS" = true ]; then
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    echo "Package mode: using cloud-init-prepared disk; skipping bootc install and checkpoint restore"
+    SKIP_SETUP=true
+elif [ "$IS_LUKS" = true ]; then
     echo "LUKS mode: skipping pre-migration checkpoint (needs fresh LUKS setup)"
     SKIP_SETUP=false
 elif [ -f "$CHECKPOINT" ]; then
@@ -495,6 +669,7 @@ cleanup() {
     exec 9>&- 2>/dev/null || true
     rm -f /tmp/e2e-qemu-stdin 2>/dev/null || true
     rm -f ./test_key ./test_key.pub
+    rm -f "${PACKAGE_CLOUD_INIT_ISO:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -710,23 +885,30 @@ else
 fi
 fi
 
-# Force kernel to reread partition table by detaching and re-attaching
-if [ "$IS_LUKS" = true ]; then
-    echo "LUKS mode: skipping loop cycle and SSH injection (root is encrypted)"
-    # LUKS root is inaccessible from host; SSH key was injected by
-    # bootc install to-disk --root-ssh-authorized-keys
-    # Skip injection/fixtures/BLS steps: jump to OVMF setup
-fi
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    echo "Package mode: disk already prepared from a cloud image; skipping loop cycle"
+    LOOP_DEV=""
+else
+    # Force kernel to reread partition table by detaching and re-attaching
+    if [ "$IS_LUKS" = true ]; then
+        echo "LUKS mode: skipping loop cycle and SSH injection (root is encrypted)"
+        # LUKS root is inaccessible from host; SSH key was injected by
+        # bootc install to-disk --root-ssh-authorized-keys
+        # Skip injection/fixtures/BLS steps: jump to OVMF setup
+    fi
 
-if [ "$IS_LUKS" != true ]; then
-    echo "Cycling loop device to refresh partitions..."
+    if [ "$IS_LUKS" != true ]; then
+        echo "Cycling loop device to refresh partitions..."
+    fi
+    sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
+    LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
+    echo "Re-attached loop device: $LOOP_DEV"
 fi
-sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
-LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
-echo "Re-attached loop device: $LOOP_DEV"
 
 # 5. Inject SSH keys and configuration (skip for LUKS — root is encrypted)
-if [ "$IS_LUKS" = true ]; then
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    echo "Package mode: cloud-init supplied SSH credentials and the e2e socket"
+elif [ "$IS_LUKS" = true ]; then
     echo "LUKS mode: SSH key already injected by bootc install, skipping host-side injection"
 else
 step "=== Injecting SSH credentials to disk image ==="
@@ -833,6 +1015,7 @@ fi
 
 MNT_DIR="${MNT_DIR:-/tmp/mnt-e2e-disk}"
 
+if [ "$IS_PACKAGE_INSTALL" != true ]; then
 # Inject console=ttyS0 into BLS entries so the kernel logs to serial (visible
 # in qemu.log). Without this, desktop-flavored images like Bluefin send kernel
 # output only to the graphical console and we have zero visibility post-GRUB.
@@ -882,6 +1065,7 @@ LOOP_DEV=""
 echo "Disk image initialized and customized."
 # Save checkpoint for faster re-runs (skip disk creation + install).
 cp disk.raw "$CHECKPOINT"
+fi
 
 # 6. Launch QEMU VM
 step "=== Booting VM under QEMU ==="
@@ -998,6 +1182,7 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_PATH" \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
     -drive file=disk.raw,format=raw,if=virtio \
+    "${PACKAGE_QEMU_ARGS[@]}" \
     -netdev user,id=n1,hostfwd=tcp::"$SSH_PORT"-:22 \
     -device virtio-net-pci,netdev=n1 \
     ${SWTPM_QEMU_ARGS:-} < "$QEMU_STDIN" > qemu.log 2>&1 &
@@ -1005,7 +1190,11 @@ QEMU_PID=$!
 
 # 7. Wait for SSH to be available
 echo "Waiting for VM to boot and SSH to become available on port $SSH_PORT..."
-MAX_ATTEMPTS=60
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    MAX_ATTEMPTS=120
+else
+    MAX_ATTEMPTS=60
+fi
 ATTEMPT=1
 SSH_OPTS="-i ./test_key -p $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 SCP_OPTS="-i ./test_key -P $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
@@ -1035,6 +1224,24 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     step "=== QEMU logs ==="
     cat qemu.log || true
     exit 1
+fi
+
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== Waiting for package base cloud-init ==="
+    CLOUD_INIT_DONE=false
+    for _ in $(seq 1 120); do
+        CLOUD_INIT_STATUS=$(ssh $SSH_OPTS root@localhost "cloud-init status 2>/dev/null || true")
+        if echo "$CLOUD_INIT_STATUS" | grep -q 'status: done'; then
+            CLOUD_INIT_DONE=true
+            break
+        fi
+        sleep 5
+    done
+    if [ "$CLOUD_INIT_DONE" != true ]; then
+        echo "FAIL: package base cloud-init did not finish"
+        ssh $SSH_OPTS root@localhost "cloud-init status --long; journalctl -u cloud-final --no-pager -n 100" || true
+        exit 1
+    fi
 fi
 
 # 8. The migration pulls the target image directly from its upstream registry
@@ -2297,11 +2504,16 @@ SWAPSSH
     exit 0
 fi
 
-step "=== Copying migration utility to VM ==="
-scp $SCP_OPTS target/debug/bootc-migrate root@localhost:/var/tmp/bootc-migrate
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== Copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+else
+    step "=== Copying migration utility to VM ==="
+    scp $SCP_OPTS target/debug/bootc-migrate root@localhost:/var/tmp/bootc-migrate
+fi
 
 step "=== Injecting /etc fixtures (live, copied by migration) ==="
-ssh $SSH_OPTS root@localhost bash <<'ETCFIX'
+ssh $SSH_OPTS root@localhost "E2E_PACKAGE_BASE='$E2E_PACKAGE_BASE' bash -s" <<'ETCFIX'
 set -e
 # Custom config file in /etc to verify /etc state is preserved through migration
 mkdir -p /etc/migration-test
@@ -2317,6 +2529,18 @@ useradd -m -U realuser 2>/dev/null || true
 mkdir -p /var/home/realuser
 echo "real-home-data" > /var/home/realuser/home-marker.txt
 chown -R realuser:realuser /var/home/realuser
+if [ -n "${E2E_PACKAGE_BASE:-}" ]; then
+    # Package bases must exercise a real password and key-bearing human
+    # account, not only an OSTree-style passwd entry.
+    printf 'realuser:e2e-package-password\n' | chpasswd
+    echo "package-home-data" > /home/realuser/home-package-marker
+    mkdir -p /home/realuser/.ssh
+    cp /root/.ssh/authorized_keys /home/realuser/.ssh/authorized_keys
+    chmod 700 /home/realuser/.ssh
+    chmod 600 /home/realuser/.ssh/authorized_keys
+    chown -R realuser:realuser /home/realuser
+fi
+
 # #309 sabotage canary: a tree with a known owner and an old mtime. The
 # migration records it in the identity manifest; a step after staging
 # breaks it, and the first-boot repair must put it back.
@@ -2413,6 +2637,53 @@ ln -sf current /var/lib/alternatives/default 2>/dev/null || true
 
 mkdir -p /var/cache/.hidden-dir
 echo "hidden-file-content" > /var/cache/.hidden-dir/secret
+if [ -n "${E2E_PACKAGE_BASE:-}" ]; then
+    # A package-manager edit must be classified as source state, while this
+    # unpackaged file and the NetworkManager profile are ordinary /etc state.
+    mkdir -p /etc/e2e-package /etc/NetworkManager/system-connections
+    echo "unpackaged-package-config" > /etc/e2e-package/unpackaged.conf
+    cat > /etc/NetworkManager/system-connections/e2e-package.nmconnection <<'NMEOF'
+[connection]
+id=e2e-package
+type=ethernet
+interface-name=e2e0
+autoconnect=false
+[ipv4]
+method=disabled
+[ipv6]
+method=ignore
+NMEOF
+    chmod 600 /etc/NetworkManager/system-connections/e2e-package.nmconnection
+    if command -v dnf >/dev/null 2>&1; then
+        echo "e2e-package-manager-edit" >> /etc/dnf/dnf.conf
+        dnf -y install cowsay
+    elif command -v apt-get >/dev/null 2>&1; then
+        mkdir -p /etc/apt/apt.conf.d
+        echo '## e2e-package-manager-edit' > /etc/apt/apt.conf.d/99-e2e-package
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y cowsay
+    else
+        echo "FAIL: package base has neither dnf nor apt-get" >&2
+        exit 1
+    fi
+    mkdir -p /var/lib/bootc-migrate
+    printf 'cowsay\n' > /var/lib/bootc-migrate/e2e-package-tool
+
+    # Pull one real image into rootless storage. This proves /var/lib and the
+    # user's rootless container store survive rather than just a marker file.
+    usermod --add-subuids 100000-165535 realuser 2>/dev/null || true
+    usermod --add-subgids 100000-165535 realuser 2>/dev/null || true
+    user_uid=$(id -u realuser)
+    user_home=$(getent passwd realuser | cut -d: -f6)
+    mkdir -p "/run/user/$user_uid"
+    chown realuser:realuser "/run/user/$user_uid"
+    chmod 700 "/run/user/$user_uid"
+    runuser -u realuser -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$user_uid" \
+        podman pull --quiet docker.io/library/alpine:3.22
+    runuser -u realuser -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$user_uid" \
+        podman image exists docker.io/library/alpine:3.22
+fi
+
 ETCFIX
 
 # #256: fixtures that only the cross-family policy can get right. One file
@@ -2420,7 +2691,7 @@ ETCFIX
 # a sidecar) and one only the source's vendor ships (must be dropped, the
 # edit must survive as a sidecar). Both would be kept verbatim by the
 # same-lineage merge — which is the bug.
-if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+if [ "$E2E_CROSS_FAMILY" = "1" ] && [ "$IS_PACKAGE_INSTALL" != true ]; then
     step "=== cross-family: injecting family-specific /etc fixtures (#256) ==="
     ssh $SSH_OPTS root@localhost bash <<'CROSSFIX'
 set -e
@@ -2443,7 +2714,9 @@ seed_ownership_fixture
 capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
-ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
+if [ "$IS_PACKAGE_INSTALL" != true ]; then
+    ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
+fi
 
 # TUI mode: same migration, but a simulated human drives it. Upload the
 # pty driver, prove the interactive Config Drift Review checklist first
@@ -2486,7 +2759,12 @@ fi
 # pty instead (custom image typed in, dry-run off, skip-import + force
 # toggled on — the exact configuration of the CLI invocation), so the
 # `[migrate]` stream carries the driver's screen-by-screen progress.
-if [ "$E2E_MODE" = "tui-migrate" ]; then
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    MIGRATE_CMD="CI=true /var/tmp/bootc-rebase --source-backend package --target-backend ostree --target-image '$VM_TARGET_IMAGE' --force"
+    if [ "$E2E_PACKAGE_CROSS_FAMILY" = "1" ]; then
+        MIGRATE_CMD="$MIGRATE_CMD --accept-cross-base"
+    fi
+elif [ "$E2E_MODE" = "tui-migrate" ]; then
     MIGRATE_CMD="CI=true python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt --record /var/tmp/tui-migrate.cast --snapshot-dir /var/tmp/tui-snapshots"
 else
     MIGRATE_CMD="CI=true /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
@@ -2498,7 +2776,7 @@ fi
 # the pair; when it cannot, it warns and Phase 4 refuses from the pulled
 # image instead (a --dry-run stops before that). Proceeding silently past
 # a scanned cross-family pair is the bug this cell exists to catch.
-if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+if [ "$E2E_CROSS_FAMILY" = "1" ] && [ "$IS_PACKAGE_INSTALL" != true ]; then
     step "=== cross-family: asserting the gate refuses without --accept-cross-base (#256) ==="
     GATE_OUT=$(ssh $SSH_OPTS root@localhost "$MIGRATE_CMD --dry-run" 2>&1 || true)
     if echo "$GATE_OUT" | grep -q "Cross-family re-base detected"; then
@@ -2572,6 +2850,15 @@ fi
 
 if [ "$E2E_MODE" = "tui-migrate" ]; then
     fetch_tui_artifacts
+fi
+
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== package-install: rebooting into the staged target ==="
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "package target SSH" 300
+    assert_package_install
+    exit 0
 fi
 
 # #256: the policy must have RUN, and the staged /etc must show its shape

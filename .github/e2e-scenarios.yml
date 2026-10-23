@@ -310,6 +310,45 @@
   # boot's journal to serial so the stalling unit shows in qemu.log.
   console_journal: true
   allow_failure: true
+- name: Fedora Cloud -> fedora-bootc (package install)
+  # #380: the source is an official Fedora Cloud qcow2, not a bootc image.
+  # The helper grows its btrfs root/home layout and cloud-init provides the
+  # first SSH key before the package -> OSTree migration.
+  base: package/fedora-cloud
+  package_base: fedora-cloud
+  target: quay.io/fedora/fedora-bootc:43
+  mode: package-install
+  filesystem: btrfs
+  disk_size: 40G
+  expect_os_id: fedora
+  # Exploratory until #373-#379 land; promote to gating after the first green
+  # run on main.
+  allow_failure: true
+- name: Fedora Workstation -> Bluefin (package install)
+  # The Workstation cell starts from the same official Fedora Cloud image,
+  # installs the Workstation environment through dnf, and adds a dedicated
+  # ext4 /boot partition before the VM boots.
+  base: package/fedora-workstation
+  package_base: fedora-workstation
+  target: ghcr.io/projectbluefin/bluefin:stable
+  mode: package-install
+  filesystem: btrfs
+  disk_size: 60G
+  expect_os_id: bluefin
+  expect_dm: gdm
+  allow_failure: true
+- name: Ubuntu Cloud -> fedora-bootc (cross-family package install)
+  # Ubuntu's official ext4/dpkg cloud image exercises the explicit
+  # --accept-cross-base package route into Fedora's bootc image.
+  base: package/ubuntu-cloud
+  package_base: ubuntu-cloud
+  package_cross_family: true
+  target: quay.io/fedora/fedora-bootc:43
+  mode: package-install
+  filesystem: ext4
+  disk_size: 40G
+  expect_os_id: fedora
+  allow_failure: true
 # fedora-bootc self-migration is the simpler sanity case; revisit once
 # the bluefin scenario is green end-to-end.
 # - name: fedora-bootc self-migration

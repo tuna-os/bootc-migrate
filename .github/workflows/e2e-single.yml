@@ -18,6 +18,12 @@ on:
         description: Target image the migration/re-base moves to
         required: false
         default: ghcr.io/projectbluefin/dakota:stable
+      package_base:
+        description: >-
+          Official cloud image source for package-install mode
+          (fedora-cloud, fedora-workstation, or ubuntu-cloud).
+        required: false
+        default: ""
       filesystem:
         description: Root filesystem layout
         required: false
@@ -33,7 +39,7 @@ on:
         required: false
         default: composefs-migrate
         type: choice
-        options: [composefs-migrate, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree, image-swap]
+        options: [composefs-migrate, package-install, ostree-rebase-plan, ostree-rebase, tui-migrate, composefs-to-ostree, image-swap]
       cross_base:
         description: >-
           Pass --accept-cross-base and assert the cross-base remap report is
@@ -47,6 +53,11 @@ on:
           Cross-family pair (#256, composefs-migrate mode only): assert the
           gate refuses without --accept-cross-base, opt in, and check the
           cross-family /etc policy before and after the reboot.
+        required: false
+        default: false
+        type: boolean
+      package_cross_family:
+        description: Add --accept-cross-base for the Ubuntu cloud -> Fedora package cell
         required: false
         default: false
         type: boolean
@@ -168,7 +179,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             qemu-system-x86 qemu-utils ovmf podman jq iproute2 \
-            netcat-openbsd cryptsetup lvm2 xfsprogs dosfstools swtpm swtpm-tools
+            netcat-openbsd cryptsetup lvm2 xfsprogs dosfstools swtpm swtpm-tools \
+            cloud-guest-utils cloud-image-utils gdisk btrfs-progs
 
       - name: Enable KVM access
         run: |
@@ -189,10 +201,12 @@ jobs:
       - name: Build migration binary
         run: cargo build --release && cargo test --release
 
-      - name: Pull base + target images
+      - name: Pull target image (and OSTree base when required)
         run: |
           set -eux
-          sudo podman pull "${{ inputs.base }}"
+          if [ "${{ inputs.mode }}" != package-install ]; then
+            sudo podman pull "${{ inputs.base }}"
+          fi
           sudo podman pull "${{ inputs.target }}"
 
       - name: Run E2E cell
@@ -201,6 +215,8 @@ jobs:
           sudo -E PATH="$PATH" \
             BASE_IMAGE="${{ inputs.base }}" \
             TARGET_IMAGE="${{ inputs.target }}" \
+            E2E_PACKAGE_BASE="${{ inputs.package_base }}" \
+            E2E_PACKAGE_CROSS_FAMILY="${{ inputs.package_cross_family && '1' || '0' }}" \
             FILESYSTEM="${{ inputs.filesystem }}" \
             DISK_SIZE="${{ inputs.disk_size }}" \
             E2E_MODE="${{ inputs.mode }}" \

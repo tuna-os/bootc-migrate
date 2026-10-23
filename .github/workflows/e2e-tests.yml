@@ -152,6 +152,10 @@ jobs:
             dosfstools \
             swtpm \
             swtpm-tools \
+            cloud-guest-utils \
+            cloud-image-utils \
+            gdisk \
+            btrfs-progs
 
       # Runs on a KVM-capable runner (self-hosted "kvm" label, or RunsOn
       # with nested-virt — see the job comment above).
@@ -182,14 +186,18 @@ jobs:
       # the upstream registry (RegistryEndpoint does the ghcr.io bearer-token
       # dance) — no local registry mirroring, which burned ~35 min / 12 GB
       # and timed the job out before the e2e ever ran.
-      - name: Pull base + target images
+      - name: Pull target image (and OSTree base when required)
         run: |
           set -eux
-          sudo podman pull "${{ matrix.scenario.base }}"
+          if [ "${{ matrix.scenario.mode || 'composefs-migrate' }}" != package-install ]; then
+            sudo podman pull "${{ matrix.scenario.base }}"
+          fi
           sudo podman pull "${{ matrix.scenario.target }}"
           {
             echo "BASE_IMAGE=${{ matrix.scenario.base }}"
             echo "TARGET_IMAGE=${{ matrix.scenario.target }}"
+            echo "E2E_PACKAGE_BASE=${{ matrix.scenario.package_base || '' }}"
+            echo "E2E_PACKAGE_CROSS_FAMILY=${{ matrix.scenario.package_cross_family && '1' || '0' }}"
             echo "FILESYSTEM=${{ matrix.scenario.filesystem || 'btrfs' }}"
             echo "DISK_SIZE=${{ matrix.scenario.disk_size || '20G' }}"
             echo "E2E_MODE=${{ matrix.scenario.mode || 'composefs-migrate' }}"

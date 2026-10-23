@@ -25,6 +25,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Package-based base-image E2E coverage (#380): `package-install` boots
+  checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
+  through cloud-init, creates package/home/desktop fixtures, runs the package
+  → OSTree migration, and verifies the target plus the `Previous system`
+  round-trip. The new matrix cells are exploratory until the package route is
+  complete and its first Fedora Cloud run is green.
 
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that

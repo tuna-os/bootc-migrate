@@ -80,6 +80,40 @@ e2e-lvm: build test
       FILESYSTEM="xfs+lvm+crypt" \
       ./tests/run-e2e.sh 2>&1 | tee e2e-lvm.log
 
+# Package-managed base-image E2E cells (#380). These start from official
+# cloud images; tests/package-base.sh creates the seed and partition layout.
+e2e-package-fedora-cloud: build test
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      E2E_MODE="package-install" \
+      E2E_PACKAGE_BASE="fedora-cloud" \
+      TARGET_IMAGE="quay.io/fedora/fedora-bootc:43" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="btrfs" \
+      E2E_EXPECT_OS_ID="fedora" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-package-fedora-cloud.log
+
+e2e-package-workstation: build test
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      E2E_MODE="package-install" \
+      E2E_PACKAGE_BASE="fedora-workstation" \
+      TARGET_IMAGE="ghcr.io/projectbluefin/bluefin:stable" \
+      DISK_SIZE="60G" \
+      FILESYSTEM="btrfs" \
+      E2E_EXPECT_OS_ID="bluefin" \
+      E2E_EXPECT_DM="gdm" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-package-workstation.log
+
+e2e-package-ubuntu: build test
+    sudo -E env PATH="{{env_var_or_default('PATH', '/usr/bin:/usr/sbin:/usr/local/bin')}}" \
+      E2E_MODE="package-install" \
+      E2E_PACKAGE_BASE="ubuntu-cloud" \
+      E2E_PACKAGE_CROSS_FAMILY="1" \
+      TARGET_IMAGE="quay.io/fedora/fedora-bootc:43" \
+      DISK_SIZE="40G" \
+      FILESYSTEM="ext4" \
+      E2E_EXPECT_OS_ID="fedora" \
+      ./tests/run-e2e.sh 2>&1 | tee e2e-package-ubuntu.log
+
 # Run E2E with composefs boot log_level=debug
 # Cross-base ostree re-base (CentOS-based LTS -> Fedora dakota), exercising
 # M3's UID/GID remap + etc_conflict pass. Asserts the cross-base path ran.
@@ -199,7 +233,7 @@ lint: lint-shell lint-rust
 # Lint shell scripts with shellcheck (warnings + errors only, skip info/style)
 lint-shell:
     @echo "=== shellcheck ==="
-    shellcheck --severity=warning tests/run-e2e.sh
+    shellcheck --severity=warning tests/run-e2e.sh tests/package-base.sh
 
 # Lint the Python E2E driver with ruff (config in ruff.toml). Not part of
 # `check`: ruff is not provisioned on the CI runner or assumed present on a
