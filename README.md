@@ -456,39 +456,33 @@ can hide what the image ships.
 
 ### Cross-family targets
 
-`bootc-migrate` reads the target image's `os-release` and looks for its
-package manager before it stages anything. Two images are one family when
-their `ID`/`ID_LIKE` sets overlap or when both ship the same package
-manager (dnf, zypper, apt, pacman or apk). When the sets share nothing and
-the package managers differ (Fedora → openSUSE, Fedora → Debian), it
-refuses. When one image ships no known package manager (Dakota is GNOME
-OS-based), it warns and keeps the standard merge. The standard 3-way `/etc` merge keeps every file you
-changed on the source. Across families, that carries one family's
-package-manager, PAM, service and policy defaults onto the other.
+`bootc-migrate` reads the target image's `os-release` and package manager
+before staging. Overlapping `ID`/`ID_LIKE` values or the same package manager
+mean one family. Different families (Fedora → openSUSE or Debian) refuse.
+If the target has no known package manager, the tool warns and checks the
+staged `os-release` again.
 
-With `--accept-cross-base`, Phase 4 applies the cross-family policy
-instead:
+With `--accept-cross-base`, the conversion route and both `bootc switch` routes
+apply this policy:
 
-- Every path the target ships takes the target's copy.
-- The tool drops every path that only the source's vendor shipped.
-- The tool keeps machine state verbatim: `fstab`, `crypttab`,
-  `mdadm.conf`, `hostname`, `hosts`, `localtime`, `locale.conf`,
-  `vconsole.conf`, `adjtime`, SSH host keys and `sshd_config.d/`, saved
-  NetworkManager connections, and `sudoers.d/`. It also keeps every path
-  you added yourself.
-- Identity databases take the target's numeric ids first, and the tool
-  appends your accounts. Password entries stay yours. The tool then
-  changes the owner of each file under `/var` to match.
-- Every displaced file you had changed stays beside its replacement as
-  `<path>.rebase-old`. The tool deletes nothing.
-- When the target enforces an SELinux policy that the source did not, a
-  one-shot unit relabels `/etc` and `/var` on first boot.
+- Target files win; source vendor-only files are dropped.
+- Machine state and user-added files stay.
+- Target IDs lead identity merges; source accounts append; `/var` ownership is
+  remapped.
+- Displaced edits use `<path>.rebase-old`. The tool deletes no files.
+- `OstreeDeploy` applies after OSTree finalization and schedules `/.autorelabel`
+  when needed. `ImageSwap` applies after composefs finalization and preserves
+  sysusers/ldconfig repair.
 
-The tool prints the report and writes it to
-`/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
-This route is exploratory: one non-gating E2E cell exercises it. See
-[ROADMAP.md](ROADMAP.md) and
-[#256](https://github.com/tuna-os/bootc-migrate/issues/256).
+If the staged image is cross-family without `--accept-cross-base`, the route
+leaves it staged and unfinalized. Remove it before retrying. Do not reboot.
+
+The tool writes `bootc-migrate-cross-family-report.json` inside the staged
+deployment. Non-gating E2E cells cover conversion and `OstreeDeploy`.
+See [ROADMAP.md](ROADMAP.md) and issues
+[#258](https://github.com/tuna-os/bootc-migrate/issues/258),
+[#256](https://github.com/tuna-os/bootc-migrate/issues/256), and
+[#259](https://github.com/tuna-os/bootc-migrate/issues/259).
 
 ### Move system Steam into Flatpak Steam
 
@@ -714,7 +708,7 @@ cargo build --release -p bootc-rebase
 | Subcommand | What it does | Status |
 |---|---|---|
 | `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. `--json` for machine output. | Done |
-| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). On the composefs routes `--accept-cross-base` also accepts a cross-*family* target and, on the conversion route, selects the cross-family `/etc` policy (#256) |
+| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). `--accept-cross-base` also accepts a cross-family target on all three migration routes and selects the cross-family `/etc` policy (#256/#259) |
 | `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
 | `boot-entries [--json] [--interactive] [--rename-branding] [--apply] [--undo]` | Enumerate and classify UEFI boot entries: dead (loader path missing), generic-label, duplicate, firmware-managed, plus which are protected and why. **Dry-run by default** — a bare invocation is the read-only audit. `--interactive` opens a checklist (protected entries are unselectable), `--rename-branding` proposes renaming the booted entry to `PRETTY_NAME`, `--apply` writes the result to NVRAM after a typed confirmation and a restorable snapshot, and `--undo` replays that snapshot. | Audit and the cleanup **planner** are unit-tested (protections, the last-bootable-entry guard, and the "every entry looks dead ⇒ the ESP is wrong" refusal). The gating OSTree re-base E2E cell also renames a live OVMF NVRAM entry, applies the plan, undoes it, and asserts byte-identical `efibootmgr -v` output. This covers the executor and snapshot restore; it does **not** cover the separate, unimplemented GRUB2→systemd-boot flip ([#31](https://github.com/tuna-os/bootc-migrate/issues/31), [#189](https://github.com/tuna-os/bootc-migrate/issues/189)) |
 | `commit [--apply] [--yes] [--force]` | After a composefs → ostree re-base has booted, remove the composefs state it kept as rollback (#315). **Dry run by default**: checks that the system booted the OSTree deployment the install report names, that the ESP snapshot and a shim/GRUB firmware entry exist, and that every path of the old `/var` is present in the live `/var`. It then lists every path it would delete, with sizes. `--apply` deletes after a typed confirmation. First it copies the install report and ESP snapshot into the live `/var/lib/bootc-rebase`. Then it removes the old `/var`, the composefs store and the composefs deployments. It never touches the OSTree repo, `/boot`, the ESP or NVRAM. `--force` accepts failed checks. It never accepts a composefs boot or a filesystem mounted inside a path to delete. | Unit-tested against a fixture physical root. The non-gating composefs → ostree cell runs the dry run, then `--apply`, then reboots and checks system health |
