@@ -127,6 +127,12 @@ fn image_choices_from_catalog(
     _detected_os: &str,
     mut choices: Vec<ImageChoice>,
 ) -> Vec<ImageChoice> {
+    // A package-managed source can only take the package → OSTree route.
+    // Keep ComposeFS targets out of the picker rather than offering a route
+    // the planner will refuse.
+    if backend == Some(Backend::Package) {
+        choices.retain(|choice| choice.backend == "ostree");
+    }
     // On an existing composefs system, keep the current image as the first
     // one-click choice. Otherwise Dakota remains the known conversion path.
     if backend == Some(Backend::Composefs) {
@@ -161,12 +167,21 @@ fn image_choices_from_catalog(
             });
         }
     }
+    let package_source = backend == Some(Backend::Package);
     choices.push(ImageChoice {
         label: "Custom…".into(),
         image: String::new(),
-        note: "enter a ComposeFS-capable image".into(),
+        note: if package_source {
+            "enter an OSTree bootc image".into()
+        } else {
+            "enter a ComposeFS-capable image".into()
+        },
         custom: true,
-        backend: "composefs".into(),
+        backend: if package_source {
+            "ostree".into()
+        } else {
+            "composefs".into()
+        },
         published: true,
     });
     choices
@@ -566,6 +581,10 @@ impl App {
         SPINNER[self.spinner_tick]
     }
 
+    fn is_package_source(&self) -> bool {
+        self.booted_backend == Some(Backend::Package)
+    }
+
     fn is_custom_selected(&self) -> bool {
         let idx = self.image_list_state.selected().unwrap_or(0);
         self.image_choices.get(idx).is_some_and(|c| c.custom)
@@ -581,6 +600,11 @@ impl App {
             report.booted_image.as_deref(),
             &self.detected_os,
         );
+        if self.is_package_source() {
+            // PackageInstall is still preview-only (#373). The wizard offers
+            // its target picker and readiness report, but never a live run.
+            self.opt_dry_run = true;
+        }
         self.image_list_state.select(Some(0));
     }
 
@@ -1209,7 +1233,8 @@ impl App {
 
     fn toggle_option(&mut self, row: OptRow) {
         match row {
-            OptRow::DryRun => self.opt_dry_run = !self.opt_dry_run,
+            OptRow::DryRun if !self.is_package_source() => self.opt_dry_run = !self.opt_dry_run,
+            OptRow::DryRun => {}
             OptRow::SkipImport => self.opt_skip_import = !self.opt_skip_import,
             OptRow::Bootloader => {
                 self.opt_bootloader = match self.opt_bootloader {
@@ -1775,6 +1800,35 @@ mod tests {
     }
 
     #[test]
+    fn package_host_offers_only_ostree_dry_run_targets() {
+        let choices = image_choices(Some(Backend::Package), None, "Fedora Linux");
+        assert!(
+            choices.iter().all(|choice| choice.backend == "ostree"),
+            "{choices:?}"
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.image == "ghcr.io/projectbluefin/bluefin:stable")
+        );
+        assert_eq!(
+            choices.last().map(|choice| choice.note.as_str()),
+            Some("enter an OSTree bootc image")
+        );
+
+        let mut app = app_on(Screen::ConfigureOptions);
+        app.booted_backend = Some(Backend::Package);
+        app.image_choices = choices;
+        app.image_list_state.select(Some(0));
+        app.toggle_option(OptRow::DryRun);
+        assert!(app.opt_dry_run, "package preview must stay read-only");
+        let args = app.build_command_args();
+        assert!(args[0].ends_with("bootc-rebase"));
+        assert_eq!(args[1..4], ["rebase", "--target-backend", "ostree"]);
+        assert!(args.contains(&"--dry-run".to_owned()));
+    }
+
+    #[test]
     fn custom_image_entry_via_keys() {
         let mut app = app_on(Screen::SelectImage);
         // Move to the last row ("Custom…").
@@ -1874,6 +1928,19 @@ mod tests {
         assert!(result.contains("No deployment was staged"));
         assert!(!result.contains("sudo systemctl reboot"));
         assert!(!result.contains("bootc-migrate commit"));
+    }
+
+    #[test]
+    fn package_review_is_explicitly_preview_only() {
+        let mut app = app_on(Screen::Review);
+        app.booted_backend = Some(Backend::Package);
+        app.image_choices = image_choices(Some(Backend::Package), None, "Fedora Linux");
+        app.image_list_state.select(Some(0));
+        let review = draw_to_text(&mut app);
+        assert!(review.contains("package-host readiness"));
+        assert!(review.contains("PackageInstall is not implemented yet"));
+        assert!(review.contains("software comparison is tracked separately"));
+        assert!(!review.contains("LIVE MIGRATION"));
     }
 
     #[test]
@@ -2236,6 +2303,43 @@ mod tests {
         app.preflight_state = None;
         let text = draw_to_text(&mut app);
         assert!(text.contains("Step 2 of 5"), "missing step:\n{text}");
+    }
+
+    #[test]
+    fn package_preflight_offers_the_read_only_route() {
+        let mut app = app_on(Screen::Preflight);
+        app.booted_backend = Some(Backend::Package);
+        app.preflight_state = Some(preflight::PreflightTuiState::from_report(
+            &bootc_migrate_core::preflight::PreflightReport {
+                booted_backend: Some(Backend::Package),
+                booted_image: None,
+                pending_transaction: bootc_migrate_core::preflight::PendingTransactionStatus::Clean,
+                is_uefi: true,
+                nvram_writable: true,
+                esp_path: Some("/boot/efi".into()),
+                esp_free_space_bytes: 386 * 1024 * 1024,
+                esp_fs_type: Some("vfat".into()),
+                esp_detected: true,
+                supports_reflink: true,
+                is_btrfs: true,
+                fs_type: Some("btrfs".into()),
+                ostree_repo_size_bytes: 0,
+                composefs_free_bytes: 40_600_000_000,
+                container_storage_free_bytes: 50 * 1024 * 1024 * 1024,
+                container_storage_path: "/var/lib/containers/storage".into(),
+                var_is_separate_mount: false,
+                esp_ready_for_systemd_boot: true,
+                systemd_boot_binaries_present: false,
+                grub_tools_available: true,
+                sysroot_was_ro: false,
+            },
+        ));
+        let text = draw_to_text(&mut app);
+        assert!(text.contains("Package-managed host detected"));
+        assert!(text.contains("readiness and hardware reports"));
+        assert!(text.contains("not implemented yet"));
+        assert!(!text.contains("System NOT ready"));
+        assert!(!text.contains("ComposeFS Space"));
     }
 
     // ── Palette contrast ──────────────────────────────────────────────────

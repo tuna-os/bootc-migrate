@@ -438,70 +438,83 @@ dispatch): `tests/drift-canary.sh` probes every image in
 `tests/canary-baseline.tsv` for its cfs CLI generation and exits 1 on
 drift (auto-filing/updating a canary issue), 2 on probe-infra failure
 (retried next run, never alerted). The #72 breakage is exactly what this
-catches; **the pinned legacy builder drifting to new-gen is the critical
+catches; **the pinned legacy builder drifting to new-gen is the important
 alert** — it breaks the delegation ladder and blocks the MVP.
 
-Maintaining the baseline: when a drift is real and absorbed (code adapted,
+To maintain the baseline: when a drift is real and absorbed (code adapted,
 docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
 
 ## Flake policy & known gotchas
 
-- **Retry taxonomy**: GHCR connection-resets and ENOSPC during image pull
-  are infra flakes (rerun the cell via narrow dispatch); assertion failures
-  and phase errors are never rerun without a diagnosis.
-- **`gh run rerun` reuses the run's original merge commit.** If main moved
-  since (e.g. a harness fix landed), rerunning tests stale code — merge
-  main into the PR branch instead. This has bitten before.
-- **Cancelled runs surface as `fail`** in `gh pr checks`; a stuck-queued
-  workflow sometimes needs cancel + rerun to re-enter the queue.
-- **Disk sizing is part of the test.** ENOSPC inside the guest shows up as
-  misleading downstream errors (including probe misfires — see the probe
-  asymmetry note in CONTEXT.md). Cells document their disk_size rationale
-  inline in e2e-tests.yml.
-- **Mount errors on new-gen hosts are expected noise** in phases 4/5 until
-  PR #76 lands (podman fallbacks carry the migration) — don't read them as
-  the failure signal.
-- **The LVM-on-LUKS cell is the disk-tightest one** (60G, BIOS-boot + ESP +
-  separate /boot + fixed 4G /var LV before root sees anything) — an ENOSPC
-  there is the flake class to suspect first, not a regression.
+- **Retry taxonomy:** Retry a cell after a GHCR connection reset or ENOSPC
+  during an image pull. Diagnose assertion failures and phase errors before a retry.
+- **`gh run rerun` uses the original merge commit.** If main changed,
+  merge main into the PR branch to test the new code.
+- **Cancelled runs show `fail`** in `gh pr checks`. A stuck queue can need
+  cancellation and a new run.
+- **Disk size is part of the test.** ENOSPC inside the guest can cause errors
+  later in the run. See the probe asymmetry note in CONTEXT.md.
+  The cells explain their disk sizes in e2e-tests.yml.
+- **Mount errors on new-gen hosts:** Phases 4/5 use podman fallbacks until
+  PR #76 lands. Do not treat those expected mount errors as the failure signal.
+- **The LVM-on-LUKS cell has the least free space.** Its 60G disk contains
+  BIOS-boot, ESP, separate /boot, and a fixed 4G /var LV before root.
+  Check for ENOSPC first. Then investigate other regressions.
 
-### Incident: `required-checks` didn't actually gate on `e2e-gate`
+### Incident: `required-checks` did not gate on `e2e-gate`
 
-PR #73 auto-merged 2026-07-19 while its E2E run showed one cell failing
-(the LVM-on-LUKS ENOSPC flake above). Root cause: `required-checks` — the
-one job branch protection watches — listed `[validate, cargo-deny,
-coverage, actionlint]` in its `needs`, never `e2e-gate`. The two jobs were
-siblings, not a chain, since the workflow's original introduction — this
-predates every change in this document. `required-checks` passed on the
-fast jobs alone while `e2e-gate` independently failed, and GitHub had no
-reason to block the merge.
+PR #73 auto-merged on 2026-07-19. Its LVM-on-LUKS cell failed due to ENOSPC.
+Branch protection watched `required-checks`. That job listed `[validate,
+cargo-deny, coverage, actionlint]` in `needs`, but omitted `e2e-gate`.
+The two jobs had been independent since the workflow began.
+GitHub accepted the fast checks even when E2E failed.
 
-Fixed by adding `e2e-gate` to `required-checks`' `needs`. The rule going
-forward: **`required-checks` is the merge gate, so every other gate must
-feed into it** — a new CI job that isn't in that `needs` list is invisible
-to branch protection no matter how good the job itself is. (The merge
-itself needed no revert: the fix under test was validated by the other
-three cells, including the critical btrfs one, and the ENOSPC failure was
-the known flake class above.)
+The fix added `e2e-gate` to `required-checks` in `needs`.
+Every gate must feed into `required-checks`; branch protection cannot see a
+new job that this list omits.
+The merge needed no revert: the other three cells verified the fix, including
+btrfs. The failed cell had the ENOSPC flake from the previous section.
 
 ## Local reproduction
 
-- `just check` — everything CI's validate job runs, now including the
-  feature matrix (`test-all-features`).
-- `just e2e` / `e2e-lts` / `e2e-luks` / `e2e-lvm` — full cells locally;
-  `e2e-status`, `e2e-ssh`, `e2e-tail`, `e2e-scan`, `e2e-reboot-test` for
-  surgical iteration on a phase.
-- `just drift-canary` — the upstream probe, sans CI.
-- Cross-generation store experiments: reproduction commands in
-  docs/cfs-cli-generations.md §Reproducing (needs a `mkfs.ext4 -O verity`
-  loopback; root filesystems commonly lack the verity feature).
+- `just check` runs the checks from CI's validate job, including
+  `test-all-features`.
+- `just e2e`, `e2e-lts`, `e2e-luks`, and `e2e-lvm` run full cells locally.
+  Use `e2e-status`, `e2e-ssh`, `e2e-tail`, `e2e-scan`, or `e2e-reboot-test`
+  to inspect one phase.
+- `just drift-canary` runs the upstream probe without CI.
+- For cross-generation store experiments, see docs/cfs-cli-generations.md.
+  These need a loopback filesystem made with `mkfs.ext4 -O verity`.
+  Root filesystems often lack verity.
 
 ## Gaps / next automation (tracked, not yet built)
 
-1. **Store-level integration test in CI**: the loopback cross-gen check
-   (legacy write → new-gen fsck) as a cheap weekly job — no VM, ~2 GB.
-2. **Nightly `cargo update --dry-run` + composefs-rs version watch** —
-   surfacing new 0.x releases early (NativeStore pins 0.7).
-3. **Merge-queue discipline**: once the stacked fleet lands, enable GitHub
-   merge queue with `required-checks` as the single required context (it
-   already tolerates skipped optional jobs).
+1. Add a weekly integration test for the store: write with the legacy CLI,
+   then run new-gen fsck. This needs about 2 GB and no VM.
+2. Watch `cargo update --dry-run` nightly for new composefs-rs 0.x releases.
+   NativeStore pins 0.7.
+3. After the stacked fleet lands, enable the merge queue on GitHub.
+   Use `required-checks` as the single required context; it accepts optional jobs that did not run.
+
+## E2E input regressions
+
+Run `just test-harness` for the cloud-init package list, package-manager fixture,
+and executable setup for bootloader trials. `just check` also runs these tests without
+a VM. The tests execute the shell snippets that produce the inputs; they do not
+prove that the scenario boots.
+
+[Run 39227338849](https://github.com/tuna-os/bootc-migrate/actions/runs/39227338849)
+failed before migration in three harness paths:
+
+- Fedora package install appended a bare marker to `dnf.conf`; `dnf` rejected
+  line 4 with `Missing '='`. Use a comment marker and retain the sidecar check.
+- Ubuntu cloud-init requested `NetworkManager`, the Fedora package name.
+  Ubuntu needs `network-manager`.
+- The bootloader trial wrote to `/usr/local/bin`, which was read-only. The remote
+  shell continued after failed `install` commands. Keep binaries in a unique root-owned `0700` directory under `/var/tmp`.
+  Reject symlinks and wrong ownership, check executable bits, and stop if setup fails.
+  Stage, promote, and undo use that same directory across the trial reboot.
+
+The remaining failures in that run (read-only stateroot `/var`, failed service
+health, and SSH readiness) need separate diagnosis. These input fixes do not
+waive those checks or establish that the full migration passes.

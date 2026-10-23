@@ -28,7 +28,11 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .iter()
         .map(|row| match row {
             OptRow::DryRun => (
-                "Dry-run (recommended first run)",
+                if app.is_package_source() {
+                    "Dry-run (required: PackageInstall is preview-only)"
+                } else {
+                    "Dry-run (recommended first run)"
+                },
                 check(app.opt_dry_run),
                 app.opt_dry_run,
             ),

@@ -74,15 +74,17 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   and records a package-install report for the rollback stage (#373).
   `--target-backend` defaults to `auto`: composefs from a bootc deployment
   and ostree from a package host (#371, part of #370).
+- The TUI now shows a read-only preview for package-managed hosts.
+  It limits the target picker to OSTree images and runs the readiness and hardware reports.
+  Live `PackageInstall` waits for #373. Guidance, evidence rows, and the roadmap entry define the #381 boundary.
 - Hardware and firmware check before every migration, on every route of
   `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
-  compares the devices that work today, the out-of-tree drivers in use
-  (NVIDIA, VirtualBox, ZFS), their firmware and the CPU microcode with the
-  target image's kernel and `/usr/lib/firmware`. It refuses when a storage,
-  display, network, wireless or USB controller would lose its driver or
-  firmware, unless you add `--accept-hardware-gaps`. A display controller
-  only gets a warning when the target kernel has a firmware framebuffer
-  driver (`simpledrm`, `efifb`). The registry scan
+  compares today's devices and out-of-tree drivers (NVIDIA, VirtualBox, ZFS) with
+  the target image's kernel, firmware, and CPU microcode.
+  The check refuses a storage, display, network, wireless, or USB controller when
+  it would lose a driver or firmware. Use `--accept-hardware-gaps` to allow that loss.
+  A display controller only gets a warning when the target kernel has a firmware
+  framebuffer driver (`simpledrm`, `efifb`). The registry scan
   collects the target data in its single pass over the layers. Within a run,
   the tool caches the scan, so it no longer downloads the image once for each
   check.
@@ -145,6 +147,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
+
+- The `migrate-bootloader` resync hook and `--undo` find the ESP again
+  when the recorded mount is gone. When the image does not mount its ESP,
+  staging mounts it privately under `/run`, and that mount does not survive
+  the trial reboot. After the reboot, a kernel update wrote the new kernel
+  into an empty tmpfs directory instead of the ESP, and `--undo` deleted
+  nothing from the ESP.
 
 - `migrate-bootloader` and the bootloader setup step pick the kernel
   directory under `usr/lib/modules` that has a `vmlinuz`. They used to take

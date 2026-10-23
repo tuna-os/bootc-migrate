@@ -1281,13 +1281,25 @@ if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
 fi
 
 if [ "$E2E_MODE" = "bootloader-trial" ]; then
-    scp $SCP_OPTS target/release/bootc-rebase root@localhost:/var/tmp/bootc-rebase
-    scp $SCP_OPTS target/release/bootc-migrate root@localhost:/var/tmp/bootc-migrate
-    ssh $SSH_OPTS root@localhost '
-        install -m 0755 /var/tmp/bootc-rebase /usr/local/bin/bootc-rebase
-        install -m 0755 /var/tmp/bootc-migrate /usr/local/bin/bootc-migrate
-        test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
-    '
+    # Keep the executables across reboot without writing immutable /usr/local.
+    # A private root-owned directory prevents other guest users swapping files.
+    TRIAL_BIN_DIR=$(ssh $SSH_OPTS root@localhost 'umask 077; mktemp -d /var/tmp/bootc-trial.XXXXXXXX')
+    [[ "$TRIAL_BIN_DIR" =~ ^/var/tmp/bootc-trial\.[a-zA-Z0-9]{8}$ ]] || {
+        echo "FAIL: invalid bootloader-trial staging directory"; exit 1;
+    }
+    scp $SCP_OPTS target/release/bootc-rebase "root@localhost:$TRIAL_BIN_DIR/bootc-rebase"
+    scp $SCP_OPTS target/release/bootc-migrate "root@localhost:$TRIAL_BIN_DIR/bootc-migrate"
+    ssh $SSH_OPTS root@localhost bash -s -- "$TRIAL_BIN_DIR" <<'TRIAL_BIN_SETUP'
+set -euo pipefail
+dir=$1
+[[ -d "$dir" && ! -L "$dir" && "$(stat -c '%u:%a' "$dir")" = 0:700 ]]
+for binary in "$dir/bootc-rebase" "$dir/bootc-migrate"; do
+    [[ -f "$binary" && ! -L "$binary" && "$(stat -c '%u' "$binary")" = 0 ]]
+    chmod 0755 "$binary"
+    test -x "$binary"
+done
+test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
+TRIAL_BIN_SETUP
 
     ORIGINAL_EFIBOOTMGR=$(ssh $SSH_OPTS root@localhost "efibootmgr -v")
     ORIGINAL_ORDER=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
@@ -1306,10 +1318,59 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
 
     step "=== bootloader-trial: staging the systemd-boot trial through rebase_controller ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "/usr/local/bin/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
+        "$TRIAL_BIN_DIR/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
         > /tmp/bootloader-trial-stage.log 2>&1; then
         sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
         echo "FAIL: migrate-bootloader staging failed"
+        # Read-only layout evidence for discovery failures; retain the stage failure.
+        if ! ssh $SSH_OPTS root@localhost bash -s <<'TRIAL_DISCOVERY_DIAGNOSTICS'
+set -uo pipefail
+diagnostic_status=0
+collect() {
+    if ! "$@"; then
+        diagnostic_status=1
+    fi
+}
+echo '--- deployment identities ---'
+collect ostree admin status
+command_line=()
+if ! read -r -a command_line < /proc/cmdline; then
+    diagnostic_status=1
+fi
+for argument in "${command_line[@]}"; do
+    case "$argument" in
+        ostree=/*) printf '%s\n' "$argument"; collect readlink -e "/sysroot${argument#ostree=}" ;;
+        composefs=*) printf '%s\n' "$argument" ;;
+    esac
+done
+echo '--- physical deployment directories ---'
+if ! find /sysroot/ostree/deploy -maxdepth 3 -type d | head -80; then
+    diagnostic_status=1
+fi
+echo '--- running kernel files ---'
+collect uname -r
+if ! find /usr/lib/modules -maxdepth 2 \( -name 'vmlinuz*' -o -name 'initramfs*' \) -ls | head -40; then
+    diagnostic_status=1
+fi
+echo '--- deployed kernel files ---'
+for modules in /sysroot/ostree/deploy/*/deploy/*/usr/lib/modules/*; do
+    [ -d "$modules" ] || continue
+    collect ls -ld "$modules" "$modules/vmlinuz" "$modules/initramfs.img"
+done
+echo '--- boot kernel files and BLS entries ---'
+if ! find /boot/ostree -maxdepth 2 \( -type f -o -type l \) -ls | head -80; then
+    diagnostic_status=1
+fi
+for entry in /boot/loader/entries/*.conf; do
+    [ -f "$entry" ] || continue
+    echo "--- $entry ---"
+    collect cat "$entry"
+done
+exit "$diagnostic_status"
+TRIAL_DISCOVERY_DIAGNOSTICS
+        then
+            echo "WARN: could not collect all deployment discovery diagnostics"
+        fi
         exit 1
     fi
     sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
@@ -1337,6 +1398,15 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
          test -f '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux' && \
          test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+    # The hook must run its own copy of the binary by absolute path: the
+    # staging directory is not on PATH and /usr/local is read-only here.
+    ssh $SSH_OPTS root@localhost \
+        "grep -qF \"exec '/var/lib/bootc-migrate/bin/bootc-rebase' migrate-bootloader --resync\" \
+             /etc/kernel/install.d/95-bootc-migrate-esp-sync.install && \
+         test -x /var/lib/bootc-migrate/bin/bootc-rebase" || {
+        echo "FAIL: the resync hook does not run /var/lib/bootc-migrate/bin/bootc-rebase"
+        exit 1
+    }
 
     # OVMF does not honor BootNext consistently in this path. Deliberately
     # make the trial first in BootOrder so the reboot proves the same
@@ -1386,16 +1456,35 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
         echo "FAIL: BootCurrent=$CURRENT_TRIAL, expected trial Boot$TRIAL_ID"
         exit 1
     }
+    # The staging run recorded a private ESP mount under /run; it did not
+    # survive the reboot. Mount the ESP at a path the harness owns and check
+    # the trial there, so the checks never pass against an empty directory.
+    ESP_PATH=$(ssh $SSH_OPTS root@localhost bash <<'TRIAL_ESP_MOUNT'
+set -euo pipefail
+dir=/run/e2e-esp
+mkdir -p "$dir"
+if ! mountpoint -q "$dir"; then
+    dev=$(lsblk -lnpo PATH,PARTTYPE \
+        | awk '$2 == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+    [ -n "$dev" ] || { echo "no ESP partition found" >&2; exit 1; }
+    mount "$dev" "$dir"
+fi
+echo "$dir"
+TRIAL_ESP_MOUNT
+    ) || { echo "FAIL: could not mount the ESP after the trial reboot"; exit 1; }
     ssh $SSH_OPTS root@localhost \
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
-         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install" || {
+        echo "FAIL: the trial entry or the resync hook is missing after the reboot"
+        exit 1
+    }
 
     step "=== bootloader-trial: invoking the kernel-install resync hook ==="
     ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
 set -euo pipefail
-export PATH=/usr/local/bin:/usr/bin:/bin
+# No bootc-rebase on PATH: the hook has to find its own copy.
+export PATH=/usr/bin:/bin
 STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
-ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
 TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
 KVER=$(uname -r)
 KERNEL=$(readlink -f "/usr/lib/modules/$KVER/vmlinuz" 2>/dev/null || true)
@@ -1412,6 +1501,10 @@ cp "$INITRD" /var/tmp/e2e-resync-initrd
 /etc/kernel/install.d/95-bootc-migrate-esp-sync.install \
     add "$NEW_VERSION" "$TOKEN" \
     /var/tmp/e2e-resync-vmlinuz /var/tmp/e2e-resync-initrd
+# The hook records the ESP it wrote to; it must be a live mount, not the
+# private /run directory that the staging run left behind.
+ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
+mountpoint -q "$ESP" || { echo "resync wrote to $ESP, which is not a mount point"; exit 1; }
 test -f "$ESP/$TOKEN/$NEW_VERSION/linux"
 test -f "$ESP/loader/entries/bootc-migrate-$TOKEN-$NEW_VERSION.conf"
 test "$(sed -n 's/^default //p' "$ESP/loader/loader.conf")" \
@@ -1420,7 +1513,7 @@ echo "resync staged kernel version $NEW_VERSION"
 TRIAL_RESYNC
 
     step "=== bootloader-trial: promoting the tested trial ==="
-    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --promote
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --promote
     PROMOTED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "${PROMOTED_ORDER%%,*}" = "$TRIAL_ID" ] || {
@@ -1433,7 +1526,7 @@ TRIAL_RESYNC
     fi
 
     step "=== bootloader-trial: undoing the promoted migration ==="
-    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --undo
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --undo
     RESTORED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "$RESTORED_ORDER" = "$ORIGINAL_ORDER" ] || {
@@ -1445,6 +1538,7 @@ set -euo pipefail
 ! efibootmgr -v | grep -Fq 'bootc-migrate trial'
 ! test -e /var/lib/bootc-migrate/migrate-bootloader-state.json
 ! test -e /etc/kernel/install.d/95-bootc-migrate-esp-sync.install
+! test -e /var/lib/bootc-migrate/bin
 TRIAL_UNDO_CHECK
 ssh $SSH_OPTS root@localhost \
     "test ! -e '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
@@ -2880,7 +2974,7 @@ method=ignore
 NMEOF
     chmod 600 /etc/NetworkManager/system-connections/e2e-package.nmconnection
     if command -v dnf >/dev/null 2>&1; then
-        echo "e2e-package-manager-edit" >> /etc/dnf/dnf.conf
+        echo "# e2e-package-manager-edit" >> /etc/dnf/dnf.conf
         dnf -y install cowsay
     elif command -v apt-get >/dev/null 2>&1; then
         mkdir -p /etc/apt/apt.conf.d

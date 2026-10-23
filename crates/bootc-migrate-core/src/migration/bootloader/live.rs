@@ -24,7 +24,7 @@ use std::process::Command;
 
 use super::BlsEntry;
 use super::systemd_boot::{carry_over_kargs, esp_kernel_paths};
-use crate::migration::boot::get_esp_disk_and_part;
+use crate::migration::boot::{find_esp_or_mount, get_esp_disk_and_part};
 use crate::migration::rollback::{build_new_boot_order, parse_boot_current, parse_boot_order};
 
 /// Persistent state for one standalone bootloader migration.
@@ -592,9 +592,11 @@ pub fn resync_from_kernel_install(
         "bootc-migrate-0",
         state.strip_composefs,
     );
-    let esp_path = Path::new(&state.esp_path);
-    resync_with_sources(esp_path, entry_token, kver, &vmlinuz, &initrd, &entry)?;
-    update_loader_default(esp_path, &filename)?;
+    let esp_path = live_esp(&state)?;
+    resync_with_sources(&esp_path, entry_token, kver, &vmlinuz, &initrd, &entry)?;
+    update_loader_default(&esp_path, &filename)?;
+
+    state.esp_path = esp_path.to_string_lossy().into_owned();
 
     state.entry_token = entry_token.to_owned();
     state.title = title.to_owned();
@@ -685,8 +687,7 @@ fn artifact_versions(state: &MigrationState) -> Vec<MigrationArtifact> {
     }]
 }
 
-fn remove_artifacts(state: &MigrationState) -> Result<()> {
-    let esp = Path::new(&state.esp_path);
+fn remove_artifacts(esp: &Path, state: &MigrationState) -> Result<()> {
     for artifact in artifact_versions(state) {
         let entry = esp.join("loader/entries").join(&artifact.bls_filename);
         match fs::remove_file(&entry) {
@@ -706,8 +707,7 @@ fn remove_artifacts(state: &MigrationState) -> Result<()> {
     Ok(())
 }
 
-fn remove_created_loader_files(state: &MigrationState) -> Result<()> {
-    let esp = Path::new(&state.esp_path);
+fn remove_created_loader_files(esp: &Path, state: &MigrationState) -> Result<()> {
     for relative in &state.created_loader_files {
         let path = esp.join(relative);
         match fs::remove_file(&path) {
@@ -763,6 +763,9 @@ pub fn run_undo(state_path: &Path) -> Result<()> {
         println!("No migrate-bootloader state found — nothing to undo.");
         return Ok(());
     };
+    // Find the ESP before the NVRAM changes, so a missing ESP stops the
+    // undo before it changes anything.
+    let esp = live_esp(&state)?;
     let output = read_efibootmgr()?;
 
     let current_next = parse_boot_next(&output);
@@ -798,9 +801,8 @@ pub fn run_undo(state_path: &Path) -> Result<()> {
         )?;
     }
 
-    remove_artifacts(&state)?;
-    remove_created_loader_files(&state)?;
-    let esp = Path::new(&state.esp_path);
+    remove_artifacts(&esp, &state)?;
+    remove_created_loader_files(&esp, &state)?;
     restore_optional(
         &esp.join("loader/loader.conf"),
         state.loader_conf_before.as_deref(),
@@ -821,6 +823,34 @@ pub fn run_undo(state_path: &Path) -> Result<()> {
 
     println!("migrate-bootloader undone: ESP entries, resync hook, and trial NVRAM state removed.");
     Ok(())
+}
+
+/// The ESP as it is mounted now.
+///
+/// `state.esp_path` can be the private mount that the staging run made under
+/// `/run` because the image does not mount its ESP. That mount does not
+/// survive the trial reboot, so after the reboot the path is an empty
+/// directory on tmpfs. The resync hook and `--undo` must not write or delete
+/// there. They use the recorded path only while it is a mount point, and
+/// otherwise find or mount the ESP again.
+fn live_esp(state: &MigrationState) -> Result<PathBuf> {
+    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+    resolve_esp(&mounts, &state.esp_path, find_esp_or_mount).map(PathBuf::from)
+}
+
+fn resolve_esp(
+    mounts: &str,
+    recorded: &str,
+    locate: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    let mounted = mounts
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .any(|mountpoint| mountpoint == recorded);
+    if mounted {
+        return Ok(recorded.to_owned());
+    }
+    locate().with_context(|| format!("the recorded ESP {recorded} is not mounted"))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -891,6 +921,36 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn recorded_esp_is_used_only_while_it_is_mounted() {
+        let mounts = "/dev/vda3 / xfs rw 0 0\n\
+                      /dev/vda2 /run/bootc-migrate/esp-migration vfat rw 0 0\n";
+        let unused = || -> Result<String> { panic!("the recorded mount is live") };
+        assert_eq!(
+            resolve_esp(mounts, "/run/bootc-migrate/esp-migration", unused).unwrap(),
+            "/run/bootc-migrate/esp-migration"
+        );
+
+        // After the trial reboot the private mount is gone.
+        let after_reboot = "/dev/vda3 / xfs rw 0 0\n";
+        assert_eq!(
+            resolve_esp(after_reboot, "/run/bootc-migrate/esp-migration", || Ok(
+                "/run/bootc-migrate/esp-migration-new".into()
+            ))
+            .unwrap(),
+            "/run/bootc-migrate/esp-migration-new"
+        );
+
+        // A prefix of a mount point is not a mount point.
+        let err = resolve_esp(
+            "/dev/vda2 /boot/efi vfat rw 0 0\n",
+            "/boot",
+            || -> Result<String> { bail!("no ESP device") },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("the recorded ESP /boot is not mounted"));
+    }
 
     #[test]
     fn state_round_trips_through_json() {

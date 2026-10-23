@@ -165,6 +165,21 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
         format!("  • Target image: {img}"),
         Style::default().fg(TEXT),
     )));
+    if app.is_package_source() {
+        lines.push(Line::from(Span::styled(
+            "  • Print package-host readiness and target hardware reports",
+            Style::default().fg(TEXT),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  • Preview only: PackageInstall is not implemented yet (#373)",
+            Style::default().fg(AMBER),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  • Package software comparison is tracked separately in #377",
+            Style::default().fg(MUTED),
+        )));
+        return lines;
+    }
     if app.selected_choice().is_some_and(|c| c.backend == "ostree") {
         lines.push(Line::from(Span::styled(
             "  • Stage an OSTree deployment with bootc-rebase",
