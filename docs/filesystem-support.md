@@ -42,10 +42,10 @@ repo at `/sysroot/ostree/repo` into the composefs object store at
 `/sysroot/composefs/objects`. Reflink is ~instant and uses no extra disk space on
 btrfs, so this phase is cheap.
 
-The Phase 0 free-space estimate counts the source repo at **1.1×** when reflink
-is available (vs 1.5× without), two expanded copies of the target image
-(ComposeFS and podman fallback storage), and 5 GiB of temporary initrd-rebuild
-headroom.
+The Phase 0 free-space estimate counts the source repo at **1.1×** when
+reflink is available (vs 1.5× without). It also counts space for two expanded
+copies of the target image (ComposeFS and podman fallback storage) and 5 GiB of
+temporary initrd-rebuild headroom.
 
 ### Phase 3 — EROFS seal
 
@@ -82,7 +82,7 @@ root before the sparse loopback and podman storage consume it.
 
 1. Creates a sparse file at `/sysroot/composefs-loopback.ext4`.
    Its nominal size is `ceil(ostree_repo_GB × 1.5 + 25)` GB, with a 30 GB
-   floor and a cap at 90% of the currently free space.
+   floor and a cap at 90% of the now-free space.
 2. Formats it as ext4 with `-O verity` (`mkfs.ext4 -F -O verity`).
 3. Loop-mounts it at `/sysroot/composefs` with `-o loop`.
 
@@ -97,9 +97,9 @@ detects this via `findmnt` and skips recreation.
 ### Phase 1 — OSTree object import
 
 On XFS without reflink, the source-repo part of the estimate uses a **1.5×
-multiplier** and Phase 1 performs full copies rather than reflink clones. This
-is slower and uses more space. If reflink is available on the XFS volume, the
-tool uses it (the probe is runtime, not hardcoded to XFS=no-reflink).
+multiplier**. Phase 1 makes full copies, not reflink clones. This is slower
+and uses more space. If reflink is available on the XFS volume, the tool uses
+it (the probe is runtime, not hardcoded to XFS=no-reflink).
 
 ### Phase 3 — EROFS seal
 
