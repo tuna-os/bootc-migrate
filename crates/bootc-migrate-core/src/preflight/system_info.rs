@@ -304,7 +304,7 @@ pub(crate) fn backend_from_cmdline(cmdline: &str) -> Option<Backend> {
         let key = token.split_once('=').map(|(k, _)| k).unwrap_or(token);
         match key {
             "ostree" => return Some(Backend::Ostree),
-            "composefs" => composefs = true,
+            "composefs" | "composefs.digest" => composefs = true,
             _ => {}
         }
     }
@@ -876,6 +876,11 @@ mod tests {
     /// value that happens to contain the word is not a key at all.
     #[test]
     fn only_whole_tokens_count() {
+        // Newer bootc writes the image digest as composefs.digest=.
+        assert_eq!(
+            backend_from_cmdline("rw composefs.digest=v1-sha512-12:6f8e2a1b lockdown=integrity"),
+            Some(Backend::Composefs)
+        );
         assert_eq!(backend_from_cmdline("rd.composefs=1 root=UUID=1234"), None);
         assert_eq!(
             backend_from_cmdline("root=UUID=1234 init=/usr/lib/composefs=x"),

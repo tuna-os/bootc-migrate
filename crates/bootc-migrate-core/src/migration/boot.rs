@@ -98,10 +98,10 @@ fn bootc_bls_entries(entries_dir: &Path) -> Result<Vec<PathBuf>> {
 fn bootc_bls_entry_targets_verity(entry_path: &Path, verity: &str) -> Result<bool> {
     let contents = fs::read_to_string(entry_path)
         .with_context(|| format!("reading BLS entry {}", entry_path.display()))?;
-    let expected = format!("composefs={verity}");
     Ok(contents.lines().any(|line| {
         let mut fields = line.split_whitespace();
-        matches!(fields.next(), Some("options")) && fields.any(|field| field == expected.as_str())
+        matches!(fields.next(), Some("options"))
+            && fields.any(|field| crate::composefs_karg::arg_digest(field) == Some(verity))
     }))
 }
 
@@ -816,7 +816,7 @@ fn build_ostree_fallback_on_esp(esp_path: &Path) -> Result<bootloader::BlsEntry>
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let options: Vec<&str> = cmdline
         .split_whitespace()
-        .filter(|w| !w.starts_with("composefs="))
+        .filter(|w| !crate::composefs_karg::is_arg(w))
         .collect();
 
     Ok(bootloader::BlsEntry {
@@ -853,7 +853,7 @@ fn build_ostree_fallback_entry() -> Result<bootloader::BlsEntry> {
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let options: Vec<&str> = cmdline
         .split_whitespace()
-        .filter(|w| !w.starts_with("composefs="))
+        .filter(|w| !crate::composefs_karg::is_arg(w))
         .collect();
 
     Ok(bootloader::BlsEntry {
@@ -1222,7 +1222,7 @@ fn migrate_to_systemd_boot(
         let strip = if dep.is_composefs {
             &[][..]
         } else {
-            &["composefs="][..]
+            crate::composefs_karg::PREFIXES
         };
         entries.push(bootloader::BlsEntry {
             title,
@@ -1335,7 +1335,7 @@ fn migrate_to_grub2(_sys: &SystemInfo, deps: &[BootDeployment], dry_run: bool) -
         let strip: &[&str] = if dep.is_composefs {
             &[]
         } else {
-            &["composefs="]
+            crate::composefs_karg::PREFIXES
         };
         let options = bootloader::systemd_boot::carry_over_kargs(&live_cmdline, strip);
 
@@ -1496,6 +1496,16 @@ mod tests {
         )
         .unwrap();
 
+        assert!(bootc_bls_entry_targets_verity(&entry, "current-verity").unwrap());
+        assert!(!bootc_bls_entry_targets_verity(&entry, "stale-verity").unwrap());
+
+        // Newer bootc writes the digest as composefs.digest=.
+        fs::write(
+            &entry,
+            "title Dakota\n\
+             options root=UUID=root composefs.digest=v1-sha512-12:current-verity rw\n",
+        )
+        .unwrap();
         assert!(bootc_bls_entry_targets_verity(&entry, "current-verity").unwrap());
         assert!(!bootc_bls_entry_targets_verity(&entry, "stale-verity").unwrap());
     }

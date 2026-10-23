@@ -120,6 +120,20 @@ WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 step() { printf '\033[1;36m[e2e %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 
+# The composefs image kernel argument. bootc wrote `composefs=<hex>`; newer
+# bootc writes `composefs.digest=v1-sha512-12:<hex>`. Both name the booted
+# image (crates/bootc-migrate-core/src/composefs_karg.rs). Anchored to a token
+# start, so `rd.composefs=` and `ostree.composefs=` do not match.
+CFS_KARG_RE='(^| )composefs(\.digest)?='
+# composefs_verity CMDLINE: the hex digest of the booted composefs image, in
+# either form, or nothing.
+composefs_verity() {
+    printf '%s\n' "$1" | tr ' ' '\n' | sed -n \
+        -e 's/^composefs=?\{0,1\}\(sha512:\)\{0,1\}\(..*\)/\2/p' \
+        -e 's/^composefs\.digest=.*:\(..*\)/\1/p' \
+        -e 's/^composefs\.digest=\([^:][^:]*\)$/\1/p' | head -1
+}
+
 # CI-friendly serial-console filter. The raw QEMU log dumps thousands of systemd
 # `[ OK ] Started …` lines per boot — readable on a TTY, useless in CI. Only
 # forward lines that carry actual signal (failures, sshd/login activity, BLS
@@ -1340,7 +1354,7 @@ fi
 for argument in "${command_line[@]}"; do
     case "$argument" in
         ostree=/*) printf '%s\n' "$argument"; collect readlink -e "/sysroot${argument#ostree=}" ;;
-        composefs=*) printf '%s\n' "$argument" ;;
+        composefs=* | composefs.digest=*) printf '%s\n' "$argument" ;;
     esac
 done
 echo '--- physical deployment directories ---'
@@ -2337,7 +2351,7 @@ if [ "$E2E_MODE" = "composefs-to-ostree" ]; then
     step "=== composefs-to-ostree: asserting the base booted composefs-native ==="
     BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $BASE_CMDLINE"
-    echo "$BASE_CMDLINE" | grep -qE '(^| )composefs=' || {
+    echo "$BASE_CMDLINE" | grep -qE "$CFS_KARG_RE" || {
         echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
         echo "      composefs-native install (bootc install to-disk --composefs-backend)."
         exit 1; }
@@ -2489,8 +2503,8 @@ REVSSH
     echo "  cmdline: $POST_CMDLINE"
     echo "$POST_CMDLINE" | grep -qE '(^| )ostree=' || {
         echo "FAIL: post-reboot cmdline has no ostree= — the OSTree deployment was not booted"; exit 1; }
-    if echo "$POST_CMDLINE" | grep -qE '(^| )composefs='; then
-        echo "FAIL: post-reboot cmdline still carries composefs="; exit 1
+    if echo "$POST_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
+        echo "FAIL: post-reboot cmdline still carries a composefs argument"; exit 1
     fi
     ssh $SSH_OPTS root@localhost "bootc status" || true
     BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.booted.image.image.image // empty')
@@ -2652,7 +2666,7 @@ if [ "$E2E_MODE" = "image-swap" ]; then
     step "=== image-swap: asserting the base booted composefs-native ==="
     BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $BASE_CMDLINE"
-    BASE_VERITY=$(echo "$BASE_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    BASE_VERITY=$(composefs_verity "$BASE_CMDLINE")
     [ -n "$BASE_VERITY" ] || {
         echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
         echo "      composefs-native install (bootc install to-disk --composefs-backend)."
@@ -2848,9 +2862,9 @@ SWAPSSH
     step "=== image-swap: post-reboot assertions ==="
     POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $POST_CMDLINE"
-    POST_VERITY=$(echo "$POST_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    POST_VERITY=$(composefs_verity "$POST_CMDLINE")
     [ -n "$POST_VERITY" ] || {
-        echo "FAIL: post-reboot cmdline has no composefs= — a composefs deployment was not booted"; exit 1; }
+        echo "FAIL: post-reboot cmdline has no composefs argument — a composefs deployment was not booted"; exit 1; }
     [ "$POST_VERITY" != "$BASE_VERITY" ] || {
         echo "FAIL: rebooted into the base deployment ($BASE_VERITY), not the staged one"; exit 1; }
     ssh $SSH_OPTS root@localhost "bootc status" || true
@@ -3830,8 +3844,8 @@ echo "  cmdline: $CFS_CMDLINE"
 # Anchored to a token boundary, matching backend_from_cmdline's whole-token
 # rule exactly: `-w` would also match `rd.composefs=`, which the parser rejects,
 # and a check looser than the code it guards is not a guard.
-echo "$CFS_CMDLINE" | grep -qE '(^| )composefs=' || {
-    echo "FAIL: booted cmdline has no composefs= parameter: $CFS_CMDLINE"; exit 1; }
+echo "$CFS_CMDLINE" | grep -qE "$CFS_KARG_RE" || {
+    echo "FAIL: booted cmdline has no composefs argument: $CFS_CMDLINE"; exit 1; }
 if echo "$CFS_CMDLINE" | grep -qE '(^| )ostree=' ; then
     echo "FAIL: composefs entry carries ostree= — backend detection is ambiguous"; exit 1
 fi
@@ -3906,7 +3920,7 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
         echo "FAIL: VM did not boot after undo"; tail -100 qemu.log; exit 1
     fi
     UNDO_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-    if echo "$UNDO_CMDLINE" | grep -q 'composefs='; then
+    if echo "$UNDO_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
         echo "FAIL: still booting composefs after undo (cmdline: $UNDO_CMDLINE)"; exit 1
     fi
     echo "$UNDO_CMDLINE" | grep -q 'ostree=' || {
@@ -4037,7 +4051,7 @@ wait_for_ssh_with_msg "OSTree rollback boot SSH" 360 "vm-rollback" || {
 
 # Cmdline must show the *OSTree* path: composefs= absent, ostree= present.
 ROLLBACK_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-if echo "$ROLLBACK_CMDLINE" | grep -q 'composefs='; then
+if echo "$ROLLBACK_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
     echo "FAIL: VM booted into composefs instead of OSTree (cmdline: $ROLLBACK_CMDLINE)"
     exit 1
 fi
@@ -4077,7 +4091,7 @@ wait_for_ssh_with_msg "Return-to-composefs SSH" 300 "vm-return-cfs" || {
 }
 
 RETURN_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-if ! echo "$RETURN_CMDLINE" | grep -q 'composefs='; then
+if ! echo "$RETURN_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
     echo "FAIL: did not return to composefs (cmdline: $RETURN_CMDLINE)"; exit 1
 fi
 echo "OK: Returned to composefs cleanly via restored BootOrder."

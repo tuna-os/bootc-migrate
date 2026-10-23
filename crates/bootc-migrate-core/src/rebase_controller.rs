@@ -267,15 +267,10 @@ pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
 /// Where a composefs host keeps each deployment's `/etc` and `.origin`.
 const COMPOSEFS_DEPLOY_ROOT: &str = "/sysroot/state/deploy";
 
-/// The verity digest in `composefs=` on the kernel command line. A leading
-/// `?` marks an image booted without signature enforcement; it is not part
-/// of the digest.
+/// The verity digest of the composefs image the kernel command line names,
+/// in either argument form ([`crate::composefs_karg`]).
 pub fn booted_composefs_verity(cmdline: &str) -> Option<&str> {
-    cmdline
-        .split_whitespace()
-        .find_map(|arg| arg.strip_prefix("composefs="))
-        .map(|v| v.trim_start_matches('?'))
-        .filter(|v| !v.is_empty())
+    crate::composefs_karg::digest(cmdline)
 }
 
 /// The staged deployment's verity: bootc's own report when it gives one,
@@ -783,10 +778,10 @@ impl ImageSwapConfig<'_> {
         // may have been told --source-backend composefs explicitly, but staging
         // relies on the running bootc's composefs support.
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-        if !cmdline.contains("composefs=") && !self.force {
+        if !crate::composefs_karg::present(&cmdline) && !self.force {
             bail!(
                 "System is not booted from a composefs deployment (/proc/cmdline has no \
-                 composefs= parameter). Use --force to override, or re-run with \
+                 composefs= or composefs.digest= parameter). Use --force to override, or re-run with \
                  --source-backend auto."
             );
         }
@@ -1053,6 +1048,10 @@ mod tests {
         );
         assert_eq!(
             booted_composefs_verity("composefs=?abc12 quiet"),
+            Some("abc12")
+        );
+        assert_eq!(
+            booted_composefs_verity("composefs.digest=v1-sha512-12:abc12 rw"),
             Some("abc12")
         );
         assert_eq!(booted_composefs_verity("rd.composefs=1 root=UUID=1"), None);

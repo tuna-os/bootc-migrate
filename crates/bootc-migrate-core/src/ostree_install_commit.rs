@@ -126,9 +126,7 @@ pub fn ostree_cmdline_path(cmdline: &str) -> Option<&str> {
 
 /// Whether the kernel command line names a composefs deployment.
 pub fn booted_composefs(cmdline: &str) -> bool {
-    cmdline
-        .split_whitespace()
-        .any(|arg| arg.starts_with("composefs="))
+    crate::composefs_karg::present(cmdline)
 }
 
 /// Whether a path of the old `/var` (relative to it) is covered by
@@ -419,7 +417,7 @@ pub fn plan(layout: &Layout, facts: &HostFacts) -> Result<CommitPlan> {
              reboot into the OSTree deployment first"
                 .into()
         } else if ostree {
-            "the kernel command line has ostree= and no composefs=".into()
+            "the kernel command line has ostree= and no composefs argument".into()
         } else {
             "the kernel command line has no ostree= argument".into()
         },
@@ -953,6 +951,9 @@ mod tests {
 
         assert_eq!(ostree_cmdline_path("ostree= quiet"), None);
         // A karg that merely contains the word is not the argument.
+        assert!(booted_composefs(
+            "rw composefs.digest=v1-sha512-12:abc lockdown=integrity"
+        ));
         assert!(!booted_composefs("rd.composefs=0"));
     }
 

@@ -148,6 +148,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- Every check for a composefs boot accepts both forms of the kernel
+  argument: `composefs=<hex>` and `composefs.digest=v1-sha512-12:<hex>`,
+  which newer bootc writes. Current Dakota images boot with the new form.
+  Before, preflight found no backend on such a host. The composefs → OSTree
+  and image-swap routes, `commit`, `rollback` and `status` refused it or saw
+  an OSTree boot. The OSTree fallback entries could also keep the argument.
+
 - Cross-base OstreeDeploy now remaps ownership in the stateroot's physical,
   shared `/var` instead of looking for a nonexistent `var` inside the staged
   deployment. The gating Bluefin → Dakota E2E cell seeds a divergent

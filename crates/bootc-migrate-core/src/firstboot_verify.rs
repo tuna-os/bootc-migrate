@@ -234,7 +234,7 @@ result=$(cat "$STATE_DIR/verify-result" 2>/dev/null || echo MISSING)
 commit_pending=0
 # Same three conditions as `status`: our own report, booted the staged
 # composefs deployment, legacy content still on disk.
-if [ -f "$STATE_DIR/report.json" ] && grep -q 'composefs=' "$CMDLINE" 2>/dev/null; then
+if [ -f "$STATE_DIR/report.json" ] && grep -qE '(^| )composefs(\.digest)?=' "$CMDLINE" 2>/dev/null; then
     # Any non-dot entry besides the target's own bootc/ storage.
     for e in /sysroot/ostree/*; do
         [ -e "$e" ] || continue

@@ -569,11 +569,13 @@ impl InstallConfig<'_> {
         println!("Checking system state...");
 
         let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-        if self.source == InstallSource::Composefs && !cmdline.contains("composefs=") && !self.force
+        if self.source == InstallSource::Composefs
+            && !crate::composefs_karg::present(&cmdline)
+            && !self.force
         {
             bail!(
                 "System is not booted from a composefs deployment (/proc/cmdline has no \
-                 composefs= parameter); this route converts a composefs host back to the \
+                 composefs= or composefs.digest= parameter); this route converts a composefs host back to the \
                  OSTree backend. Use --force to override."
             );
         }
@@ -1548,13 +1550,12 @@ struct SourceEtc {
 }
 
 /// The fs-verity digest of the booted composefs image, from the kernel
-/// command line's `composefs=` argument. Pure so it is table-tested.
+/// command line's composefs argument in either form
+/// ([`crate::composefs_karg`]). Pure so it is table-tested.
 pub fn booted_composefs_verity(cmdline: &str) -> Option<String> {
-    cmdline
-        .split_whitespace()
-        .find_map(|t| t.strip_prefix("composefs="))
-        .map(|v| v.trim_start_matches("sha512:").to_string())
-        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_hexdigit()))
+    crate::composefs_karg::digest(cmdline)
+        .filter(|v| v.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
 }
 
 /// Mount the booted composefs image read-only from the host's own store
@@ -2134,6 +2135,10 @@ mod tests {
         );
         assert_eq!(
             booted_composefs_verity("composefs=sha512:0f1e"),
+            Some("0f1e".to_string())
+        );
+        assert_eq!(
+            booted_composefs_verity("rw composefs.digest=v1-sha512-12:0f1e lockdown=integrity"),
             Some("0f1e".to_string())
         );
         assert_eq!(

@@ -31,6 +31,7 @@
 pub mod boot_audit;
 pub mod boot_cleanup;
 pub mod composefs;
+pub mod composefs_karg;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
 pub mod cross_base;

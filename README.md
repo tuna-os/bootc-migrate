@@ -101,7 +101,7 @@ sudo systemctl reboot
 **5. Confirm, then make it permanent:**
 
 ```bash
-cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
+grep -oE 'composefs(\.digest)?=[^ ]*' /proc/cmdline   # confirms composefs boot
 sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 

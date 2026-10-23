@@ -30,9 +30,9 @@ pub fn commit(dry_run: bool) -> Result<()> {
     // Sanity check: refuse to run if booted via the OSTree side. Committing
     // would delete the rootfs we're currently mounted on top of.
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if !cmdline.contains("composefs=") {
+    if !crate::composefs_karg::present(&cmdline) {
         anyhow::bail!(
-            "/proc/cmdline does not contain composefs= — current boot looks like OSTree. \
+            "/proc/cmdline has no composefs= or composefs.digest= — current boot looks like OSTree. \
              Reboot into the composefs entry before running commit.\n\
              cmdline: {}",
             cmdline.trim()
