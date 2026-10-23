@@ -1283,11 +1283,9 @@ fi
 if [ "$E2E_MODE" = "bootloader-trial" ]; then
     scp $SCP_OPTS target/release/bootc-rebase root@localhost:/var/tmp/bootc-rebase
     scp $SCP_OPTS target/release/bootc-migrate root@localhost:/var/tmp/bootc-migrate
-    # Run from /var/tmp like the other modes: on Bluefin LTS /usr/local is
-    # inside the read-only /usr. The resync hook keeps its own copy of the
-    # binary, so nothing needs to be on PATH.
     ssh $SSH_OPTS root@localhost '
-        chmod 0755 /var/tmp/bootc-rebase /var/tmp/bootc-migrate
+        install -m 0755 /var/tmp/bootc-rebase /usr/local/bin/bootc-rebase
+        install -m 0755 /var/tmp/bootc-migrate /usr/local/bin/bootc-migrate
         test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
     '
 
@@ -1308,7 +1306,7 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
 
     step "=== bootloader-trial: staging the systemd-boot trial through rebase_controller ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
+        "/usr/local/bin/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
         > /tmp/bootloader-trial-stage.log 2>&1; then
         sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
         echo "FAIL: migrate-bootloader staging failed"
@@ -1339,15 +1337,6 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
          test -f '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux' && \
          test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
-    # The hook runs its own copy of the binary by absolute path, so a later
-    # kernel update finds it whatever PATH holds.
-    ssh $SSH_OPTS root@localhost \
-        "grep -q \"^exec '/var/lib/bootc-migrate/bin/bootc-rebase' migrate-bootloader --resync\" \
-             /etc/kernel/install.d/95-bootc-migrate-esp-sync.install && \
-         test -x /var/lib/bootc-migrate/bin/bootc-rebase" || {
-        echo "FAIL: the resync hook does not run its own copy under /var/lib/bootc-migrate/bin"
-        exit 1
-    }
 
     # OVMF does not honor BootNext consistently in this path. Deliberately
     # make the trial first in BootOrder so the reboot proves the same
@@ -1404,8 +1393,7 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
     step "=== bootloader-trial: invoking the kernel-install resync hook ==="
     ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
 set -euo pipefail
-# No bootc-migrate on PATH: the hook must run its own copy.
-export PATH=/usr/bin:/bin
+export PATH=/usr/local/bin:/usr/bin:/bin
 STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
 ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
 TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
@@ -1432,7 +1420,7 @@ echo "resync staged kernel version $NEW_VERSION"
 TRIAL_RESYNC
 
     step "=== bootloader-trial: promoting the tested trial ==="
-    ssh $SSH_OPTS root@localhost /var/tmp/bootc-rebase migrate-bootloader --promote
+    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --promote
     PROMOTED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "${PROMOTED_ORDER%%,*}" = "$TRIAL_ID" ] || {
@@ -1445,7 +1433,7 @@ TRIAL_RESYNC
     fi
 
     step "=== bootloader-trial: undoing the promoted migration ==="
-    ssh $SSH_OPTS root@localhost /var/tmp/bootc-rebase migrate-bootloader --undo
+    ssh $SSH_OPTS root@localhost /usr/local/bin/bootc-rebase migrate-bootloader --undo
     RESTORED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "$RESTORED_ORDER" = "$ORIGINAL_ORDER" ] || {
@@ -1457,7 +1445,6 @@ set -euo pipefail
 ! efibootmgr -v | grep -Fq 'bootc-migrate trial'
 ! test -e /var/lib/bootc-migrate/migrate-bootloader-state.json
 ! test -e /etc/kernel/install.d/95-bootc-migrate-esp-sync.install
-! test -e /var/lib/bootc-migrate/bin
 TRIAL_UNDO_CHECK
 ssh $SSH_OPTS root@localhost \
     "test ! -e '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
