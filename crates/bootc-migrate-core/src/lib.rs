@@ -11,6 +11,8 @@
 //! - [`de_controller`] — read-only policy for planning cross-desktop config migration
 //! - [`de_migrate`] — cross-DE config stash/restore, portable-subset extraction, hook contract
 //! - [`mergetc`] — 3-way /etc merge, identity DB union, dangling-symlink pruning
+//! - [`package_etc`] — package-database `/etc` classification, target-first
+//!   human identity merge, ownership remap plan, and package-to-bootc fstab rewrite
 //! - [`firstboot_repair`] — first-boot auto-repair (L3) of known migration breakage:
 //!   identity manifest, ownership/mtime, machine-id, flatpak, SELinux labels
 //! - [`etc_conflict`] — cross-base /etc conflict policy applied to a deployment
@@ -48,6 +50,7 @@ pub mod motd;
 pub mod ostree;
 pub mod ostree_install;
 pub mod ostree_install_commit;
+pub mod package_etc;
 pub mod package_host;
 pub mod preflight;
 pub mod rebase_controller;
