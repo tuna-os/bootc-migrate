@@ -10,11 +10,11 @@ use anyhow::{Result, bail};
 
 use bootc_migrate_core::preflight;
 use bootc_migrate_core::rebase_controller::{
-    CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig,
+    CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig, StandaloneBootloaderConfig,
 };
 use bootc_migrate_core::source_host;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod boot_entries;
 mod boot_entry_review;
@@ -22,7 +22,7 @@ mod commit_command;
 mod de_migrate_command;
 mod scan_command;
 
-use bootc_migrate_core::rebase_plan::{Backend, Strategy, bootloader_plan, plan, route};
+use bootc_migrate_core::rebase_plan::{Backend, Strategy, plan, route};
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
@@ -43,13 +43,11 @@ enum Commands {
     Rebase(Args),
     /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
     Rollback(RollbackArgs),
-    /// GRUB2 -> systemd-boot bootloader migration (issue #65). NOT YET
-    /// IMPLEMENTED: the ESP/NVRAM mutation and the kernel-install resync
-    /// hook (without which a flipped system would silently boot stale
-    /// kernels after the next update) don't exist yet. This subcommand
-    /// exists so the CLI shape and pure BLS-entry/karg-carry-over/
-    /// entry-token logic (`bootc_migrate_core::migration::bootloader::systemd_boot`)
-    /// can be reviewed ahead of the live mutation work.
+    /// GRUB2 -> systemd-boot bootloader migration (issue #65). Stages a
+    /// one-boot `BootNext` trial while preserving the existing BootOrder;
+    /// `--promote` makes it persistent after a successful trial and
+    /// `--undo` removes the staged artifacts. The installed kernel-install
+    /// hook keeps the ESP copy current.
     MigrateBootloader(MigrateBootloaderArgs),
     /// Audit and clean up UEFI boot entries (issue #31). A bare invocation
     /// is read-only: it reports which entries look
@@ -210,17 +208,53 @@ struct BootEntriesArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 struct MigrateBootloaderArgs {
-    /// Target bootloader (only "systemd-boot" is planned)
+    /// Target bootloader (only "systemd-boot" is supported).
     #[arg(long, default_value = "systemd-boot")]
     to: String,
 
-    /// Dry-run: print every action without executing
+    /// Dry-run: print every action without executing.
     #[arg(long)]
     dry_run: bool,
 
-    /// Undo a previous migrate-bootloader run
+    /// Force migration even if readiness checks fail.
+    #[arg(short, long)]
+    force: bool,
+
+    /// Undo a previous systemd-boot trial or promotion.
     #[arg(long)]
     undo: bool,
+
+    /// Promote a successfully tested trial to the persistent BootOrder.
+    #[arg(long)]
+    promote: bool,
+
+    /// Internal kernel-install entry point.
+    #[arg(long, hide = true)]
+    resync: bool,
+
+    /// Entry token supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    entry_token: Option<String>,
+
+    /// Kernel version supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    kernel_version: Option<String>,
+
+    /// Kernel image supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    kernel_image: Option<String>,
+
+    /// Initramfs image supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    initrd: Option<String>,
+
+    /// BLS title supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    title: Option<String>,
+
+    /// OCI image to extract systemd-boot from when the host lacks it.
+    #[arg(long)]
+    from_image: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -318,21 +352,24 @@ struct Args {
     de_migrate: bool,
 }
 
-/// Stub (issue #65): the pure BLS-entry/karg-carry-over/entry-token core
-/// lives in `bootc_migrate_core::migration::bootloader::systemd_boot` and is
-/// unit-tested, but the live ESP populate + NVRAM cutover + kernel-install
-/// resync hook aren't implemented — see the doc comment on
-/// `Commands::MigrateBootloader`. Refuses unconditionally so this can't be
-/// mistaken for a working migration.
-fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
-    let plan = bootloader_plan();
-    println!("Phases: {}", plan.phase_names());
-    println!("Bootloader policy: {:?}", plan.bootloader);
-    bail!(
-        "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
-         kernel-install resync hook don't exist. See \
-         https://github.com/tuna-os/bootc-migrate/issues/65"
-    );
+/// Run the standalone bootloader action through the shared rebase controller.
+fn run_migrate_bootloader(args: &MigrateBootloaderArgs) -> Result<()> {
+    check_root_privilege()?;
+    StandaloneBootloaderConfig {
+        to: &args.to,
+        dry_run: args.dry_run,
+        force: args.force,
+        undo: args.undo,
+        promote: args.promote,
+        resync: args.resync,
+        entry_token: args.entry_token.as_deref(),
+        kernel_version: args.kernel_version.as_deref(),
+        kernel_image: args.kernel_image.as_deref().map(Path::new),
+        initrd: args.initrd.as_deref().map(Path::new),
+        title: args.title.as_deref(),
+        from_image: args.from_image.as_deref(),
+    }
+    .run()
 }
 
 fn parse_backend(s: &str) -> Result<Backend> {
@@ -965,13 +1002,16 @@ mod tests {
     }
 
     #[test]
-    fn migrate_bootloader_stub_always_refuses() {
-        let args = MigrateBootloaderArgs {
-            to: "systemd-boot".into(),
-            dry_run: false,
-            undo: false,
-        };
-        let err = run_migrate_bootloader(&args).unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+    fn migrate_bootloader_action_flags_parse() {
+        let cli = Cli::parse_from(["bootc-rebase", "migrate-bootloader", "--promote"]);
+        match cli.command {
+            Some(Commands::MigrateBootloader(args)) => {
+                assert!(args.promote);
+                assert!(!args.undo);
+                assert!(!args.resync);
+                assert_eq!(args.to, "systemd-boot");
+            }
+            other => panic!("expected Commands::MigrateBootloader, got {other:?}"),
+        }
     }
 }
