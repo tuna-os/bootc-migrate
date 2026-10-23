@@ -1607,20 +1607,14 @@ mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
 REBASEFIX
 
-    # The guest cannot reach ghcr.io for the target-image SCAN (#191) — bootc
-    # switch pulls fine, the scan path does not — so gate_cross_base returns
-    # Unknown here. Since #191 that is a refusal rather than a silent
-    # proceed, which is the whole point: a gate that cannot see must not wave
-    # things through.
+    # The gate depends on scanning the target image before `bootc switch`.
+    # Prove it refuses before opting in. A clean scan should identify the
+    # Bluefin -> Dakota/Aurora pairs as cross-base; an infrastructure
+    # regression may instead produce the fail-closed Unknown verdict (#191).
     #
-    # Prove it fires before opting out of it. The refusal happens before any
-    # staging work, so this costs seconds, and it is the only live coverage
-    # that the gate actually gates — the unit tests cover the policy, not the
-    # wiring.
-    # The scan path (curl -> ghcr.io) has failed inside the guest while
-    # `bootc switch` pulled fine moments later, which blocked both #187 and
-    # #188 without ever naming a cause. Probe it here so the run reports the
-    # truth rather than leaving it to be inferred from a downstream warning.
+    # Probe the same guest path first so a scan failure is classified as
+    # registry/token infrastructure rather than mistaken for a same-lineage
+    # result or an unexercised code path.
     step "=== ostree-rebase: probing the guest's registry reachability (#187) ==="
     ssh $SSH_OPTS root@localhost '
         echo "curl binary: $(command -v curl || echo MISSING)"
@@ -1677,9 +1671,44 @@ REBASEFIX
         exit 1
     fi
 
-    # These image pairs are same-lineage Fedora (bluefin:stable -> dakota /
-    # aurora), and the harness knows it, so it is the operator that opts in.
-    # That is what --accept-cross-base is for; it is not a way around the gate.
+    # A known cross-base result must exercise more than report rendering.
+    # Seed one file with the first reported old UID/GID so the apply pass has
+    # real work under /var, plus a deliberate all-three-differ /etc conflict.
+    # dconf/db/distro is present in both Bluefin and Dakota/Aurora and their
+    # vendor defaults differ; appending the marker makes the live value differ
+    # from both.
+    CROSS_BASE_ETC_MARKER="e2e-cross-base-conflict-marker"
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        REMAP_SPEC=$(echo "$GATE_OUT" | sed -nE \
+            's/^[[:space:]]*([^[:space:]]+)[[:space:]]+(uid|gid)[[:space:]]+([0-9]+)[[:space:]]+->[[:space:]]+([0-9]+)$/\1 \2 \3 \4/p' \
+            | head -1)
+        if [ -z "$REMAP_SPEC" ]; then
+            echo "FAIL: cross-base pair has no divergent system account to seed."
+            echo "      The remap apply path would remain untested."
+            exit 1
+        fi
+        read -r REMAP_NAME REMAP_KIND REMAP_OLD REMAP_NEW <<<"$REMAP_SPEC"
+        step "=== ostree-rebase: seeding remap + /etc conflict fixtures (#187) ==="
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_KIND='$REMAP_KIND' REMAP_OLD='$REMAP_OLD' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASEFIX'
+set -e
+test -f /etc/dconf/db/distro || {
+    echo "FAIL: /etc/dconf/db/distro is absent; cross-base conflict fixture cannot be seeded"; exit 1; }
+printf '\n# %s\n' "$ETC_MARKER" >> /etc/dconf/db/distro
+echo "cross-base-remap-fixture" > /var/rebase-test/remap-owned.txt
+case "$REMAP_KIND" in
+    uid) chown "$REMAP_OLD" /var/rebase-test/remap-owned.txt ;;
+    gid) chgrp "$REMAP_OLD" /var/rebase-test/remap-owned.txt ;;
+    *) echo "FAIL: unsupported remap kind $REMAP_KIND"; exit 1 ;;
+esac
+CROSSBASEFIX
+    fi
+
+    # Every ostree-rebase run proves the gate before opting in. The gating
+    # Bluefin -> Dakota pair is currently a known cross-base pair; same-lineage
+    # desktop-ring cells pass the dry-run gate without needing the opt-in, but
+    # accepting here is harmless and also covers an Unknown scan fail-closed.
     REBASE_FLAGS="--accept-cross-base"
 
     # #188: on the cross-DE cell, also ask for desktop migration. Without
@@ -1728,20 +1757,49 @@ REBASEFIX
     fi
     sed 's/^/[rebase] /' /tmp/rebase-out.log
 
-    # The gate above already proved this pair is cross-base by scanning it, so
-    # the opted-in re-base must show the remap running. This is #187's actual
-    # deliverable — the cross-base code path executing under assertion — and it
-    # is available on this existing cell, without a dedicated matrix entry,
-    # now that the target scan works (the token-scope fix).
+    # A clean cross-base finding must execute both #67 apply paths, not merely
+    # print their plans. The seeded ownership and all-three-differ fixtures
+    # make each pass produce an observable staged result.
     if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
-        step "=== ostree-rebase: asserting the cross-base remap ran after opt-in (#187) ==="
-        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
-            echo "FAIL: the gate identified this pair as cross-base, but the"
-            echo "      opted-in re-base printed no remap report. The refusal"
-            echo "      path ran and the apply path did not."
-            exit 1
-        fi
-        echo "OK: cross-base remap report emitted during the opted-in re-base."
+        step "=== ostree-rebase: asserting remap + /etc policy applied (#187) ==="
+        for needle in "Cross-base UID/GID remap report" \
+                      "Cross-base /etc conflict report" \
+                      "/etc/dconf/db/distro"; do
+            if ! grep -qF "$needle" /tmp/rebase-out.log; then
+                echo "FAIL: cross-base output lacks '$needle'."
+                exit 1
+            fi
+        done
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_NAME='$REMAP_NAME' REMAP_KIND='$REMAP_KIND' REMAP_NEW='$REMAP_NEW' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASECHECK'
+set -e
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ROOT="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}"
+test -f "$DEPLOY_ROOT/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: cross-base remap JSON report missing"; exit 1; }
+grep -qF "\"name\": \"$REMAP_NAME\"" "$DEPLOY_ROOT/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: remap JSON does not name $REMAP_NAME"; exit 1; }
+case "$REMAP_KIND" in
+    uid) actual=$(stat -c %u /var/rebase-test/remap-owned.txt) ;;
+    gid) actual=$(stat -c %g /var/rebase-test/remap-owned.txt) ;;
+esac
+[ "$actual" = "$REMAP_NEW" ] || {
+    echo "FAIL: /var remap fixture still has $REMAP_KIND $actual, expected $REMAP_NEW"; exit 1; }
+test -f "$DEPLOY_ROOT/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: cross-base /etc conflict JSON report missing"; exit 1; }
+grep -qF '"path": "dconf/db/distro"' "$DEPLOY_ROOT/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: /etc conflict JSON does not name dconf/db/distro"; exit 1; }
+grep -qF "$ETC_MARKER" "$DEPLOY_ROOT/etc/dconf/db/distro.rebase-old" \
+    || { echo "FAIL: displaced /etc value is absent from .rebase-old sidecar"; exit 1; }
+! grep -qF "$ETC_MARKER" "$DEPLOY_ROOT/etc/dconf/db/distro" \
+    || { echo "FAIL: staged /etc kept the displaced source value"; exit 1; }
+cmp -s "$DEPLOY_ROOT/etc/dconf/db/distro" "$DEPLOY_ROOT/usr/etc/dconf/db/distro" \
+    || { echo "FAIL: staged /etc did not take the target's dconf default"; exit 1; }
+CROSSBASECHECK
+        echo "OK: /var ownership remapped and /etc target default + sidecar staged."
     fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
@@ -2222,6 +2280,28 @@ loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus
 # checks at all — no separate assertion needed.)
 echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
+
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        step "=== ostree-rebase: cross-base results survived reboot (#187) ==="
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_KIND='$REMAP_KIND' REMAP_NEW='$REMAP_NEW' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASEPOST'
+set -e
+case "$REMAP_KIND" in
+    uid) actual=$(stat -c %u /var/rebase-test/remap-owned.txt) ;;
+    gid) actual=$(stat -c %g /var/rebase-test/remap-owned.txt) ;;
+esac
+[ "$actual" = "$REMAP_NEW" ] || {
+    echo "FAIL: rebooted /var fixture has $REMAP_KIND $actual, expected $REMAP_NEW"; exit 1; }
+grep -qF "$ETC_MARKER" /etc/dconf/db/distro.rebase-old \
+    || { echo "FAIL: rebooted deployment lost the .rebase-old sidecar"; exit 1; }
+! grep -qF "$ETC_MARKER" /etc/dconf/db/distro \
+    || { echo "FAIL: rebooted deployment restored the displaced source value"; exit 1; }
+cmp -s /etc/dconf/db/distro /usr/etc/dconf/db/distro \
+    || { echo "FAIL: rebooted /etc does not hold the target's dconf default"; exit 1; }
+echo "OK: remapped ownership, target default and sidecar survived reboot."
+CROSSBASEPOST
+    fi
 
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         # #68's other half: the stash is only useful if switching back

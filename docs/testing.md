@@ -82,96 +82,45 @@ and returns to the target.
 The three rows remain exploratory until the package route (#373–#379) is complete
 and the first run passes. At that point, make the Fedora Cloud row a required gate.
 
-### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
+### Cross-base OstreeDeploy coverage — active, gating
 
-`ostree-rebase` mode takes `E2E_CROSS_BASE=1`, which adds
-`--accept-cross-base` (the route refuses to run without it) and asserts that
-`=== Cross-base UID/GID remap report ===` appeared in the output.
+The gating `bluefin:stable → dakota:stable` OstreeDeploy cell is cross-base:
+the target scan finds different `ID`/`ID_LIKE` lineages. It exercises the
+complete #67 flow without adding another expensive matrix entry:
 
-The assertion is the point. `gate_cross_base` returns `None` and prints
-nothing whenever it declines to act, so silence is indistinguishable from
-success and an unasserted cell would pass vacuously.
+1. A dry run without `--accept-cross-base` must identify the pair as
+   cross-base and refuse it. An unscannable target instead takes #191's
+   fail-closed `Unknown` path, which the harness reports separately.
+2. The harness takes the first UID/GID divergence from the remap report and
+   creates a file under the stateroot's shared `/var` with that old numeric
+   owner. It also appends a marker to `/etc/dconf/db/distro`, whose Bluefin
+   and Dakota vendor defaults differ, producing a deliberate three-way
+   conflict.
+3. The accepted re-base must emit both the remap and `/etc` conflict reports
+   and their JSON twins. Before reboot, the `/var` fixture must have the
+   target ID; `/etc/dconf/db/distro` must equal the target default; and the
+   displaced marked value must exist as `.rebase-old`.
+4. The same ownership, target-default and sidecar checks run again after
+   reboot.
 
-**There is still no matrix cell using it** (#187), but the blocker is now
-identified and it is *not* what this file claimed before.
+These assertions prevent both vacuous-pass shapes that originally left #67
+unproven: a scan that never evaluates `is_cross_base`, and reports that render
+without either filesystem apply pass doing work. They also cover OSTree's
+actual `/var` layout: deployments share the physical
+`/ostree/deploy/<stateroot>/var`; there is no per-deployment `var` tree to
+walk.
 
-The diagnostic below produced its first real output on 2026-08-28:
+Every ostree-rebase cell still probes the guest's registry path
+(`curl`, `https://ghcr.io/v2/`, and resolver state) before running the gate.
+This distinguishes registry/token infrastructure from a code or assertion
+failure. The earlier ghcr.io token-request 403 is fixed: current runs receive
+the expected registry challenge, scan the target, and classify the
+Bluefin → Dakota pair as cross-base.
 
-```
-could not reach registry ghcr.io
-  (https: token fetch failed: curl: (22) The requested URL returned error: 403
- ; http: unexpected status from http://ghcr.io/v2/: 301)
-```
-
-ghcr.io **is** reachable from the guest. The `http` attempt got ghcr.io's
-redirect to HTTPS; the `https` attempt got a `401` challenge, parsed it, and
-requested a token — and that token request returned **403**. So `curl` is
-present, DNS resolves, TLS works, and `/v2/` round-trips. What fails is
-specifically `fetch_bearer_token`.
-
-This file previously said the scan "cannot reach ghcr.io", which sent
-investigations toward guest networking. That was wrong. It also explains why
-`bootc switch` pulls fine moments later: containers/image builds its token
-request differently — never evidence about connectivity, only that our token
-request is malformed in a way bootc's is not.
-
-A 403 (not a 401) from the token endpoint points at a malformed or
-over-scoped request: scope construction (`repository:<owner>/<name>:pull`),
-a synthesized `service` parameter, or header expectations ghcr.io enforces
-more strictly than Docker Hub. Tracked on #187.
-
-Two things were fixed to make that blocker diagnosable rather than merely
-observed:
-
-- `RegistryEndpoint::resolve` used to `continue` past each scheme's error and
-  report a single opaque `could not reach registry ghcr.io (tried
-  ["https","http"])`. Curl-not-installed, DNS failure, a TLS rejection, a
-  proxy's 403 and a 401 with no challenge all looked identical — which is
-  exactly the information needed to fix any of them. It now reports what each
-  scheme actually did.
-- The scan retry was 3 attempts at a flat 2s, covering only ~4s of a guest's
-  network coming up. It is now 4 attempts with exponential backoff (~14s), and
-  a non-retryable failure (a missing `curl`) returns immediately instead of
-  burning the window and reporting itself as "after N attempts", which reads
-  like a network fault.
-
-The `ostree-rebase` path also probes the guest's registry reachability
-directly (`[registry-probe]` lines: whether `curl` exists, what
-`https://ghcr.io/v2/` returns, and `/etc/resolv.conf`), so the next run of any
-ostree-rebase cell reports the true cause rather than leaving it to inference.
-
-That same scan failure is why **every `ostree-rebase` cell passes
-`--accept-cross-base`**. Since #191 an unscannable target is a refusal rather
-than a silent proceed, so the harness — which knows its image pairs are
-same-lineage Fedora — has to opt in explicitly, exactly as a human operator
-would. The cells assert the refusal *first*, without the flag, so the gate's
-wiring has live coverage and cannot regress to waving things through.
-
-### The matrix already has a cross-base pair
-
-With the scan working, `is_cross_base` was evaluated for the first time —
-and `bluefin:stable → dakota:stable` **is** cross-base. From the gating
-ostree re-base cell:
-
-```
-=== Cross-base UID/GID remap report ===
-Diverging system accounts (renumbered during the re-base):
-  wheel                    gid 10 -> 997
-2 chown pass(es) will run over /var and preserved /etc.
-Error: Cross-base re-base detected (host and target disagree on ID/ID_LIKE).
-```
-
-This also corrects a second standing assumption. These pairs were described
-here as "same-lineage Fedora", and the worry was that a cross-base cell would
-need an exotic image because `is_cross_base` is lineage-aware and CentOS
-declares `ID_LIKE="rhel fedora"`. Neither the pessimism nor the premise
-survived contact: the existing pair qualifies.
-
-So #187 does not need a dedicated matrix cell. The gating `ostree-rebase`
-cell now asserts, after opting in with `--accept-cross-base`, that the remap
-report actually appears — the cross-base path executing under assertion,
-which is what the issue asks for. `E2E_CROSS_BASE=1` remains available for
-forcing the check on a pair chosen deliberately.
+`E2E_CROSS_BASE=1` remains available to require a deliberately selected
+ostree-rebase pair to reach the cross-base report. The normal gating cell no
+longer needs that flag: once its dry-run scan identifies a cross-base pair,
+the harness automatically runs all remap and conflict-policy assertions.
 
 ### Desktop migration (`E2E_DE_MIGRATE=1`) — active on the cross-DE cell
 
@@ -188,9 +137,9 @@ assertion, the failure branches name which of the four silent causes occurred
 (flag not wired, same desktop, no human users, or target scan failed) rather
 than guessing one.
 
-Because desktop detection scans the target image, this cell depends on the
-same registry path as `E2E_CROSS_BASE`, and is blocked by the same 403 on the
-token fetch described above.
+Desktop detection uses the same target-image scan as the cross-base gate.
+The registry token-scope fix therefore keeps both checks live; a scan
+regression is distinguished explicitly from a same-desktop result.
 
 After the reboot, the cell also checks the return trip. On the booted Aurora,
 it restores the GNOME stash with the `de-migrate restore` subcommand. Then it

@@ -148,6 +148,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- Cross-base OstreeDeploy now remaps ownership in the stateroot's physical,
+  shared `/var` instead of looking for a nonexistent `var` inside the staged
+  deployment. The gating Bluefin → Dakota E2E cell seeds a divergent
+  UID/GID-owned file and a three-way `/etc` conflict, then requires the
+  remapped owner, target default and `.rebase-old` sidecar before and after
+  reboot (#187).
+
 - The `migrate-bootloader` resync hook and `--undo` find the ESP again
   when the recorded mount is gone. When the image does not mount its ESP,
   staging mounts it privately under `/run`, and that mount does not survive
