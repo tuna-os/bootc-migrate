@@ -2246,6 +2246,12 @@ REVDIAG
     step "=== composefs-to-ostree: re-injecting e2e-sshd into the OSTree deployment ==="
     ssh $SSH_OPTS root@localhost bash <<'REVSSH'
 set -e
+# bootc-rebase puts the /sysroot mount back to read-only when it finishes.
+# These are test-only edits, so lift that one flag (bind: not the
+# filesystem under it) for them.
+if grep -qE '^[^ ]+ /sysroot [^ ]+ ro[, ]' /proc/mounts; then
+    mount -o remount,bind,rw /sysroot
+fi
 DEPLOY_ETC=$(ls -d /sysroot/ostree/deploy/default/deploy/*.0 | head -1)/etc
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: deployment etc dir not found"; exit 1; }
 mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
