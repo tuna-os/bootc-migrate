@@ -49,6 +49,12 @@ sudo install -m755 bootc-migrate /usr/local/bin/bootc-migrate
 sudo install -m755 bootc-rebase /usr/local/bin/bootc-rebase
 ```
 
+On Bluefin LTS, `/usr/local` is part of the read-only `/usr`, so the
+`install` commands fail. Run the binaries from the directory where you
+unpacked them instead (`sudo ./bootc-migrate …`). Nothing later needs them on
+`PATH`: the bootloader resync hook keeps its own copy under
+`/var/lib/bootc-migrate/bin`.
+
 <details><summary>…or pull the container image</summary>
 
 A minimal image ships the same binary, useful when GitHub Releases is rate-limited/blocked, or to `COPY --from=` it into another Containerfile:

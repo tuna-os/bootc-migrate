@@ -132,6 +132,19 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The `migrate-bootloader` resync hook now runs its own copy of the binary,
+  stored under `/var/lib/bootc-migrate/bin`, by absolute path. It used to run
+  `bootc-migrate` from `PATH`. On Bluefin LTS, `/usr/local` is part of the
+  read-only `/usr`, so no writable directory on `PATH` survives a reboot, and
+  a kernel update after the trial found no binary. `--undo` removes the copy
+  with the hook.
+
+- `Strategy::OstreeInstall` holds `/sysroot` writable from the first write
+  under it to the end of the run. It created the stateroot `/var` before its
+  own `remount,rw`. That only worked while the preflight probe left
+  `/sysroot` writable by mistake, which #419 fixed, so both OstreeInstall E2E
+  cells failed with `Read-only file system`.
+
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
   deployment through systemd-boot ("Linux Boot Manager") and an
