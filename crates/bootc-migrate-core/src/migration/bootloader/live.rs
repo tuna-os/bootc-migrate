@@ -91,6 +91,12 @@ pub const STATE_PATH: &str = "/var/lib/bootc-migrate/migrate-bootloader-state.js
 
 /// `kernel-install` drop-in installed by the migration.
 pub const RESYNC_HOOK_PATH: &str = "/etc/kernel/install.d/95-bootc-migrate-esp-sync.install";
+/// Where the resync hook keeps its own copy of the binary it runs.
+///
+/// The hook cannot rely on `PATH`: on images that keep `/usr/local` inside
+/// the read-only `/usr` (Bluefin LTS), nothing writable on `PATH` survives a
+/// reboot, so `bootc-migrate` is wherever the operator ran it from.
+pub const HOOK_BINARY_DIR: &str = "/var/lib/bootc-migrate/bin";
 
 const TRIAL_LABEL: &str = "Linux Boot Manager (bootc-migrate trial)";
 const LOADER_RELATIVE_PATHS: [&str; 2] =
@@ -800,6 +806,17 @@ pub fn run_undo(state_path: &Path) -> Result<()> {
         state.loader_conf_before.as_deref(),
     )?;
     restore_optional(Path::new(RESYNC_HOOK_PATH), state.hook_before.as_deref())?;
+    // The hook's binary copy goes with the hook, unless the hook restored
+    // above still runs it.
+    if !state
+        .hook_before
+        .as_deref()
+        .is_some_and(|h| h.contains(HOOK_BINARY_DIR))
+        && let Err(e) = fs::remove_dir_all(HOOK_BINARY_DIR)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(e).with_context(|| format!("removing {HOOK_BINARY_DIR}"));
+    }
     fs::remove_file(state_path).with_context(|| format!("removing {}", state_path.display()))?;
 
     println!("migrate-bootloader undone: ESP entries, resync hook, and trial NVRAM state removed.");
@@ -810,7 +827,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn resync_hook_script(entry_token: &str, title: &str) -> String {
+fn resync_hook_script(binary: &str, entry_token: &str, title: &str) -> String {
     format!(
         "#!/bin/sh\n\
 # Installed by `bootc-migrate migrate-bootloader`; do not edit by hand.\n\
@@ -821,20 +838,49 @@ KERNEL_IMAGE=\"${{4:-}}\"\n\
 INITRD=\"${{5:-}}\"\n\
 [ \"$COMMAND\" = add ] || exit 0\n\
 [ -n \"$KERNEL_VERSION\" ] || exit 0\n\
-exec bootc-migrate migrate-bootloader --resync --entry-token {} --title {} \\\n    --kernel-version \"$KERNEL_VERSION\" \\\n    --kernel-image \"$KERNEL_IMAGE\" \\\n    --initrd \"$INITRD\"\n",
+exec {} migrate-bootloader --resync --entry-token {} --title {} \\\n    --kernel-version \"$KERNEL_VERSION\" \\\n    --kernel-image \"$KERNEL_IMAGE\" \\\n    --initrd \"$INITRD\"\n",
+        shell_quote(binary),
         shell_quote(entry_token),
         shell_quote(title),
     )
 }
 
-/// Install the executable kernel-install drop-in.
+/// Copy the running binary into `dir` for the resync hook to run, and return
+/// its path. The copy is written beside its final name and renamed into
+/// place, so a hook firing during the copy never runs a partial binary.
+fn persist_hook_binary(dir: &Path) -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe().context("locating the running binary for the resync hook")?;
+    let name = exe
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("the running binary {} has no file name", exe.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let dest = dir.join(name);
+    if exe == dest {
+        return Ok(dest);
+    }
+    let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
+    fs::copy(&exe, &tmp)
+        .with_context(|| format!("copying {} to {}", exe.display(), tmp.display()))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod +x {}", tmp.display()))?;
+    fs::rename(&tmp, &dest)
+        .with_context(|| format!("renaming {} to {}", tmp.display(), dest.display()))?;
+    Ok(dest)
+}
+
+/// Install the executable kernel-install drop-in, with its own copy of the
+/// running binary under [`HOOK_BINARY_DIR`].
 pub fn install_resync_hook(entry_token: &str, title: &str) -> Result<()> {
+    let binary = persist_hook_binary(Path::new(HOOK_BINARY_DIR))?;
     let path = Path::new(RESYNC_HOOK_PATH);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    fs::write(path, resync_hook_script(entry_token, title))
-        .with_context(|| format!("writing {}", path.display()))?;
+    fs::write(
+        path,
+        resync_hook_script(&binary.to_string_lossy(), entry_token, title),
+    )
+    .with_context(|| format!("writing {}", path.display()))?;
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).with_context(|| format!("chmod +x {}", path.display()))
@@ -925,15 +971,39 @@ mod tests {
 
     #[test]
     fn resync_hook_is_add_only_and_uses_kernel_install_paths() {
-        let script = resync_hook_script("machine-id", "Bluefin Linux");
+        let script = resync_hook_script(
+            "/var/lib/bootc-migrate/bin/bootc-rebase",
+            "machine-id",
+            "Bluefin Linux",
+        );
         assert!(script.starts_with("#!/bin/sh"));
         assert!(script.contains("[ \"$COMMAND\" = add ] || exit 0"));
         assert!(script.contains("KERNEL_IMAGE=\"${4:-}\""));
         assert!(script.contains("INITRD=\"${5:-}\""));
         assert!(script.contains("--kernel-version \"$KERNEL_VERSION\""));
         assert!(script.contains("--kernel-image \"$KERNEL_IMAGE\""));
-        assert!(script.contains("bootc-migrate migrate-bootloader --resync"));
+        // An absolute path: the hook must not depend on PATH.
+        assert!(script.contains(
+            "exec '/var/lib/bootc-migrate/bin/bootc-rebase' migrate-bootloader --resync"
+        ));
         assert!(script.contains("'Bluefin Linux'"));
+    }
+
+    #[test]
+    fn hook_binary_is_an_executable_copy_of_the_running_binary() {
+        let dir = tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let dest = persist_hook_binary(&bin).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(dest, bin.join(exe.file_name().unwrap()));
+        assert_eq!(fs::read(&dest).unwrap(), fs::read(&exe).unwrap());
+        assert_eq!(
+            fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        // No temporary file is left behind, and a second install replaces it.
+        persist_hook_binary(&bin).unwrap();
+        assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
     }
 
     #[test]
