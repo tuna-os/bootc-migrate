@@ -1456,9 +1456,28 @@ TRIAL_DISCOVERY_DIAGNOSTICS
         echo "FAIL: BootCurrent=$CURRENT_TRIAL, expected trial Boot$TRIAL_ID"
         exit 1
     }
+    # The staging run recorded a private ESP mount under /run; it did not
+    # survive the reboot. Mount the ESP at a path the harness owns and check
+    # the trial there, so the checks never pass against an empty directory.
+    ESP_PATH=$(ssh $SSH_OPTS root@localhost bash <<'TRIAL_ESP_MOUNT'
+set -euo pipefail
+dir=/run/e2e-esp
+mkdir -p "$dir"
+if ! mountpoint -q "$dir"; then
+    dev=$(lsblk -lnpo PATH,PARTTYPE \
+        | awk '$2 == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+    [ -n "$dev" ] || { echo "no ESP partition found" >&2; exit 1; }
+    mount "$dev" "$dir"
+fi
+echo "$dir"
+TRIAL_ESP_MOUNT
+    ) || { echo "FAIL: could not mount the ESP after the trial reboot"; exit 1; }
     ssh $SSH_OPTS root@localhost \
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
-         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install" || {
+        echo "FAIL: the trial entry or the resync hook is missing after the reboot"
+        exit 1
+    }
 
     step "=== bootloader-trial: invoking the kernel-install resync hook ==="
     ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
@@ -1466,7 +1485,6 @@ set -euo pipefail
 # No bootc-rebase on PATH: the hook has to find its own copy.
 export PATH=/usr/bin:/bin
 STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
-ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
 TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
 KVER=$(uname -r)
 KERNEL=$(readlink -f "/usr/lib/modules/$KVER/vmlinuz" 2>/dev/null || true)
@@ -1483,6 +1501,10 @@ cp "$INITRD" /var/tmp/e2e-resync-initrd
 /etc/kernel/install.d/95-bootc-migrate-esp-sync.install \
     add "$NEW_VERSION" "$TOKEN" \
     /var/tmp/e2e-resync-vmlinuz /var/tmp/e2e-resync-initrd
+# The hook records the ESP it wrote to; it must be a live mount, not the
+# private /run directory that the staging run left behind.
+ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
+mountpoint -q "$ESP" || { echo "resync wrote to $ESP, which is not a mount point"; exit 1; }
 test -f "$ESP/$TOKEN/$NEW_VERSION/linux"
 test -f "$ESP/loader/entries/bootc-migrate-$TOKEN-$NEW_VERSION.conf"
 test "$(sed -n 's/^default //p' "$ESP/loader/loader.conf")" \
