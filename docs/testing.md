@@ -1,9 +1,9 @@
 # Testing & automation
 
 How this project stays trustworthy: what runs where, what gates what, and
-what is automated so humans don't have to remember it. Companion to
-ROADMAP.md (what we're building) and docs/cfs-cli-generations.md (the
-evidence-gathering method this strategy grew out of).
+what automation does so humans don't have to remember it. Companion to
+ROADMAP.md (the project plan) and docs/cfs-cli-generations.md (the
+experiments that informed this strategy).
 
 ## The pyramid
 
@@ -16,21 +16,21 @@ evidence-gathering method this strategy grew out of).
 
 Rules of thumb:
 
-- **Logic goes down the pyramid.** If a behavior can be tested without a VM
-  (extract a pure function, fabricate store contents through public APIs,
-  feed fixture bytes), it must be. The E2E cells exist to catch what only a
+- **Logic goes down the pyramid.** Test behavior without a VM whenever possible.
+  Extract a pure function, fabricate store contents through public APIs, or
+  feed fixture bytes. E2E cells catch what only a
   real boot can: initrd behavior, bootloader handoff, mount namespaces,
-  systemd ordering.
+  systemd unit order.
 - **A failed E2E cell must name its phase.** The harness (`tests/run-e2e.sh`)
   prints `=== Phase N ===` banners and asserts with `FAIL:` prefixes so logs
   are greppable (`just e2e-failures`).
-- **Evidence over inference.** When upstream behavior is in question, build
-  the experiment (loopback verity store, container probes) before designing
-  around an assumption — docs/cfs-cli-generations.md is the worked example.
+- **Evidence over inference.** When upstream behavior is unclear, test it
+  with a loopback verity store or container probes. Do this before you design
+  around an assumption. See the worked example in docs/cfs-cli-generations.md.
 
 ## E2E matrix: current and planned
 
-Current (the four **untouchable MVP regression gates** + M1 addition):
+Current (the four **MVP gates for regressions, which must stay**, plus the M1 addition):
 
 | Cell | Proves | Status |
 |---|---|---|
@@ -56,35 +56,36 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 ### Package-based base images (`E2E_MODE=package-install`)
 
 The package cells do not run `bootc install to-disk`. `tests/package-base.sh`
-downloads the pinned official cloud image, verifies its SHA-256, converts it
+downloads the official cloud image at its pinned version, verifies its SHA-256, converts it
 to `disk.raw`, grows the root filesystem, and attaches a `cloud-localds` seed.
 The seed installs the root SSH key and the harness socket before the live
-fixture step. `fedora-workstation` starts from the Fedora Cloud image, installs
-the Workstation environment with `dnf`, and creates a separate ext4 `/boot`
-partition so the bootloader layout is not accidentally tested only on a
-single btrfs root.
+fixture step. `fedora-workstation` starts from the Fedora Cloud image and installs
+the Workstation environment with `dnf`. It creates a separate ext4 `/boot`
+partition. Thus, the test covers a bootloader layout beyond a single btrfs root.
 
 Select the source with `E2E_PACKAGE_BASE=fedora-cloud`,
-`fedora-workstation`, or `ubuntu-cloud`. The Ubuntu cell additionally sets
+`fedora-workstation`, or `ubuntu-cloud`. The Ubuntu cell also sets
 `E2E_PACKAGE_CROSS_FAMILY=1`, which adds `--accept-cross-base` to the
 package → OSTree command. The matrix skips the base-image `podman pull` for
 these cells but still pulls the target image used by the migration.
 
-Each package cell creates and checks a real human password and SSH key, a
-`/home` marker, modified package-manager configuration plus an unpackaged
-`/etc` file, a NetworkManager profile, a rootless Podman image, a system and
-user Flatpak fixture, and the package-only `cowsay` CLI. After the target
-reboot it checks the target `bootc status`, health, software report, target
-vendor `/etc` precedence, and then selects the generated `Previous system`
-entry, verifies the old distribution and data, and returns to the target.
-The three rows remain exploratory until the package route (#373–#379) is
-implemented and the first run is green; promote the Fedora Cloud row to a
-gating cell at that point.
+Each package cell creates and checks these fixtures:
+- A real human password, an SSH key and a `/home` marker.
+- Modified configuration for the package manager and an unpackaged `/etc` file.
+- A NetworkManager profile and a rootless Podman image.
+- System and user Flatpak fixtures, and the package-only `cowsay` CLI.
+
+After the target reboot, it checks `bootc status`, health, the software report
+and precedence for the target vendor's `/etc` files. Then it selects the
+generated `Previous system` entry, verifies the old distribution and data,
+and returns to the target.
+The three rows remain exploratory until the package route (#373–#379) is complete
+and the first run passes. At that point, make the Fedora Cloud row a required gate.
 
 ### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
 
 `ostree-rebase` mode takes `E2E_CROSS_BASE=1`, which adds
-`--accept-cross-base` (the route is refused without it) and asserts that
+`--accept-cross-base` (the route refuses to run without it) and asserts that
 `=== Cross-base UID/GID remap report ===` appeared in the output.
 
 The assertion is the point. `gate_cross_base` returns `None` and prints
@@ -92,7 +93,7 @@ nothing whenever it declines to act, so silence is indistinguishable from
 success and an unasserted cell would pass vacuously.
 
 **There is still no matrix cell using it** (#187), but the blocker is now
-identified and it is *not* what this file previously claimed.
+identified and it is *not* what this file claimed before.
 
 The diagnostic below produced its first real output on 2026-08-28:
 
@@ -376,12 +377,16 @@ a variable change, never a workflow edit.
 ### Which cells run when
 
 The scenarios live in `.github/e2e-scenarios.yml`. Cells without
-`allow_failure: true` are gating. Pull requests and pushes to `main` run
-`E2E_ROUND_ROBIN_SIZE` gating cells (repo variable, default 2), starting at
-`(run_number × size) mod <gating cells>`, so consecutive CI runs walk the
-whole gating list. The nightly schedule and `workflow_dispatch` run every
-cell, exploratory ones included. A regression in a cell a PR did not draw
-surfaces on the next runs that draw it, or in the nightly run at the latest.
+`allow_failure: true` are gating. Pull requests and pushes to `main` keep
+`E2E_ROUND_ROBIN_SIZE` baseline cells (default 2). The first cell is
+`(run_number × size) mod <gating cells>`.
+
+TUI source, entry point, drift review, harness, dependency, or selector changes
+also require the existing `tui-migrate` cell. The path list is in
+`scripts/select_e2e.py`. This adds at most one VM; it keeps every baseline cell.
+PRs compare the merge base with the head. Pushes compare `before` with `after`.
+A failed diff stops the plan. Tests run with `just test-ci-selection`.
+The nightly schedule and `workflow_dispatch` run every cell.
 
 ### Timeouts, and why they are what they are
 
