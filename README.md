@@ -598,11 +598,12 @@ Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
-A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It either installs an
-OSTree/ComposeFS base image with bootc or, for `E2E_MODE=package-install`,
-boots an official Fedora Cloud or Ubuntu Cloud disk prepared by
-`tests/package-base.sh`, runs the package → OSTree migration, reboots, and
-validates the target plus its `Previous system` entry.
+A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It installs an
+OSTree/ComposeFS base image with bootc, or boots a Fedora Cloud or Ubuntu
+Cloud disk in `E2E_MODE=package-install`.
+`tests/package-base.sh` prepares the disk. The harness runs the package →
+OSTree migration, reboots, and validates the target plus its `Previous system`
+entry.
 
 ```
 sudo ./tests/run-e2e.sh
@@ -612,9 +613,9 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `E2E_MODE`, `E2E_PACKAGE_BASE`, and
 `E2E_PACKAGE_CROSS_FAMILY`.
 
-The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs
-nightly; each PR and push to `main` runs a round-robin slice of the gating
-cells (see [docs/testing.md](docs/testing.md)):
+The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs each
+night. Each PR and push to `main` runs a round-robin slice of gating cells
+(see [test guide](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|

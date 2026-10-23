@@ -55,31 +55,34 @@ Current (the four **untouchable MVP regression gates** + M1 addition):
 
 ### Package-based base images (`E2E_MODE=package-install`)
 
-The package cells do not run `bootc install to-disk`. `tests/package-base.sh`
-downloads the pinned official cloud image, verifies its SHA-256, converts it
-to `disk.raw`, grows the root filesystem, and attaches a `cloud-localds` seed.
-The seed installs the root SSH key and the harness socket before the live
-fixture step. `fedora-workstation` starts from the Fedora Cloud image, installs
-the Workstation environment with `dnf`, and creates a separate ext4 `/boot`
-partition so the bootloader layout is not accidentally tested only on a
-single btrfs root.
+The package cells do not run `bootc install to-disk`.
+`tests/package-base.sh` downloads the official cloud image and checks its
+SHA-256 checksum. It converts the image to `disk.raw`, grows the root
+filesystem, and attaches a `cloud-localds` seed.
+The seed installs the root SSH key and harness socket before the live fixture
+step. `fedora-workstation` starts from the Fedora Cloud image.
+It installs the Workstation environment with `dnf` and adds an ext4 `/boot`
+partition.
+
+This checks the bootloader layout on more than a btrfs root.
 
 Select the source with `E2E_PACKAGE_BASE=fedora-cloud`,
-`fedora-workstation`, or `ubuntu-cloud`. The Ubuntu cell additionally sets
+`fedora-workstation`, or `ubuntu-cloud`. The Ubuntu cell also sets
 `E2E_PACKAGE_CROSS_FAMILY=1`, which adds `--accept-cross-base` to the
 package → OSTree command. The matrix skips the base-image `podman pull` for
 these cells but still pulls the target image used by the migration.
 
-Each package cell creates and checks a real human password and SSH key, a
-`/home` marker, modified package-manager configuration plus an unpackaged
-`/etc` file, a NetworkManager profile, a rootless Podman image, a system and
-user Flatpak fixture, and the package-only `cowsay` CLI. After the target
-reboot it checks the target `bootc status`, health, software report, target
-vendor `/etc` precedence, and then selects the generated `Previous system`
-entry, verifies the old distribution and data, and returns to the target.
-The three rows remain exploratory until the package route (#373–#379) is
-implemented and the first run is green; promote the Fedora Cloud row to a
-gating cell at that point.
+Each package cell creates a real human password and SSH key, plus a `/home`
+marker and package-manager changes. It adds an unpackaged `/etc` file and a
+NetworkManager profile.
+It also creates a rootless Podman image. It creates system and user Flatpak
+fixtures and the package-only `cowsay` CLI.
+After the target reboots, it checks target `bootc status`, health, software
+report, and vendor `/etc` precedence. It selects `Previous system`, verifies
+the old distribution and data, and returns to target.
+
+The three rows stay exploratory until package route (#373–#379) works and the
+first run passes. Promote Fedora Cloud to a gating cell then.
 
 ### Cross-base mode (`E2E_CROSS_BASE=1`) — mechanism ready, blocked
 
@@ -261,13 +264,12 @@ This is the first cell to mutate real UEFI NVRAM (#189). Until it existed,
 #31's `efibootmgr` executor had only unit tests of the *plan*; the write path
 and the snapshot-restore path had never run against real firmware variables.
 
-The separate `bootloader-trial` cell covers #65/#382. It installs the
-standalone systemd-boot path on a GRUB2 Bluefin guest, saves and swaps
-`BootOrder` because OVMF does not honor `BootNext`, reboots through the trial,
-calls the installed `kernel-install` resync hook for a second kernel version,
-then exercises `--promote` and `--undo`. The final assertion requires the
-original firmware order, GRUB fallback, migration-owned ESP files and hook to
-be restored.
+The separate `bootloader-trial` cell covers #65/#382. It installs standalone
+systemd-boot on a GRUB2 Bluefin guest. It saves and swaps `BootOrder` because
+OVMF does not honor `BootNext`. The cell reboots through the trial.
+It calls the installed `kernel-install` hook to resync a second kernel version
+and then runs `--promote` and `--undo`. The final check verifies the original
+firmware order, GRUB fallback, and the ESP files and hook that migration owns.
 
 Planned, one per milestone exit (see ROADMAP.md):
 
