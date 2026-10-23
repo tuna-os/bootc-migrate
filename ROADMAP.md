@@ -110,15 +110,18 @@ validation named in that issue's own scope never shipped.
 |---|---|---|---|
 | `migrate-bootloader` live GRUB2→sd-boot | implemented: stages ESP kernels/BLS entries, leaves GRUB as fallback, arms a one-boot `BootNext` trial, and supports guarded `--promote`, `--undo`, plus a `kernel-install` resync hook | the gating `bootloader-trial` cell swaps OVMF `BootOrder` around the trial reboot and asserts resync, promotion, and undo | #65, #189, #382 |
 | Boot-entry cleanup (`efibootmgr` executor) | implemented, dry-run default, typed confirmation, NVRAM snapshot + `--undo` | live rename + snapshot restore run in the gating OSTree re-base cell; real-hardware validation remains advisable | #31, #189, #204 |
-| Cross-base remap + `/etc` conflict policy | implemented, wired into `OstreeDeploy` | the gate itself is covered — #191 shipped (2026-08-28); same-family cross-base remap and conflict walks still need a genuinely cross-base E2E pair, while #259's cross-family cell covers the separate policy path | #67, #187, #259 |
+| Cross-base remap + `/etc` conflict policy | implemented in `OstreeDeploy` | #191 covers the gate; same-family E2E remains; #259 covers the cross-family path | #67, #187, #259 |
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
-| Identity-DB merge across families | implemented in `cross_family` for conversion, `OstreeDeploy`, and `ImageSwap`: target-first accounts, source-first password databases | the four composefs cells and the new non-gating OstreeDeploy cell assert real-tree identity preservation; same-family/native `bootc switch` identity divergence remains the separate #80 gap | #80, #256, #259 |
+| Identity-DB merge across families | implemented in `cross_family` for conversion, `OstreeDeploy` and `ImageSwap` | composefs and OstreeDeploy cells cover identity preservation; the same-family/native gap remains | #80, #256, #259 |
 | composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | two non-gating cells (dakota composefs-native → fedora-bootc 44, and → utah testing, #302) assert the route, the fixtures, GRUB first in BootOrder and the preserved rollback entry; never executed on a real host before that cell | #260 |
+| package → ostree (`Strategy::PackageInstall`) | implemented on the shared alongside-install engine: `/` is bound at `/target` with `rslave`, root-mount kargs are retained, and the old kernel/initramfs/BLS/GRUB paths are snapshotted before bootc empties `/boot`; argv, karg and snapshot selection are table-tested | package-host E2E cells are tracked by #380; the old-system boot entry, package-aware `/etc`, selective data carry and commit remain separate #374–#378 slices | #373, #380 |
 | composefs → ostree with `/boot` on an encrypted root (`ostree_install::esp_resident`) | implemented: the route detects `/boot` without its own partition on a dm-crypt or `rd.luks.` root, copies the new kernel and initrd to the ESP with a BLS entry that keeps the `ostree=` argument, makes that entry the systemd-boot default and puts systemd-boot first in `BootOrder`; detection, entry parsing, the ESP plan and the staging are table-tested | no E2E cell installs a composefs host with `/boot` on LUKS; the hand-made equivalent was staged on a real host, but its boot is not yet recorded; after `bootc upgrade`, the ESP copy does not follow the new kernel | #305 |
-| composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image; accepted cross-family swaps reconcile `/etc` after native finalization and preserve the sysusers/ldconfig first-boot repair | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) covers the ordinary route; the cross-family swap path remains covered by the composefs family cells and needs a dedicated image-swap cell | #66, #259 |
-| Cross-family migration on the `bootc switch` routes (`cross_family`) | implemented: early gate plus authoritative staged-image decision; `OstreeDeploy` reconciles `/etc`, remaps the finalized tree and schedules `/.autorelabel`, while `ImageSwap` installs a combined remap/relabel/sysusers/ldconfig first-boot unit; planner, direct staged apply, gate and unit rendering are table-tested | five non-gating cells (four composefs conversion targets plus bluefin → openSUSE OstreeDeploy) assert refusal, the staged `/etc` shape and the booted identity; they depend on community images and have not yet passed end to end | #256, #259, #261 |
+| composefs → composefs image swap (`Strategy::ImageSwap`) | implemented; cross-family swaps apply policy after finalization and preserve first-boot repair | one ordinary non-gating cell runs; dedicated cross-family image-swap coverage remains | #66, #259 |
+| Cross-family migration on the `bootc switch` routes (`cross_family`) | implemented for `OstreeDeploy` and `ImageSwap`; target defaults, identity remap and first-boot repair are covered | five non-gating cells cover refusal, staged `/etc` and booted identity; community images remain unvalidated | #256, #259, #261 |
 | First-boot repair (`firstboot_repair`, L3) | implemented on the `CoreMigration` and `OstreeInstall` routes; each class and the unit are table-tested on fixture roots | the `CoreMigration` cells break a canary tree after staging and assert the ownership repair after the reboot; the `flatpak` and `selinux-label` classes run in no cell, and `selinux-label` gets input only when the verify probe reports that class | #309 |
+| package → ostree (`PackageInstall`) | source detection, route planning, package-host readiness and hardware reports implemented; TUI exposes an OSTree-only read-only preview | install, `/etc` classification, data carry, rollback, software report, commit, first-boot verification and every E2E cell remain open; no package-host source is supported | #370–#381 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
+| TUI composefs-host route step (#312) | implemented: background scan, dual-capable route choice, honest notes, bootc-rebase execution | covered by state-machine tests only; tui-migrate cell runs on an ostree host and does not exercise the composefs-host screens or launch bootc-rebase | #312 |
 | Package-managed source → OSTree (`Strategy::PackageInstall`) | harness support is implemented: checksum-pinned Fedora Cloud, synthesized Workstation, and Ubuntu Cloud disks, cloud-init SSH, package fixtures and Previous system assertions | the three #380 cells are exploratory until the package route and its readiness/report/bootloader pieces (#373–#379) land; the Fedora Cloud cell must be promoted to gating after its first green run on `main` | #373–#380 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
@@ -333,6 +336,43 @@ still advisable before treating firmware-specific behavior as universal.
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
 request; non-experts can read what will happen before it happens.
 
+### M6 — Package-host onboarding — **detection and readiness only**
+
+[#370](https://github.com/tuna-os/bootc-migrate/issues/370) extends the engine
+to regular rpm-, dpkg-, and pacman-managed installs. We use this order because
+package hosts have varied disk layouts and lack an OSTree factory `/etc`.
+Detection alone does not prove that a side-by-side install is safe.
+
+The two read-only pieces have landed:
+
+- #371 detects `Backend::Package`, plans `PackageInstall`, and defaults its
+  target backend to OSTree.
+- #372 reports boot mode, filesystems, LUKS/LVM, btrfs subvolumes, `/boot`,
+  `/home`, free space, active package managers, SELinux, and target hardware.
+
+Mutation and completion remain open. Tracked work includes:
+
+- #373: install engine.
+- #374: old-system rollback and undo.
+- #375: package-database `/etc` classification.
+- #376: home and data carry.
+- #377: software report.
+- #378: guided commit.
+- #379: first-boot verification.
+- #380: package-source E2E cells.
+
+#381 records that boundary and adds evidence rows. It adds an OSTree-only
+**dry-run** entry to the TUI. Live confirmation and software reports need #373
+and #377.
+
+**Exit criteria (not yet met):**
+
+- The Fedora Cloud → fedora-bootc cell is green on `main`.
+- The TUI shows target-specific readiness and software reports before live confirmation.
+- The old OS boots after staging and after undo.
+- First-boot verification passes.
+- Guided commit removes only the verified old system.
+
 ### Deferred extensions (raised on #30, not yet scoped into a milestone)
 
 Two directions came up in discussion on the [generalize-into-a-re-base-engine
@@ -353,20 +393,12 @@ either is imminent:
   this tool itself performed. Exploratory: one non-gating cell (dakota →
   bluefin) and no rollback subcommand for this direction yet.
 - **Cross-family re-base (Fedora ↔ Ubuntu ↔ Arch) via `bootc switch`** —
-  M3's cross-base work (#67) stays within the Fedora family, where `/etc`
-  defaults, UID/GID allocation, and the init/PAM stack share lineage. The
-  composefs *conversion* route and both `bootc switch` routes now share the
-  cross-family policy in `crates/bootc-migrate-core/src/cross_family.rs`:
-  most of `/etc` is non-mergeable (the target's defaults win, the source
-  vendor's files are dropped), an explicit allowlist of machine state and
-  every user-added path are carried, identity databases merge target-first
-  with a `/var` remap, and displaced edits survive as `.rebase-old` sidecars.
-  `OstreeDeploy` applies it after native finalization so libostree cannot
-  overwrite the result and schedules `/.autorelabel`; `ImageSwap` applies it
-  after composefs finalization and preserves its sysusers/ldconfig first-boot
-  work in the combined unit. It remains gated behind `--accept-cross-base`.
-  Four composefs cells and one non-gating OstreeDeploy cell cover the real
-  target shape; the latter is tracked by #259.
+  `cross_family.rs` covers conversion and both switch routes. Target defaults
+  win; source vendor-only files drop; machine state, user files and identity
+  data stay; displaced edits use `.rebase-old`. `OstreeDeploy` applies the
+  policy after finalization and schedules relabeling. `ImageSwap` preserves
+  sysusers/ldconfig repair. The feature stays behind
+  `--accept-cross-base`; cells are tracked by #259.
 
 ### 1.0 — Universal migrator
 
@@ -388,6 +420,7 @@ graph TD
   M1 --> M5A["M5 #68 DE stash/restore — detection+wiring landed, cross-DE E2E cell deferred"]
   M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI unit-tested + tui-migrate E2E cell gating"]
   M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
+  M1 --> M6["M6 #370 package hosts — detection + readiness landed; install, reports, rollback and E2E open"]
 ```
 
 ## Risks & standing mitigations

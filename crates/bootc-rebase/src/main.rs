@@ -537,9 +537,9 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
-/// package -> ostree (#372): print the package-host readiness report and the
-/// hardware report, then the decision. The install step itself is #373, so a
-/// run that passes every check still stops here before changing anything.
+/// package -> ostree (#373): print and enforce the package-host readiness
+/// report, run the hardware gate, then execute the shared alongside-install
+/// engine with the live `/` bound at `/target`.
 fn run_package_install_preflight(args: &Args) -> Result<()> {
     use bootc_migrate_core::package_host::{self, Verdict};
     let image_size = match bootc_migrate_core::registry::image_compressed_size(&args.target_image) {
@@ -568,17 +568,24 @@ fn run_package_install_preflight(args: &Args) -> Result<()> {
         Verdict::Ready => "ready",
     };
     println!("Package host decision: {verdict}");
-    if decision == Verdict::Refused && !args.dry_run {
+    if decision == Verdict::Refused {
+        if args.dry_run {
+            println!("Dry run: nothing was changed.");
+            return Ok(());
+        }
         bail!("this system is not ready for the package -> ostree migration (see above)");
     }
-    if args.dry_run {
-        println!("Dry run: nothing was changed.");
-        return Ok(());
+    if !args.dry_run {
+        check_root_privilege()?;
     }
-    bail!(
-        "the package -> ostree install step is not implemented yet; see \
-         https://github.com/tuna-os/bootc-migrate/issues/373"
-    )
+    bootc_migrate_core::ostree_install::PackageInstallConfig {
+        target_image: &args.target_image,
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_preflight: args.skip_preflight,
+        accept_cross_base: args.accept_cross_base,
+    }
+    .run()
 }
 
 fn main() {

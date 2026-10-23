@@ -2,7 +2,7 @@
 //!
 //! Also home to the standalone `migrate-bootloader` subcommand (issue #65).
 
-use super::boot_deployments::{BootDeployment, enumerate_deployments};
+use super::boot_deployments::{BootDeployment, enumerate_deployments, find_kver_in_modules};
 use super::*;
 use crate::preflight::SystemInfo;
 
@@ -212,16 +212,13 @@ pub fn phase5_setup_bootloader(
 
     // Find kernel version from the mounted image /usr/lib/modules.
     let modules_dir = mount_path.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)
-        .with_context(|| {
-            format!(
-                "reading kernel modules dir from mounted image: {}",
-                modules_dir.display()
-            )
-        })?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+    fs::metadata(&modules_dir).with_context(|| {
+        format!(
+            "reading kernel modules dir from mounted image: {}",
+            modules_dir.display()
+        )
+    })?;
+    let kver = find_kver_in_modules(&modules_dir)
         .ok_or_else(|| anyhow!("could not find kernel version in mounted image"))?;
     println!("Found kernel version: {}", kver);
 
@@ -801,10 +798,7 @@ fn build_ostree_fallback_on_esp(esp_path: &Path) -> Result<bootloader::BlsEntry>
     let (deploy_root, _checksum) = find_ostree_deployment()?;
 
     let modules_dir = deploy_root.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+    let kver = find_kver_in_modules(&modules_dir)
         .ok_or_else(|| anyhow!("no kernel version in OSTree deployment"))?;
 
     let vmlinuz_path = modules_dir.join(&kver).join("vmlinuz");
@@ -841,10 +835,7 @@ fn build_ostree_fallback_entry() -> Result<bootloader::BlsEntry> {
     let (deploy_root, _checksum) = find_ostree_deployment()?;
 
     let modules_dir = deploy_root.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+    let kver = find_kver_in_modules(&modules_dir)
         .ok_or_else(|| anyhow!("no kernel version in OSTree deployment"))?;
 
     let vmlinuz_path = modules_dir.join(&kver).join("vmlinuz");

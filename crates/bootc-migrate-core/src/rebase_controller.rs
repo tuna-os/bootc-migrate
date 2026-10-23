@@ -1191,6 +1191,7 @@ impl OstreeDeployConfig<'_> {
             )
         })?;
 
+        let mut etc_policy = None;
         let finalized = if let Some(plan) = &cross_family_plan {
             // libostree performs its native /etc merge while finalizing. The
             // cross-family policy must see that result and run afterwards.
@@ -1200,7 +1201,7 @@ impl OstreeDeployConfig<'_> {
         } else {
             if let Some(plan) = &cross_base_plan {
                 cross_base::apply_cross_base_remap(&staged_root, plan)?;
-                cross_base::apply_cross_base_etc_policy(&staged_root)?;
+                etc_policy = cross_base::plan_cross_base_etc_policy(&staged_root)?;
 
                 // #67: when the base family changes, the SELinux policy type
                 // may differ — schedule /.autorelabel on first boot.
@@ -1222,11 +1223,16 @@ impl OstreeDeployConfig<'_> {
             de.run_post_switch(plan, false)?;
         }
 
-        // #262: last for the ordinary and same-family cross-base paths. A
-        // cross-family path finalized before its post-finalization rewrite.
+        // #262: finalization comes after writes into the deployment root.
+        // Cross-base /etc rewrites run after finalization because libostree
+        // merges the live /etc into the deployment during finalization.
         if !finalized {
             finalize_staged_now()?;
+            if let Some(policy) = &etc_policy {
+                policy.apply()?;
+            }
         }
+
 
         println!(
             "Re-base staged. Reboot to enter the new deployment; the previous \

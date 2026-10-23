@@ -3,8 +3,8 @@
 # Cells without `allow_failure: true` are gating. Pull requests and pushes to
 # main run a round-robin slice of the gating cells (E2E_ROUND_ROBIN_SIZE,
 # default 2, rotated by the CI run number), so every gating cell is exercised
-# every few runs without each push booting the whole matrix. The nightly
-# schedule and workflow_dispatch run every cell, exploratory ones included.
+# every few runs. TUI changes also require the existing tui-migrate cell.
+# The nightly schedule and workflow_dispatch run every cell, exploratory ones included.
 - name: bluefin -> dakota (systemd-boot + composefs)
   base: ghcr.io/projectbluefin/bluefin:stable
   target: ghcr.io/projectbluefin/dakota:stable
