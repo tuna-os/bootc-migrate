@@ -128,7 +128,7 @@ jobs:
   # The E2E matrix, called as a reusable workflow so required-checks depends
   # on its result directly. This replaced an e2e-gate job that held a runner
   # for up to five hours polling for a separately triggered E2E run. PRs and
-  # pushes run a round-robin slice of the gating cells (see e2e-tests.yml).
+  # pushes keep the baseline slice and add TUI coverage for TUI changes.
   e2e:
     needs: [validate]
     if: github.event_name != 'workflow_dispatch'

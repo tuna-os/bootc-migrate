@@ -357,10 +357,30 @@ pub fn parse_booted_deployment_root(admin_status_stdout: &str) -> Result<PathBuf
     deployment_root_from_line(deploy_line)
 }
 
-/// Apply the cross-base remap plan (chown /var + preserved /etc in the
-/// staged deployment to the target's ids) after `bootc switch` has staged
-/// it. No-op when `plan` is empty (same-base re-base, or no accounts
-/// diverged even though the bases differ).
+/// Physical `/var` shared by every deployment in `deployment_root`'s
+/// stateroot. An OSTree deployment root does not contain its own `/var`;
+/// prepare-root bind-mounts `<stateroot>/var` there at boot.
+fn shared_var_dir(deployment_root: &Path) -> Result<PathBuf> {
+    let deploy_dir = deployment_root
+        .parent()
+        .context("deployment root has no parent deploy directory")?;
+    if deploy_dir.file_name().and_then(|name| name.to_str()) != Some("deploy") {
+        bail!(
+            "deployment root is not under a stateroot deploy directory: {}",
+            deployment_root.display()
+        );
+    }
+    let stateroot = deploy_dir
+        .parent()
+        .context("deployment deploy directory has no parent stateroot")?;
+    Ok(stateroot.join("var"))
+}
+
+/// Apply the cross-base remap plan over the stateroot's shared `/var` and
+/// the staged deployment's preserved `/etc` after `bootc switch` has staged
+/// it. An OSTree deployment has no physical `staged_root/var`; its `/var` is
+/// bind-mounted from `<stateroot>/var` at boot. No-op when `plan` is empty
+/// (same-base re-base, or no accounts diverged even though the bases differ).
 /// File written to the staged deployment root recording the remap plan and
 /// its outcome, so the JSON twin of the printed report survives the reboot.
 const REMAP_REPORT_FILE: &str = "bootc-migrate-remap-report.json";
@@ -375,11 +395,15 @@ pub fn apply_cross_base_remap(staged_root: &Path, plan: &remap::RemapPlan) -> Re
     if plan.is_empty() {
         return Ok(());
     }
-    let changed = remap::apply_remap_plan(staged_root, plan)
+    let shared_var = shared_var_dir(staged_root)
+        .context("failed to locate the stateroot's shared /var for cross-base remap")?;
+    let staged_etc = staged_root.join("etc");
+    let changed = remap::apply_remap_plan_to_dirs(&[&shared_var, &staged_etc], plan)
         .context("failed to apply cross-base UID/GID remap")?;
     println!(
-        "Cross-base remap applied: {changed} file(s)/dir(s) rechowned under {}",
-        staged_root.display()
+        "Cross-base remap applied: {changed} file(s)/dir(s) rechowned under {} and {}",
+        shared_var.display(),
+        staged_etc.display()
     );
     Ok(())
 }
@@ -399,11 +423,17 @@ const LIVE_ETC: &str = "/etc";
 /// pass running afterwards could mistake one of those ids for a stale
 /// source id and renumber it a second time.
 ///
+/// This step plans the policy, prints the report and writes its JSON twin.
+/// [`EtcPolicy::apply`] rewrites the files, and the caller runs it after the
+/// staged deployment is finalized: libostree's finalization merges the live
+/// `/etc` into the deployment again, which puts back every locally modified
+/// value that a rewrite before it had replaced.
+///
 /// Degrades to a warning rather than an error when one of the three trees
 /// is missing: the re-base is already staged and sound by this point, and
 /// the only consequence of skipping is that the local value stays in place
 /// — exactly the pre-#67 behavior.
-pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
+pub fn plan_cross_base_etc_policy(staged_root: &Path) -> Result<Option<EtcPolicy>> {
     let booted_root = booted_deployment_root()
         .context("failed to locate the booted deployment for the cross-base /etc policy")?;
     let source_defaults = etc_conflict::vendor_etc_dir(&booted_root);
@@ -424,7 +454,7 @@ pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
                  local value.",
                 dir.display()
             );
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -442,17 +472,41 @@ pub fn apply_cross_base_etc_policy(staged_root: &Path) -> Result<()> {
         )
     })?;
 
-    let rewritten =
-        etc_conflict::apply_etc_conflict_plan(&staged_etc, current, &target_defaults, &plan)
-            .context("failed to apply the cross-base /etc conflict policy")?;
-    if rewritten > 0 {
-        println!(
-            "Cross-base /etc policy applied: {rewritten} path(s) under {} now hold the \
-             target image's default; the displaced value is beside each one.",
-            staged_etc.display()
-        );
+    Ok(Some(EtcPolicy {
+        staged_etc,
+        target_defaults,
+        plan,
+    }))
+}
+
+/// A planned cross-base `/etc` rewrite; see [`plan_cross_base_etc_policy`].
+#[derive(Debug)]
+pub struct EtcPolicy {
+    staged_etc: PathBuf,
+    target_defaults: PathBuf,
+    plan: etc_conflict::EtcConflictPlan,
+}
+
+impl EtcPolicy {
+    /// Write the target default and the `.rebase-old` sidecar for each
+    /// planned path. Run it after the staged deployment is finalized.
+    pub fn apply(&self) -> Result<()> {
+        let rewritten = etc_conflict::apply_etc_conflict_plan(
+            &self.staged_etc,
+            Path::new(LIVE_ETC),
+            &self.target_defaults,
+            &self.plan,
+        )
+        .context("failed to apply the cross-base /etc conflict policy")?;
+        if rewritten > 0 {
+            println!(
+                "Cross-base /etc policy applied: {rewritten} path(s) under {} now hold the \
+                 target image's default; the displaced value is beside each one.",
+                self.staged_etc.display()
+            );
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -542,6 +596,16 @@ mod tests {
     fn booted_deployment_root_errors_when_nothing_is_booted() {
         assert!(parse_booted_deployment_root("  bluefin def456.1\n").is_err());
         assert!(parse_booted_deployment_root("* only-one-field\n").is_err());
+    }
+
+    #[test]
+    fn shared_var_is_the_stateroot_var_not_a_deployment_child() {
+        let deployment = Path::new("/ostree/deploy/default/deploy/abc123.0");
+        assert_eq!(
+            shared_var_dir(deployment).unwrap(),
+            PathBuf::from("/ostree/deploy/default/var")
+        );
+        assert!(shared_var_dir(Path::new("/tmp/not-a-deployment")).is_err());
     }
 
     /// bootc-migrate#191. The table is the whole point: "we checked and the

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
-use bootc_migrate_core::{migration, preflight, transaction};
+use bootc_migrate_core::{
+    migration, preflight, rebase_controller::StandaloneBootloaderConfig, transaction,
+};
 
 mod drift_review;
 mod tui;
@@ -156,12 +158,14 @@ enum Command {
     #[command(name = "status")]
     Status,
     /// Convert the bootloader between GRUB2 and systemd-boot without
-    /// touching the rootfs backend (issue #65).
+    /// touching the rootfs backend (issue #65/#382).
     ///
-    /// Copies kernel/initrd for every existing deployment (OSTree or
-    /// composefs) onto the ESP (systemd-boot) or /boot (GRUB2), writes
-    /// BLS entries, and registers the bootloader in UEFI NVRAM. GRUB is
-    /// retained as a fallback entry.
+    /// The systemd-boot path stages every existing deployment on the ESP,
+    /// writes BLS entries, installs a kernel-install resync hook, and arms a
+    /// one-boot BootNext trial without changing BootOrder. `--promote` makes
+    /// the tested trial persistent; `--undo` restores the pre-migration
+    /// firmware order and removes migration-owned artifacts. GRUB remains as
+    /// the fallback.
     #[command(name = "migrate-bootloader")]
     MigrateBootloader {
         /// Target bootloader: "systemd-boot" or "grub2".
@@ -173,9 +177,31 @@ enum Command {
         /// Force migration even if readiness checks fail.
         #[arg(short, long)]
         force: bool,
-        /// OCI image reference to extract systemd-boot from (when the
-        /// running system does not ship it). Streamed layer-by-layer from
-        /// the registry without pulling the full image.
+        /// Undo a previous systemd-boot trial or promotion.
+        #[arg(long)]
+        undo: bool,
+        /// Promote a successfully tested trial to the persistent BootOrder.
+        #[arg(long)]
+        promote: bool,
+        /// Internal kernel-install entry point.
+        #[arg(long, hide = true)]
+        resync: bool,
+        /// Entry token supplied by the installed kernel-install hook.
+        #[arg(long, hide = true)]
+        entry_token: Option<String>,
+        /// Kernel version supplied by the installed kernel-install hook.
+        #[arg(long, hide = true)]
+        kernel_version: Option<String>,
+        /// Kernel image supplied by the installed kernel-install hook.
+        #[arg(long, hide = true)]
+        kernel_image: Option<String>,
+        /// Initramfs image supplied by the installed kernel-install hook.
+        #[arg(long, hide = true)]
+        initrd: Option<String>,
+        /// BLS title supplied by the installed kernel-install hook.
+        #[arg(long, hide = true)]
+        title: Option<String>,
+        /// OCI image to extract systemd-boot from when the host lacks it.
         #[arg(long)]
         from_image: Option<String>,
     },
@@ -320,10 +346,31 @@ fn main() {
         to,
         dry_run,
         force,
+        undo,
+        promote,
+        resync,
+        entry_token,
+        kernel_version,
+        kernel_image,
+        initrd,
+        title,
         from_image,
     }) = args.command
     {
-        let result = run_migrate_bootloader(&to, dry_run, force, from_image.as_deref());
+        let result = run_migrate_bootloader(StandaloneBootloaderConfig {
+            to: &to,
+            dry_run,
+            force,
+            undo,
+            promote,
+            resync,
+            entry_token: entry_token.as_deref(),
+            kernel_version: kernel_version.as_deref(),
+            kernel_image: kernel_image.as_deref().map(Path::new),
+            initrd: initrd.as_deref().map(Path::new),
+            title: title.as_deref(),
+            from_image: from_image.as_deref(),
+        });
         if let Err(e) = result {
             eprintln!("Error: {:#}", e);
             exit_flushed!(1);
@@ -697,14 +744,9 @@ fn read_etc_drift_manifest(
     bootc_migrate_core::mergetc::EtcDriftManifest::parse(&contents)
 }
 
-fn run_migrate_bootloader(
-    to: &str,
-    dry_run: bool,
-    force: bool,
-    from_image: Option<&str>,
-) -> Result<()> {
+fn run_migrate_bootloader(config: StandaloneBootloaderConfig<'_>) -> Result<()> {
     check_root_privilege()?;
-    migration::migrate_bootloader_standalone(to, dry_run, force, from_image)
+    config.run()
 }
 
 fn run_system_to_flatpak_steam(dry_run: bool) -> Result<()> {
