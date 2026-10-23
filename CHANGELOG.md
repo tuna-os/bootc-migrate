@@ -25,7 +25,29 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Package-based base-image E2E coverage (#380): `package-install` boots
+  checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
+  through cloud-init, creates package/home/desktop fixtures, runs the package
+  → OSTree migration, and verifies the target plus the `Previous system`
+  round-trip. The new matrix cells are exploratory until the package route is
+  complete and its first Fedora Cloud run is green.
 
+- TUI route selection on composefs hosts (#312). On an ostree host the
+  wizard flow is unchanged (the conversion route); on a composefs host the
+  wizard scans the selected target in the background and offers a backend
+  choice only when the target is dual-capable (composefs-enabled, ostree-based
+  and shipping bootupd). Single-option targets show a fixed line naming the
+  one route.
+- The OstreeInstall route runs through `bootc-rebase` discovered beside
+  this binary or on `PATH`, and surfaces the source-build hint when missing.
+- The Utah testing image is offered on composefs hosts with an honest
+  maturity note ("pre-alpha; E2E status unknown", docs/support-matrix.md).
+- Standalone `migrate-bootloader` now stages a systemd-boot kernel/BLS
+  generation as a one-boot `BootNext` trial while preserving GRUB, with
+  guarded `--promote` and `--undo` actions and a `kernel-install` ESP resync
+  hook. Both `bootc-migrate` and `bootc-rebase` route through the same live
+  controller, and the QEMU E2E matrix covers the OVMF trial, resync,
+  promotion, and undo path (#382).
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
@@ -44,19 +66,25 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   target image's size, running package managers and SELinux. It prints a
   reason for each refusal, then the hardware report.
 - `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
-  database, no ostree or composefs state) as `Backend::Package` and plans
-  the `package -> ostree` route (`PackageInstall`, not implemented yet).
-  `--target-backend` now defaults to `auto`: composefs from a bootc
-  deployment, as before, and ostree from a package host (#371, part of #370).
+  database, no ostree or composefs state) as `Backend::Package` and executes
+  the `package -> ostree` route through `PackageInstall`. The shared
+  `OstreeInstall` engine binds the live `/` at `/target` with `rslave`
+  propagation, carries the old root's mount kernel arguments, snapshots its
+  kernel, initramfs, BLS and GRUB files before alongside mode empties `/boot`,
+  and records a package-install report for the rollback stage (#373).
+  `--target-backend` defaults to `auto`: composefs from a bootc deployment
+  and ostree from a package host (#371, part of #370).
+- The TUI now shows a read-only preview for package-managed hosts.
+  It limits the target picker to OSTree images and runs the readiness and hardware reports.
+  Live `PackageInstall` waits for #373. Guidance, evidence rows, and the roadmap entry define the #381 boundary.
 - Hardware and firmware check before every migration, on every route of
   `bootc-rebase` and in `bootc-migrate`, and in `bootc-rebase scan`. It
-  compares the devices that work today, the out-of-tree drivers in use
-  (NVIDIA, VirtualBox, ZFS), their firmware and the CPU microcode with the
-  target image's kernel and `/usr/lib/firmware`. It refuses when a storage,
-  display, network, wireless or USB controller would lose its driver or
-  firmware, unless you add `--accept-hardware-gaps`. A display controller
-  only gets a warning when the target kernel has a firmware framebuffer
-  driver (`simpledrm`, `efifb`). The registry scan
+  compares today's devices and out-of-tree drivers (NVIDIA, VirtualBox, ZFS) with
+  the target image's kernel, firmware, and CPU microcode.
+  The check refuses a storage, display, network, wireless, or USB controller when
+  it would lose a driver or firmware. Use `--accept-hardware-gaps` to allow that loss.
+  A display controller only gets a warning when the target kernel has a firmware
+  framebuffer driver (`simpledrm`, `efifb`). The registry scan
   collects the target data in its single pass over the layers. Within a run,
   the tool caches the scan, so it no longer downloads the image once for each
   check.
@@ -124,6 +152,39 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   initrd-rebuild headroom in its free-space estimate. XFS migrations that use
   both the ext4 ComposeFS loopback and podman fallback storage now stop before
   image pulls instead of filling the root during Phase 5 (#390).
+- Cross-base OstreeDeploy now remaps ownership in the stateroot's physical,
+  shared `/var` instead of looking for a nonexistent `var` inside the staged
+  deployment. The gating Bluefin → Dakota E2E cell seeds a divergent
+  UID/GID-owned file and a three-way `/etc` conflict, then requires the
+  remapped owner, target default and `.rebase-old` sidecar before and after
+  reboot (#187).
+
+- The `migrate-bootloader` resync hook and `--undo` find the ESP again
+  when the recorded mount is gone. When the image does not mount its ESP,
+  staging mounts it privately under `/run`, and that mount does not survive
+  the trial reboot. After the reboot, a kernel update wrote the new kernel
+  into an empty tmpfs directory instead of the ESP, and `--undo` deleted
+  nothing from the ESP.
+
+- `migrate-bootloader` and the bootloader setup step pick the kernel
+  directory under `usr/lib/modules` that has a `vmlinuz`. They used to take
+  the first directory that `read_dir` returned. `bluefin:lts` keeps the
+  module directory of an older kernel next to the kernel that boots, so the
+  trial could stop with `No bootable deployments found`, and the OSTree
+  fallback entry could have no kernel.
+
+- The `migrate-bootloader` resync hook now runs its own copy of the binary,
+  stored under `/var/lib/bootc-migrate/bin`, by absolute path. It used to run
+  `bootc-migrate` from `PATH`. On Bluefin LTS, `/usr/local` is part of the
+  read-only `/usr`, so no writable directory on `PATH` survives a reboot, and
+  a kernel update after the trial found no binary. `--undo` removes the copy
+  with the hook.
+
+- `Strategy::OstreeInstall` holds `/sysroot` writable from the first write
+  under it to the end of the run. It created the stateroot `/var` before its
+  own `remount,rw`. That only worked while the preflight probe left
+  `/sysroot` writable by mistake, which #419 fixed, so both OstreeInstall E2E
+  cells failed with `Read-only file system`.
 
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
