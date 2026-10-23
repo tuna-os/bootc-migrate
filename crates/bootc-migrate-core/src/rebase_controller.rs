@@ -1233,7 +1233,6 @@ impl OstreeDeployConfig<'_> {
             }
         }
 
-
         println!(
             "Re-base staged. Reboot to enter the new deployment; the previous \
              deployment remains in the boot menu as rollback."
