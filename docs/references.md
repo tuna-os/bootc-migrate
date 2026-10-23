@@ -43,11 +43,11 @@ is. Organized by the milestone it feeds (see ROADMAP.md).
   BLS-native GRUB2 is an alternative endpoint that avoids the ESP-resync
   problem entirely. *For #65: consider `grub2-bls` as a cheaper interim
   target on systems where sd-boot is blocked (NVRAM ro, weird ESPs).*
-- **kernel-install / BLS spec** — sdbootutil and Fedora both use BLS type-1
-  entries. The standalone path installs
+- **kernel-install / BLS spec** — sdbootutil and Fedora both anchor on
+  Boot Loader Specification type-1 entries. The standalone path installs
   `/etc/kernel/install.d/95-bootc-migrate-esp-sync.install` as the resync
-  drop-in. The hook gets kernel and initramfs paths from `kernel-install`, so
-  no path-unit fallback exists.
+  drop-in; a path-unit fallback is not needed because the hook receives the
+  kernel and initramfs paths directly from `kernel-install`.
 
 ## M4 — Native store & generation matrix (#13, #72)
 

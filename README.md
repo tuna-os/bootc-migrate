@@ -3,10 +3,10 @@
 [![CI](https://github.com/tuna-os/bootc-migrate/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna-os/bootc-migrate/actions/workflows/ci.yml)
 [![E2E](https://github.com/tuna-os/bootc-migrate/actions/workflows/e2e-tests.yml/badge.svg?branch=main)](https://github.com/tuna-os/bootc-migrate/actions/workflows/e2e-tests.yml?query=branch%3Amain)
 
-In-place migration utility that converts an OSTree-backend bootc system
-(e.g. Bluefin) into a ComposeFS-backend bootc system (e.g. Dakota), without
-reinstalling and without losing `/home`, `/var`, `/etc` customizations,
-flatpaks, container storage, or user accounts.
+In-place conversion tool for an OSTree-backend bootc system (for example,
+Bluefin) to a ComposeFS-backend bootc system (for example, Dakota). It keeps
+`/home`, `/var`, and `/etc` customizations, flatpaks, container storage, and
+user accounts.
 
 <!-- hive-contribute-plea: donated-compute appeal, keep in sync across repos -->
 ## Contribute compute — no code needed
@@ -34,12 +34,12 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 **1. Get the migrator.** Download the latest prebuilt binary (x86_64; for arm64
 swap in `aarch64-unknown-linux-gnu`):
 
-> **Release-naming note.** This repo was renamed from `bootc-migrate-composefs`
-> to `bootc-migrate` after v0.2.0. `release.yml` already publishes under the
-> new name, so from **v0.6.0** the tarball, the binary inside it, and the
-> container image are all `bootc-migrate`. The commands below reflect that.
-> To install the older v0.2.0 artifacts, substitute `bootc-migrate-composefs`
-> in the paths.
+> **Release-naming note.** The project name changed from
+> `bootc-migrate-composefs` to `bootc-migrate` after v0.2.0.
+> `release.yml` already publishes under the new name. From **v0.6.0**, the
+> tarball, binary, and container image are all `bootc-migrate`. The commands
+> below reflect that. To install older v0.2.0 artifacts, substitute
+> `bootc-migrate-composefs` in the paths.
 
 ```bash
 curl -fsSL -o bmc.tar.gz \
@@ -48,6 +48,12 @@ tar xzf bmc.tar.gz
 sudo install -m755 bootc-migrate /usr/local/bin/bootc-migrate
 sudo install -m755 bootc-rebase /usr/local/bin/bootc-rebase
 ```
+
+On Bluefin LTS, `/usr/local` is part of the read-only `/usr`, so the
+`install` commands fail. Run the binaries from the directory where you
+unpacked them instead (`sudo ./bootc-migrate …`). Nothing later needs them on
+`PATH`: the bootloader resync hook keeps its own copy under
+`/var/lib/bootc-migrate/bin`.
 
 <details><summary>…or pull the container image</summary>
 
@@ -71,14 +77,14 @@ sudo install -m755 target/release/bootc-migrate /usr/local/bin/
 ```
 </details>
 
-**2. Dry-run** — makes no changes, just checks your system is ready:
+**2. Dry-run** — makes no changes; checks your system is ready:
 
 ```bash
 sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable --dry-run
 ```
 
-**3. Migrate** (~5–25 min depending on cache/network):
+**3. Migrate** (~5–25 min based on cache/network):
 
 ```bash
 sudo bootc-migrate \
@@ -99,13 +105,13 @@ cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
 sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 
-> ⚠️ **Note:** Phase 4 copies `/var` to the composefs side. After migration,
-> the two `/var` trees are **independent** — changes you make on the composefs
-> side won't be reflected if you roll back to OSTree (and vice versa). Commit
-> only when you're satisfied with the new system.
+> **Note:** Phase 4 copies `/var` to the composefs side. The two `/var`
+> trees are **independent** after migration. Changes on the composefs side do
+> not appear after an OSTree rollback, and the reverse also applies. Commit only
+> when you're satisfied with the new system.
 
-That's it. For flags, rollback, troubleshooting, and the full phase-by-phase
-breakdown, see [Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
+For flags, rollback, problems, and the full phase-by-phase breakdown, see
+[Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
 On **Bluefin LTS** (XFS) or systems with **LVM / LUKS / a dedicated `/var`
 partition**, the tool handles those automatically — see
 [docs/filesystem-support.md](docs/filesystem-support.md).
@@ -120,10 +126,9 @@ partition**, the tool handles those automatically — see
 
 ## Interactive wizard (TUI)
 
-Prefer a guided walkthrough over flags? Run the tool with no `--target-image`
-(or `tui` explicitly) to launch a terminal wizard that walks through target
-image selection, options, a plain-English review of what's about to happen,
-and a live phase-by-phase progress view with scrollable logs:
+Prefer a guided walkthrough? Run `bootc-migrate` with no `--target-image`
+or with `tui` to open the terminal wizard. It guides target image selection,
+options, the review, and live phase logs:
 
 ```bash
 sudo bootc-migrate tui
@@ -131,19 +136,55 @@ sudo bootc-migrate tui
 
 ![bootc-migrate TUI wizard](docs/images/tui-review.png)
 
-The image picker fetches the latest CI-published catalog, then falls back to a
-cached or bundled JSON snapshot if offline. It lists published Bluefin,
-Universal Blue, TunaOS, and Zirconium images; Utah appears as coming soon until
-its registry tag is published. The selected image reference and backend are
-shown before you continue. OSTree targets use `bootc-rebase` (which must be
-installed alongside `bootc-migrate`); ComposeFS targets use the normal migrate
-path. Returning from ComposeFS to OSTree is not yet supported.
+The image picker fetches the latest CI-published catalog, then uses a cached
+or bundled JSON snapshot if offline. It lists published Bluefin, Universal
+Blue, TunaOS, and Zirconium images. Utah stays marked as coming soon until its
+registry tag appears. You see the selected image reference and backend before
+you continue. OSTree targets use `bootc-rebase`, which you must install
+alongside `bootc-migrate`; ComposeFS targets use the normal migrate path. The
+tool does not support a return from ComposeFS to OSTree.
 
 The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
 to choose an image, and press Space on the options page to change a setting.
-For a live run, turn off dry-run there. The final review requires typing
-`CONFIRM` and Enter before anything changes. Root is needed to run a migration,
-though you can browse the catalog without it.
+For a live run, turn off dry-run there. The final review needs `CONFIRM` and
+Enter before anything changes. You need root for a migration, but you can
+browse the catalog without it.
+
+## Coming from a regular (non-bootc) install
+
+Fedora, Ubuntu, Debian, and Arch installs use package managers such as rpm, dpkg, or pacman.
+These systems are package hosts, not bootc deployments.
+`bootc-rebase` detects the source and selects the package → OSTree route.
+The TUI shows the same route, limits the image picker to OSTree targets, and keeps the run read-only.
+
+> **Current status: preview only.** The `PackageInstall` engine does not exist yet
+> ([#373](https://github.com/tuna-os/bootc-migrate/issues/373)). Run the readiness preview, but do not treat it as a migration:
+
+```bash
+sudo bootc-rebase rebase \
+  --target-image quay.io/fedora/fedora-bootc:latest \
+  --target-backend ostree \
+  --dry-run
+```
+
+The preview shows two reports. One covers the package host; the other covers target hardware.
+It checks UEFI boot, the root filesystem and subvolume layout, LUKS/LVM, `/boot`,
+`/home`, free space, active package transactions, and SELinux.
+The [support matrix](docs/support-matrix.md#package-based-source-hosts) records evidence for each source distribution, filesystem, and boot mode.
+
+The completed route will use this contract:
+
+- The bootc deployment carries user accounts, home directories, application data, and user-modified `/etc` files.
+  It uses the target image's default for unmodified package-owned configuration.
+- Host packages do **not** carry.
+  The software report ([#377](https://github.com/tuna-os/bootc-migrate/issues/377)) lists missing packages, third-party repositories, services, and kernel modules.
+  It also lists Flatpak, Homebrew, toolbox/distrobox, or derived-image replacements.
+- The old package OS stays bootable as **Previous system** until commit.
+  [#374](https://github.com/tuna-os/bootc-migrate/issues/374) tracks creation and removal of that rollback entry.
+- Use a separate one-way commit. After you verify the new deployment,
+  [#378](https://github.com/tuna-os/bootc-migrate/issues/378) guides commit and reclaims the old OS.
+  The existing `bootc-rebase commit` supports only composefs → OSTree.
+  Do not use it for the package-host route.
 
 ## Architecture
 
@@ -205,11 +246,11 @@ flowchart TB
     class RUN,NVRAM run;
 ```
 
-**Key insight:** Phase 3 runs `bootc internals cfs oci seal` which prints the
+**Key insight:** Phase 3 runs `bootc internals cfs oci seal` and prints the
 sealed manifest's config digest. Phases 4 and 5 pass that **sealed config
-digest** (not the rootfs verity) to `bootc cfs oci mount` — the overlay then
-exposes real file content for `/etc`, kernel, initrd, systemd-boot, and kernel
-modules, eliminating the need to re-stream OCI layers at runtime.
+digest** (not rootfs verity) to `bootc cfs oci mount`. The overlay exposes
+`/etc`, kernel, initrd, systemd-boot, and kernel modules without another OCI
+layer stream.
 
 ## What it does
 
@@ -217,24 +258,23 @@ Six phases (numbered 0–5 to match the console output), run as one command:
 
 - **Phase 0 — Preflight** — free-space, reflink/CoW, UEFI, NVRAM-writable, ESP
   capacity.
-- **Phase 1 — OSTree import** *(optional)* — reflinks existing OSTree file
-  objects into the composefs object store so the pull in Phase 2 is mostly
-  dedup. Skipped with `--skip-import`.
+- **Phase 1 — OSTree import** *(optional)* — reflinks OSTree file objects into
+  the composefs store. This reduces duplicate data in Phase 2. Skip it with
+  `--skip-import`.
 - **Phase 2 — OCI pull** — `bootc internals cfs oci pull` of the target bootc
   image into the composefs store.
-- **Phase 3 — EROFS seal** — builds and seals the EROFS image, capturing the
-  sealed config digest that Phases 4 and 5 mount.
-- **Phase 4 — Stage deploy** — 3-way `/etc` merge (read from the sealed mount,
-  no registry streaming), identity-DB line-union, dangling `/usr/*` symlink
-  pruning, `/home` ↔ `/var/home` compatibility for native-home targets, `/var`
-  preservation (copy or in-place dedicated subvolume), and `.origin`
-  (boot_digest, manifest_digest) written via tini.
-- **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed mount
-  to the ESP (no registry streaming), verifies that the target kernel resolves
-  the current wireless devices, writes BLS entries (including a durable
-  stateroot mount argument for a dedicated `/var`), and registers `Linux Boot
-  Manager` in UEFI NVRAM. The original GRUB entry is left as a rollback escape
-  hatch.
+- **Phase 3 — EROFS seal** — builds and seals the EROFS image. It saves the
+  sealed config digest for Phases 4 and 5.
+- **Phase 4 — Stage deploy** — merges `/etc` and unions identity
+  database lines. It reads from the sealed mount and removes broken
+  `/usr/*` symlinks. It keeps `/home` ↔ `/var/home` compatibility and
+  preserves `/var`. `.origin` stores `boot_digest` and `manifest_digest`;
+  `tini` writes it.
+- **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed
+  mount to the ESP. It verifies that the target kernel resolves current
+  wireless devices. It writes BLS entries and adds a stateroot mount argument
+  for dedicated `/var`. It registers `Linux Boot Manager` in UEFI NVRAM. The
+  original GRUB entry stays as a rollback escape hatch.
 
 After a successful reboot into the composefs entry, `bootc-migrate
 commit` removes the OSTree fallback and makes composefs permanent.
@@ -598,12 +638,11 @@ Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
-A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It installs an
-OSTree/ComposeFS base image with bootc, or boots a Fedora Cloud or Ubuntu
-Cloud disk in `E2E_MODE=package-install`.
-`tests/package-base.sh` prepares the disk. The harness runs the package →
-OSTree migration, reboots, and validates the target plus its `Previous system`
-entry.
+A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It either installs an
+OSTree/ComposeFS base image with bootc or, for `E2E_MODE=package-install`,
+boots an official Fedora Cloud or Ubuntu Cloud disk prepared by
+`tests/package-base.sh`, runs the package → OSTree migration, reboots, and
+validates the target plus its `Previous system` entry.
 
 ```
 sudo ./tests/run-e2e.sh
@@ -613,9 +652,9 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `E2E_MODE`, `E2E_PACKAGE_BASE`, and
 `E2E_PACKAGE_CROSS_FAMILY`.
 
-The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs each
-night. Each PR and push to `main` runs a round-robin slice of gating cells
-(see [test guide](docs/testing.md)):
+The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs
+nightly; each PR and push to `main` runs a round-robin slice of the gating
+cells (see [docs/testing.md](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -681,7 +720,7 @@ cargo build --release -p bootc-rebase
 | `commit [--apply] [--yes] [--force]` | After a composefs → ostree re-base has booted, remove the composefs state it kept as rollback (#315). **Dry run by default**: checks that the system booted the OSTree deployment the install report names, that the ESP snapshot and a shim/GRUB firmware entry exist, and that every path of the old `/var` is present in the live `/var`. It then lists every path it would delete, with sizes. `--apply` deletes after a typed confirmation. First it copies the install report and ESP snapshot into the live `/var/lib/bootc-rebase`. Then it removes the old `/var`, the composefs store and the composefs deployments. It never touches the OSTree repo, `/boot`, the ESP or NVRAM. `--force` accepts failed checks. It never accepts a composefs boot or a filesystem mounted inside a path to delete. | Unit-tested against a fixture physical root. The non-gating composefs → ostree cell runs the dry run, then `--apply`, then reboots and checks system health |
 | `de-migrate stash\|restore` | Move a user's desktop-environment config (GNOME dconf/gnome-shell, KDE kdeglobals/plasma, COSMIC, niri, XFCE) into or out of a stash directory around a cross-DE re-base — union of paths per issue [#68](https://github.com/tuna-os/bootc-migrate/issues/68), never deletes. `--run-hooks` executes `pre-switch.d`/`post-switch.d` scripts with `REBASE_FROM_DE`/`REBASE_TO_DE`/`REBASE_STASH_DIR`/`REBASE_HOME` set. `--dry-run` previews without touching anything. | Done. Also runs automatically inside `rebase --de-migrate`; this subcommand remains the manual escape hatch for images shipping several desktops (which detection refuses to guess between) |
 | `rebase --de-migrate` | Detects the desktop environment the target image ships (registry-streamed session files, session binaries, and display-manager default session — no `podman pull`) and the one this host runs. When they differ, stashes every human account's outgoing DE config before staging and re-exposes any stash a previous re-base in the other direction left behind, running the `pre-switch.d`/`post-switch.d` hooks around each. | Done, unit-tested; **off by default** — a re-base never touches per-user desktop state unless asked to. The non-gating Bluefin→Aurora E2E cell passes `--de-migrate`, seeds GNOME config, and asserts that the cross-DE plan and stash are created. Because target desktop detection uses the registry scan, this evidence depends on that exploratory cell completing successfully ([#68](https://github.com/tuna-os/bootc-migrate/issues/68), [#188](https://github.com/tuna-os/bootc-migrate/issues/188)) |
-| `migrate-bootloader --to systemd-boot [--promote\|--undo]` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Implemented** — stages every existing deployment on the ESP, installs systemd-boot, creates a one-boot `BootNext` trial without changing `BootOrder`, and installs a `kernel-install` resync hook. `--promote` requires that the running system booted from the trial before making it persistent; `--undo` restores the prior firmware order and removes only the migration-owned files. The `bootloader-trial` QEMU cell covers the OVMF BootOrder swap, reboot, resync, promotion, and undo path. |
+| `migrate-bootloader --to systemd-boot [--promote\|--undo] [--from-image <image>]` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Implemented** — stages every existing deployment on the ESP, installs systemd-boot, creates a one-boot `BootNext` trial without changing `BootOrder`, and installs a `kernel-install` resync hook. If the host does not ship `systemd-bootx64.efi`, `--from-image <image>` supplies a registry-reachable image to extract it from. `--promote` requires that the running system booted from the trial before making it persistent; `--undo` restores the prior firmware order and removes only the migration-owned files. The `bootloader-trial` QEMU cell covers the OVMF BootOrder swap, reboot, resync, promotion, and undo path. |
 
 `rebase`'s routing table (`crates/bootc-migrate-core/src/rebase_plan.rs` is the single
 source of truth the CLI consults before touching anything):
@@ -690,14 +729,17 @@ source of truth the CLI consults before touching anything):
 |---|---|---|
 | **ostree** | `OstreeDeploy` (native `bootc switch`) | `CoreMigration` (this repo's proven phase 0–5 pipeline) |
 | **composefs** | `OstreeInstall` (the target's own `bootc install to-existing-root`, alongside; composefs entry kept as rollback — #260, exploratory) | `ImageSwap` |
-| **package** | `PackageInstall` (planned, #370) | Two steps: package → ostree, then ostree → composefs |
+| **package** | `PackageInstall` (the shared alongside-install engine binds `/` at `/target`, carries root kernel arguments, and snapshots the old `/boot` — #373) | Two steps: package → ostree, then ostree → composefs |
 
 A **package** source is a system that is not a bootc deployment: a regular
 Fedora, Ubuntu or Arch installation. `rebase` finds one by its rpm, dpkg or
 pacman database when `bootc status` names no deployment and the root has no
 ostree or composefs state. On such a system, `--target-backend auto` (the
-default) selects ostree. Today, `--plan` shows the route and the migration
-stops before it changes the system. Issue #370 tracks the work.
+default) selects ostree. `PackageInstall` runs the target image's own `bootc
+install to-existing-root` against the live physical root after readiness and
+hardware gates pass. It snapshots the old kernels, initramfs, BLS entries and
+GRUB configuration before bootc empties `/boot`; the `Previous system` entry
+and guided package-host commit remain tracked by #374 and #378.
 
 `--dry-run` on a package host also prints a readiness report and the
 hardware report. The report refuses these systems and gives the reason for
@@ -724,8 +766,8 @@ than treating missing evidence as an empty image.
 
 A non-dry package-host invocation writes the machine-readable report and its
 Markdown twin to `/var/lib/bootc-rebase/software-report.json` and
-`/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report.
-They make no host changes.
+`/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report
+without changing the host.
 
 ## Roadmap
 

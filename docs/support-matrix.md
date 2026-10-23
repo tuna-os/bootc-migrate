@@ -45,6 +45,7 @@ Source of truth for the table shape:
 | composefs → composefs | ImageSwap | **RED** (`main`); green once on a PR branch | `dakota -> utah` red on main 33891928677, green on PR 36215098705 — flaky, unproven |
 | ostree → ostree | OstreeDeploy | **PROVEN** | `bluefin ostree re-base` green on main 33891928677 (gating) |
 | composefs → ostree | OstreeInstall | **RED** | `dakota -> fedora-bootc` red on main 33891928677 *and* on PR 36215098705 — untriaged |
+| package → ostree | PackageInstall | **UNPROVEN, no implementation** | readiness and hardware reports exist, but #373 has not implemented the install and #380 has no cell |
 
 What RED means for the two red routes: nobody triaged the failure, so
 this file makes no claim about *why*. The image-swap red does not prove
@@ -60,6 +61,33 @@ Route availability by frontend (mechanism fact, not a support claim):
 | ImageSwap | automatic fallback when already composefs | `-t … --target-backend composefs` | same wizard, swap path |
 | OstreeDeploy | no | `-t … --target-backend ostree` on ostree hosts | no |
 | OstreeInstall | no (`--target-backend` does not exist) | `-t … --target-backend ostree` on composefs hosts | no |
+| PackageInstall | no | package hosts get a read-only `--dry-run` readiness preview; live install refuses (#373) | OSTree-only target picker and read-only readiness preview |
+
+## Package-based source hosts
+
+These rows are separate from the general route table.
+Detection of rpm, dpkg, or pacman plus the readiness checks does not prove
+that a package host can migrate or boot. A row stays **UNPROVEN** until its
+cell turns green on `main`. Issue #380 owns these cells.
+A green Fedora row does not promote Ubuntu, Debian, or Arch.
+A green UEFI/ext4 row does not promote btrfs, XFS, or BIOS.
+
+| Source | Package database | Root filesystem | Boot mode | Storage stack | Status | Proof needed |
+|---|---|---|---|---|---|---|
+| Fedora Workstation | rpm | btrfs subvolume | UEFI | plain | **UNPROVEN** | Fedora Workstation → Bluefin cell green on `main` |
+| Fedora Cloud | rpm | ext4 | UEFI | plain | **UNPROVEN** | first #380 Fedora Cloud → fedora-bootc cell green on `main` |
+| Fedora Server | rpm | XFS | UEFI | plain | **UNPROVEN** | Fedora Server → fedora-bootc cell green on `main` |
+| Ubuntu | dpkg | ext4 | UEFI | plain | **UNPROVEN** | Ubuntu cross-family cell green on `main` |
+| Debian | dpkg | ext4 | UEFI | plain | **UNPROVEN** | Debian cross-family cell green on `main` |
+| Arch Linux | pacman | ext4 | UEFI | plain | **UNPROVEN** | Arch cross-family cell green on `main` |
+| Fedora, Ubuntu, Debian or Arch | matching database above | btrfs, XFS or ext4 | BIOS/CSM | plain | **UNPROVEN; preflight refuses** | per-distribution BIOS cell plus implementation that passes preflight |
+| Fedora, Ubuntu, Debian or Arch | matching database above | btrfs, XFS or ext4 | UEFI | LUKS and/or LVM | **UNPROVEN; preflight refuses** | per-layout cell plus implementation that passes preflight |
+
+Package-host readiness now allows only UEFI, btrfs/XFS/ext4, and no LUKS/LVM.
+That gate does not claim support.
+PackageInstall alone cannot make a row PROVEN.
+The software report (#377), rollback entry (#374), guided commit (#378), and
+first-boot verification (#379) are not ready.
 
 ## Bootloader
 

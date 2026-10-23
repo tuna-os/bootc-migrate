@@ -45,7 +45,7 @@ pub(crate) fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  — OSTree → ComposeFS in-place migration",
+            "  — guided bootc migration and re-base",
             Style::default().fg(MUTED),
         ),
     ]))
@@ -68,11 +68,11 @@ pub(crate) fn render_welcome(f: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "  • Booted OSTree-backed system (Bluefin, Aurora, Silverblue…)",
+            "  • Booted bootc deployment, or a package host for the read-only preview",
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "  • ≥ 1.1× OSTree repo size in free disk space",
+            "  • Enough free storage for the selected target and route",
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(

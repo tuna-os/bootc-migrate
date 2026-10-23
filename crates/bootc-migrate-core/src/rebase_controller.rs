@@ -567,8 +567,10 @@ const STAGED_DEPLOYMENT_MARKER: &str = "/run/ostree/staged-deployment";
 /// alone.
 ///
 /// Call this last. Finalization marks the deployment root immutable, so every
-/// write into it (the cross-base remap and /etc policy, their reports, the
-/// SELinux relabel marker, the desktop-migration step) must come before.
+/// write into it (the cross-base remap, the reports, the SELinux relabel
+/// marker, the desktop-migration step) must come before. The cross-base /etc
+/// rewrite is the exception: finalization merges the live /etc into the
+/// deployment again, so that rewrite comes after it.
 fn finalize_staged_now() -> Result<()> {
     if !std::path::Path::new(STAGED_DEPLOYMENT_MARKER).exists() {
         return Ok(());
@@ -870,7 +872,7 @@ pub struct OstreeDeployConfig<'a> {
 ///
 /// The one place that merge is second-guessed is a cross-base re-base, where
 /// "keep the user's value" is the wrong answer for a path whose vendor
-/// default also moved — see [`cross_base::apply_cross_base_etc_policy`].
+/// default also moved — see [`cross_base::plan_cross_base_etc_policy`].
 ///
 /// Bootloader: the standalone `migrate-bootloader` route owns the audited
 /// systemd-boot trial. Backend re-bases keep their current bootloader because
@@ -945,11 +947,12 @@ impl OstreeDeployConfig<'_> {
         let _sysroot =
             SysrootWritable::acquire(SYSROOT).context("cannot write into the staged deployment")?;
 
+        let mut etc_policy = None;
         if let Some(plan) = &cross_base_plan {
             let staged_root = cross_base::staged_deployment_root()
                 .context("failed to locate the staged deployment for cross-base post-processing")?;
             cross_base::apply_cross_base_remap(&staged_root, plan)?;
-            cross_base::apply_cross_base_etc_policy(&staged_root)?;
+            etc_policy = cross_base::plan_cross_base_etc_policy(&staged_root)?;
 
             // #67: when the base family changes, the SELinux policy type may
             // differ — schedule /.autorelabel so the target's policy is applied
@@ -970,6 +973,12 @@ impl OstreeDeployConfig<'_> {
 
         // #262: last, after every write into the deployment root above.
         finalize_staged_now()?;
+        // The finalization merged the live /etc into the deployment again,
+        // which put back each local value the /etc policy replaces. Rewrite
+        // those paths now; they are under etc/, not the immutable root.
+        if let Some(policy) = &etc_policy {
+            policy.apply()?;
+        }
 
         println!(
             "Re-base staged. Reboot to enter the new deployment; the previous \

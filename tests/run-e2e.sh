@@ -1281,12 +1281,25 @@ if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
 fi
 
 if [ "$E2E_MODE" = "bootloader-trial" ]; then
-    scp $SCP_OPTS target/release/bootc-rebase root@localhost:/var/tmp/bootc-rebase
-    scp $SCP_OPTS target/release/bootc-migrate root@localhost:/var/tmp/bootc-migrate
-    ssh $SSH_OPTS root@localhost '
-        chmod 0755 /var/tmp/bootc-rebase /var/tmp/bootc-migrate
-        test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
-    '
+    # Keep the executables across reboot without writing immutable /usr/local.
+    # A private root-owned directory prevents other guest users swapping files.
+    TRIAL_BIN_DIR=$(ssh $SSH_OPTS root@localhost 'umask 077; mktemp -d /var/tmp/bootc-trial.XXXXXXXX')
+    [[ "$TRIAL_BIN_DIR" =~ ^/var/tmp/bootc-trial\.[a-zA-Z0-9]{8}$ ]] || {
+        echo "FAIL: invalid bootloader-trial staging directory"; exit 1;
+    }
+    scp $SCP_OPTS target/release/bootc-rebase "root@localhost:$TRIAL_BIN_DIR/bootc-rebase"
+    scp $SCP_OPTS target/release/bootc-migrate "root@localhost:$TRIAL_BIN_DIR/bootc-migrate"
+    ssh $SSH_OPTS root@localhost bash -s -- "$TRIAL_BIN_DIR" <<'TRIAL_BIN_SETUP'
+set -euo pipefail
+dir=$1
+[[ -d "$dir" && ! -L "$dir" && "$(stat -c '%u:%a' "$dir")" = 0:700 ]]
+for binary in "$dir/bootc-rebase" "$dir/bootc-migrate"; do
+    [[ -f "$binary" && ! -L "$binary" && "$(stat -c '%u' "$binary")" = 0 ]]
+    chmod 0755 "$binary"
+    test -x "$binary"
+done
+test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
+TRIAL_BIN_SETUP
 
     ORIGINAL_EFIBOOTMGR=$(ssh $SSH_OPTS root@localhost "efibootmgr -v")
     ORIGINAL_ORDER=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
@@ -1305,10 +1318,59 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
 
     step "=== bootloader-trial: staging the systemd-boot trial through rebase_controller ==="
     if ! ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
+        "$TRIAL_BIN_DIR/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
         > /tmp/bootloader-trial-stage.log 2>&1; then
         sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
         echo "FAIL: migrate-bootloader staging failed"
+        # Read-only layout evidence for discovery failures; retain the stage failure.
+        if ! ssh $SSH_OPTS root@localhost bash -s <<'TRIAL_DISCOVERY_DIAGNOSTICS'
+set -uo pipefail
+diagnostic_status=0
+collect() {
+    if ! "$@"; then
+        diagnostic_status=1
+    fi
+}
+echo '--- deployment identities ---'
+collect ostree admin status
+command_line=()
+if ! read -r -a command_line < /proc/cmdline; then
+    diagnostic_status=1
+fi
+for argument in "${command_line[@]}"; do
+    case "$argument" in
+        ostree=/*) printf '%s\n' "$argument"; collect readlink -e "/sysroot${argument#ostree=}" ;;
+        composefs=*) printf '%s\n' "$argument" ;;
+    esac
+done
+echo '--- physical deployment directories ---'
+if ! find /sysroot/ostree/deploy -maxdepth 3 -type d | head -80; then
+    diagnostic_status=1
+fi
+echo '--- running kernel files ---'
+collect uname -r
+if ! find /usr/lib/modules -maxdepth 2 \( -name 'vmlinuz*' -o -name 'initramfs*' \) -ls | head -40; then
+    diagnostic_status=1
+fi
+echo '--- deployed kernel files ---'
+for modules in /sysroot/ostree/deploy/*/deploy/*/usr/lib/modules/*; do
+    [ -d "$modules" ] || continue
+    collect ls -ld "$modules" "$modules/vmlinuz" "$modules/initramfs.img"
+done
+echo '--- boot kernel files and BLS entries ---'
+if ! find /boot/ostree -maxdepth 2 \( -type f -o -type l \) -ls | head -80; then
+    diagnostic_status=1
+fi
+for entry in /boot/loader/entries/*.conf; do
+    [ -f "$entry" ] || continue
+    echo "--- $entry ---"
+    collect cat "$entry"
+done
+exit "$diagnostic_status"
+TRIAL_DISCOVERY_DIAGNOSTICS
+        then
+            echo "WARN: could not collect all deployment discovery diagnostics"
+        fi
         exit 1
     fi
     sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
@@ -1336,6 +1398,15 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
          test -f '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux' && \
          test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+    # The hook must run its own copy of the binary by absolute path: the
+    # staging directory is not on PATH and /usr/local is read-only here.
+    ssh $SSH_OPTS root@localhost \
+        "grep -qF \"exec '/var/lib/bootc-migrate/bin/bootc-rebase' migrate-bootloader --resync\" \
+             /etc/kernel/install.d/95-bootc-migrate-esp-sync.install && \
+         test -x /var/lib/bootc-migrate/bin/bootc-rebase" || {
+        echo "FAIL: the resync hook does not run /var/lib/bootc-migrate/bin/bootc-rebase"
+        exit 1
+    }
 
     # OVMF does not honor BootNext consistently in this path. Deliberately
     # make the trial first in BootOrder so the reboot proves the same
@@ -1385,16 +1456,35 @@ if [ "$E2E_MODE" = "bootloader-trial" ]; then
         echo "FAIL: BootCurrent=$CURRENT_TRIAL, expected trial Boot$TRIAL_ID"
         exit 1
     }
+    # The staging run recorded a private ESP mount under /run; it did not
+    # survive the reboot. Mount the ESP at a path the harness owns and check
+    # the trial there, so the checks never pass against an empty directory.
+    ESP_PATH=$(ssh $SSH_OPTS root@localhost bash <<'TRIAL_ESP_MOUNT'
+set -euo pipefail
+dir=/run/e2e-esp
+mkdir -p "$dir"
+if ! mountpoint -q "$dir"; then
+    dev=$(lsblk -lnpo PATH,PARTTYPE \
+        | awk '$2 == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+    [ -n "$dev" ] || { echo "no ESP partition found" >&2; exit 1; }
+    mount "$dev" "$dir"
+fi
+echo "$dir"
+TRIAL_ESP_MOUNT
+    ) || { echo "FAIL: could not mount the ESP after the trial reboot"; exit 1; }
     ssh $SSH_OPTS root@localhost \
         "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
-         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install" || {
+        echo "FAIL: the trial entry or the resync hook is missing after the reboot"
+        exit 1
+    }
 
     step "=== bootloader-trial: invoking the kernel-install resync hook ==="
     ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
 set -euo pipefail
-export PATH=/var/tmp:/usr/bin:/bin
+# No bootc-rebase on PATH: the hook has to find its own copy.
+export PATH=/usr/bin:/bin
 STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
-ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
 TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
 KVER=$(uname -r)
 KERNEL=$(readlink -f "/usr/lib/modules/$KVER/vmlinuz" 2>/dev/null || true)
@@ -1411,6 +1501,10 @@ cp "$INITRD" /var/tmp/e2e-resync-initrd
 /etc/kernel/install.d/95-bootc-migrate-esp-sync.install \
     add "$NEW_VERSION" "$TOKEN" \
     /var/tmp/e2e-resync-vmlinuz /var/tmp/e2e-resync-initrd
+# The hook records the ESP it wrote to; it must be a live mount, not the
+# private /run directory that the staging run left behind.
+ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
+mountpoint -q "$ESP" || { echo "resync wrote to $ESP, which is not a mount point"; exit 1; }
 test -f "$ESP/$TOKEN/$NEW_VERSION/linux"
 test -f "$ESP/loader/entries/bootc-migrate-$TOKEN-$NEW_VERSION.conf"
 test "$(sed -n 's/^default //p' "$ESP/loader/loader.conf")" \
@@ -1419,7 +1513,7 @@ echo "resync staged kernel version $NEW_VERSION"
 TRIAL_RESYNC
 
     step "=== bootloader-trial: promoting the tested trial ==="
-    ssh $SSH_OPTS root@localhost /var/tmp/bootc-rebase migrate-bootloader --promote
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --promote
     PROMOTED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "${PROMOTED_ORDER%%,*}" = "$TRIAL_ID" ] || {
@@ -1432,7 +1526,7 @@ TRIAL_RESYNC
     fi
 
     step "=== bootloader-trial: undoing the promoted migration ==="
-    ssh $SSH_OPTS root@localhost /var/tmp/bootc-rebase migrate-bootloader --undo
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --undo
     RESTORED_ORDER=$(ssh $SSH_OPTS root@localhost \
         "efibootmgr | sed -n 's/^BootOrder: *//p'")
     [ "$RESTORED_ORDER" = "$ORIGINAL_ORDER" ] || {
@@ -1444,6 +1538,7 @@ set -euo pipefail
 ! efibootmgr -v | grep -Fq 'bootc-migrate trial'
 ! test -e /var/lib/bootc-migrate/migrate-bootloader-state.json
 ! test -e /etc/kernel/install.d/95-bootc-migrate-esp-sync.install
+! test -e /var/lib/bootc-migrate/bin
 TRIAL_UNDO_CHECK
 ssh $SSH_OPTS root@localhost \
     "test ! -e '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
@@ -1512,20 +1607,14 @@ mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
 REBASEFIX
 
-    # The guest cannot reach ghcr.io for the target-image SCAN (#191) — bootc
-    # switch pulls fine, the scan path does not — so gate_cross_base returns
-    # Unknown here. Since #191 that is a refusal rather than a silent
-    # proceed, which is the whole point: a gate that cannot see must not wave
-    # things through.
+    # The gate depends on scanning the target image before `bootc switch`.
+    # Prove it refuses before opting in. A clean scan should identify the
+    # Bluefin -> Dakota/Aurora pairs as cross-base; an infrastructure
+    # regression may instead produce the fail-closed Unknown verdict (#191).
     #
-    # Prove it fires before opting out of it. The refusal happens before any
-    # staging work, so this costs seconds, and it is the only live coverage
-    # that the gate actually gates — the unit tests cover the policy, not the
-    # wiring.
-    # The scan path (curl -> ghcr.io) has failed inside the guest while
-    # `bootc switch` pulled fine moments later, which blocked both #187 and
-    # #188 without ever naming a cause. Probe it here so the run reports the
-    # truth rather than leaving it to be inferred from a downstream warning.
+    # Probe the same guest path first so a scan failure is classified as
+    # registry/token infrastructure rather than mistaken for a same-lineage
+    # result or an unexercised code path.
     step "=== ostree-rebase: probing the guest's registry reachability (#187) ==="
     ssh $SSH_OPTS root@localhost '
         echo "curl binary: $(command -v curl || echo MISSING)"
@@ -1582,9 +1671,44 @@ REBASEFIX
         exit 1
     fi
 
-    # These image pairs are same-lineage Fedora (bluefin:stable -> dakota /
-    # aurora), and the harness knows it, so it is the operator that opts in.
-    # That is what --accept-cross-base is for; it is not a way around the gate.
+    # A known cross-base result must exercise more than report rendering.
+    # Seed one file with the first reported old UID/GID so the apply pass has
+    # real work under /var, plus a deliberate all-three-differ /etc conflict.
+    # dconf/db/distro is present in both Bluefin and Dakota/Aurora and their
+    # vendor defaults differ; appending the marker makes the live value differ
+    # from both.
+    CROSS_BASE_ETC_MARKER="e2e-cross-base-conflict-marker"
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        REMAP_SPEC=$(echo "$GATE_OUT" | sed -nE \
+            's/^[[:space:]]*([^[:space:]]+)[[:space:]]+(uid|gid)[[:space:]]+([0-9]+)[[:space:]]+->[[:space:]]+([0-9]+)$/\1 \2 \3 \4/p' \
+            | head -1)
+        if [ -z "$REMAP_SPEC" ]; then
+            echo "FAIL: cross-base pair has no divergent system account to seed."
+            echo "      The remap apply path would remain untested."
+            exit 1
+        fi
+        read -r REMAP_NAME REMAP_KIND REMAP_OLD REMAP_NEW <<<"$REMAP_SPEC"
+        step "=== ostree-rebase: seeding remap + /etc conflict fixtures (#187) ==="
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_KIND='$REMAP_KIND' REMAP_OLD='$REMAP_OLD' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASEFIX'
+set -e
+test -f /etc/dconf/db/distro || {
+    echo "FAIL: /etc/dconf/db/distro is absent; cross-base conflict fixture cannot be seeded"; exit 1; }
+printf '\n# %s\n' "$ETC_MARKER" >> /etc/dconf/db/distro
+echo "cross-base-remap-fixture" > /var/rebase-test/remap-owned.txt
+case "$REMAP_KIND" in
+    uid) chown "$REMAP_OLD" /var/rebase-test/remap-owned.txt ;;
+    gid) chgrp "$REMAP_OLD" /var/rebase-test/remap-owned.txt ;;
+    *) echo "FAIL: unsupported remap kind $REMAP_KIND"; exit 1 ;;
+esac
+CROSSBASEFIX
+    fi
+
+    # Every ostree-rebase run proves the gate before opting in. The gating
+    # Bluefin -> Dakota pair is currently a known cross-base pair; same-lineage
+    # desktop-ring cells pass the dry-run gate without needing the opt-in, but
+    # accepting here is harmless and also covers an Unknown scan fail-closed.
     REBASE_FLAGS="--accept-cross-base"
 
     # #188: on the cross-DE cell, also ask for desktop migration. Without
@@ -1633,20 +1757,49 @@ REBASEFIX
     fi
     sed 's/^/[rebase] /' /tmp/rebase-out.log
 
-    # The gate above already proved this pair is cross-base by scanning it, so
-    # the opted-in re-base must show the remap running. This is #187's actual
-    # deliverable — the cross-base code path executing under assertion — and it
-    # is available on this existing cell, without a dedicated matrix entry,
-    # now that the target scan works (the token-scope fix).
+    # A clean cross-base finding must execute both #67 apply paths, not merely
+    # print their plans. The seeded ownership and all-three-differ fixtures
+    # make each pass produce an observable staged result.
     if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
-        step "=== ostree-rebase: asserting the cross-base remap ran after opt-in (#187) ==="
-        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
-            echo "FAIL: the gate identified this pair as cross-base, but the"
-            echo "      opted-in re-base printed no remap report. The refusal"
-            echo "      path ran and the apply path did not."
-            exit 1
-        fi
-        echo "OK: cross-base remap report emitted during the opted-in re-base."
+        step "=== ostree-rebase: asserting remap + /etc policy applied (#187) ==="
+        for needle in "Cross-base UID/GID remap report" \
+                      "Cross-base /etc conflict report" \
+                      "/etc/dconf/db/distro"; do
+            if ! grep -qF "$needle" /tmp/rebase-out.log; then
+                echo "FAIL: cross-base output lacks '$needle'."
+                exit 1
+            fi
+        done
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_NAME='$REMAP_NAME' REMAP_KIND='$REMAP_KIND' REMAP_NEW='$REMAP_NEW' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASECHECK'
+set -e
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ROOT="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}"
+test -f "$DEPLOY_ROOT/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: cross-base remap JSON report missing"; exit 1; }
+grep -qF "\"name\": \"$REMAP_NAME\"" "$DEPLOY_ROOT/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: remap JSON does not name $REMAP_NAME"; exit 1; }
+case "$REMAP_KIND" in
+    uid) actual=$(stat -c %u /var/rebase-test/remap-owned.txt) ;;
+    gid) actual=$(stat -c %g /var/rebase-test/remap-owned.txt) ;;
+esac
+[ "$actual" = "$REMAP_NEW" ] || {
+    echo "FAIL: /var remap fixture still has $REMAP_KIND $actual, expected $REMAP_NEW"; exit 1; }
+test -f "$DEPLOY_ROOT/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: cross-base /etc conflict JSON report missing"; exit 1; }
+grep -qF '"path": "dconf/db/distro"' "$DEPLOY_ROOT/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: /etc conflict JSON does not name dconf/db/distro"; exit 1; }
+grep -qF "$ETC_MARKER" "$DEPLOY_ROOT/etc/dconf/db/distro.rebase-old" \
+    || { echo "FAIL: displaced /etc value is absent from .rebase-old sidecar"; exit 1; }
+! grep -qF "$ETC_MARKER" "$DEPLOY_ROOT/etc/dconf/db/distro" \
+    || { echo "FAIL: staged /etc kept the displaced source value"; exit 1; }
+cmp -s "$DEPLOY_ROOT/etc/dconf/db/distro" "$DEPLOY_ROOT/usr/etc/dconf/db/distro" \
+    || { echo "FAIL: staged /etc did not take the target's dconf default"; exit 1; }
+CROSSBASECHECK
+        echo "OK: /var ownership remapped and /etc target default + sidecar staged."
     fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
@@ -2128,6 +2281,28 @@ loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus
 echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
 
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        step "=== ostree-rebase: cross-base results survived reboot (#187) ==="
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_KIND='$REMAP_KIND' REMAP_NEW='$REMAP_NEW' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASEPOST'
+set -e
+case "$REMAP_KIND" in
+    uid) actual=$(stat -c %u /var/rebase-test/remap-owned.txt) ;;
+    gid) actual=$(stat -c %g /var/rebase-test/remap-owned.txt) ;;
+esac
+[ "$actual" = "$REMAP_NEW" ] || {
+    echo "FAIL: rebooted /var fixture has $REMAP_KIND $actual, expected $REMAP_NEW"; exit 1; }
+grep -qF "$ETC_MARKER" /etc/dconf/db/distro.rebase-old \
+    || { echo "FAIL: rebooted deployment lost the .rebase-old sidecar"; exit 1; }
+! grep -qF "$ETC_MARKER" /etc/dconf/db/distro \
+    || { echo "FAIL: rebooted deployment restored the displaced source value"; exit 1; }
+cmp -s /etc/dconf/db/distro /usr/etc/dconf/db/distro \
+    || { echo "FAIL: rebooted /etc does not hold the target's dconf default"; exit 1; }
+echo "OK: remapped ownership, target default and sidecar survived reboot."
+CROSSBASEPOST
+    fi
+
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         # #68's other half: the stash is only useful if switching back
         # brings the config home. Emulate the return trip on the booted
@@ -2245,6 +2420,12 @@ REVDIAG
     step "=== composefs-to-ostree: re-injecting e2e-sshd into the OSTree deployment ==="
     ssh $SSH_OPTS root@localhost bash <<'REVSSH'
 set -e
+# bootc-rebase puts the /sysroot mount back to read-only when it finishes.
+# These are test-only edits, so lift that one flag (bind: not the
+# filesystem under it) for them.
+if grep -qE '^[^ ]+ /sysroot [^ ]+ ro[, ]' /proc/mounts; then
+    mount -o remount,bind,rw /sysroot
+fi
 DEPLOY_ETC=$(ls -d /sysroot/ostree/deploy/default/deploy/*.0 | head -1)/etc
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: deployment etc dir not found"; exit 1; }
 mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
@@ -2873,7 +3054,7 @@ method=ignore
 NMEOF
     chmod 600 /etc/NetworkManager/system-connections/e2e-package.nmconnection
     if command -v dnf >/dev/null 2>&1; then
-        echo "e2e-package-manager-edit" >> /etc/dnf/dnf.conf
+        echo "# e2e-package-manager-edit" >> /etc/dnf/dnf.conf
         dnf -y install cowsay
     elif command -v apt-get >/dev/null 2>&1; then
         mkdir -p /etc/apt/apt.conf.d
