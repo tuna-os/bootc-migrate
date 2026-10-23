@@ -34,7 +34,7 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 **1. Get the migrator.** Download the latest prebuilt binary (x86_64; for arm64
 swap in `aarch64-unknown-linux-gnu`):
 
-> **Release-naming note.** This repo was renamed from `bootc-migrate-composefs`
+> **Release-naming note.** The project changed its name from `bootc-migrate-composefs`
 > to `bootc-migrate` after v0.2.0. `release.yml` already publishes under the
 > new name, so from **v0.6.0** the tarball, the binary inside it, and the
 > container image are all `bootc-migrate`. The commands below reflect that.
@@ -71,7 +71,7 @@ sudo install -m755 target/release/bootc-migrate /usr/local/bin/
 ```
 </details>
 
-**2. Dry-run** — makes no changes, just checks your system is ready:
+**2. Dry-run** — makes no changes and checks your system is ready:
 
 ```bash
 sudo bootc-migrate \
@@ -296,8 +296,8 @@ Things to confirm in the report:
   Microsoft UEFI CA mismatch is refused before the ESP or boot order changes;
   an unreadable db or unrecognized signer is reported as a warning.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
-- `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the composefs object
-  store is built by reflinking your existing OSTree objects.
+- `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — reflinks preserve your
+  existing OSTree objects in the composefs store.
 
 Optionally, preview what Phase 4's `/etc` merge will see before running it:
 
