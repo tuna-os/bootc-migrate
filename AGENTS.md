@@ -74,6 +74,9 @@ Also available via just: `just watch log="e2e-luks.log"`
 | Dakota → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
 | composefs image swap (`E2E_MODE=image-swap`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
 | tunaOS desktop ring (`ostree-rebase`, `--de-migrate`, 4 cells, non-gating) | albacore:gnome, :niri, :cosmic, :xfce | the next desktop in the ring | btrfs | 40G |
+| package install: Fedora Cloud → fedora-bootc:43 (exploratory) | official Fedora Cloud | quay.io/fedora/fedora-bootc:43 | btrfs | 40G |
+| package install: Fedora Workstation → Bluefin (exploratory) | official Fedora Cloud + Workstation packages | ghcr.io/projectbluefin/bluefin:stable | btrfs + separate /boot | 60G |
+| package install: Ubuntu Cloud → fedora-bootc:43 (exploratory) | official Ubuntu Cloud | quay.io/fedora/fedora-bootc:43 | ext4 | 40G |
 
 Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
 no fs-verity); btrfs and ext4 seal in place. A bug in the loopback path shows
