@@ -11,7 +11,7 @@ use super::*;
 pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
-            " Step 5 · Review & Run ",
+            format!(" Step {} · Review & Run ", app.current_step()),
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -93,7 +93,9 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ])
         .split(chunks[1]);
 
-    let (btn_label, btn_bg) = if app.opt_dry_run {
+    let (btn_label, btn_bg) = if app.engine_missing() {
+        ("  ✗ Engine missing    ", MUTED)
+    } else if app.opt_dry_run {
         ("  ▶ Run Dry-Run     ", TEAL)
     } else {
         ("Type CONFIRM + Enter", Color::Rgb(40, 180, 70))
@@ -114,28 +116,55 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
 }
 
+fn build_route_summary(app: &App) -> Vec<Line<'static>> {
+    let line = |text: String, fg: Color| Line::from(Span::styled(text, Style::default().fg(fg)));
+    let strategy = if app.is_ostree_install() {
+        "OstreeInstall"
+    } else {
+        "ImageSwap"
+    };
+    let mut lines = vec![
+        line(format!("  • Target image: {}", app.selected_image()), TEXT),
+        line(
+            format!(
+                "  • Route: composefs -> {} ({strategy})",
+                app.target_backend
+            ),
+            TEXT,
+        ),
+        line(
+            format!(
+                "  • Bootloader: {}",
+                route::route_bootloader(app.target_backend)
+            ),
+            TEXT,
+        ),
+        line(
+            format!(
+                "  • E2E status: {}",
+                route::route_e2e_status(app.target_backend)
+            ),
+            AMBER,
+        ),
+    ];
+    if app.engine_missing() {
+        lines.push(line(format!("  ✗ {}", route::BOOTC_REBASE_MISSING), DANGER));
+    }
+    lines
+}
+
 fn build_review_summary(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if app.composefs_host() {
+        lines.extend(build_route_summary(app));
+        push_flag_lines(app, &mut lines);
+        return lines;
+    }
     let img = app.selected_image();
     lines.push(Line::from(Span::styled(
         format!("  • Target image: {img}"),
         Style::default().fg(TEXT),
     )));
-    if app.is_image_swap() {
-        lines.push(Line::from(Span::styled(
-            if app.opt_dry_run {
-                "  • Preview the bootc switch to the new ComposeFS image"
-            } else {
-                "  • bootc switch will stage the new ComposeFS deployment"
-            },
-            Style::default().fg(TEXT),
-        )));
-        lines.push(Line::from(Span::styled(
-            "  • Reboot after a live run; the previous deployment remains available",
-            Style::default().fg(TEXT),
-        )));
-        return lines;
-    }
     if app.selected_choice().is_some_and(|c| c.backend == "ostree") {
         lines.push(Line::from(Span::styled(
             "  • Stage an OSTree deployment with bootc-rebase",
@@ -145,6 +174,7 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
             "  • A cross-base rebase may require an additional UID/GID review",
             Style::default().fg(AMBER),
         )));
+        push_flag_lines(app, &mut lines);
         return lines;
     }
     if app.opt_skip_import {
@@ -182,6 +212,12 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
         format!("  • Bootloader: {bl}"),
         Style::default().fg(TEXT),
     )));
+    push_flag_lines(app, &mut lines);
+    lines
+}
+
+/// Warnings for the risky flags, the same on every route.
+fn push_flag_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     if app.opt_force {
         lines.push(Line::from(Span::styled(
             "  • ⚠ Force mode: non-fatal warnings will be ignored",
@@ -200,5 +236,4 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(AMBER),
         )));
     }
-    lines
 }
