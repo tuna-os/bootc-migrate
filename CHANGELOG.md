@@ -120,10 +120,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
-- The E2E SSH socket now starts after all Fedora host-key generators complete.
-  Previously its first connection could race `sshd-keygen@.service`; the
-  socket-activated `sshd -i` then exited without offering authentication, and
-  an otherwise healthy Dakota or Bluefin base appeared not to boot (#383).
+- The socket-activated E2E SSH service now waits for all Fedora host-key
+  generators before starting `sshd -i`. The listening socket remains
+  available while key generation completes, avoiding the previous host-key
+  race (#383).
 
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
