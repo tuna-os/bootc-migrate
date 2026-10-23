@@ -34,8 +34,8 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 **1. Get the migrator.** Download the latest prebuilt binary (x86_64; for arm64
 swap in `aarch64-unknown-linux-gnu`):
 
-> **Release-naming note.** This repo was renamed from `bootc-migrate-composefs`
-> to `bootc-migrate` after v0.2.0. `release.yml` already publishes under the
+> **Release-naming note.** After v0.2.0, the repo changed its name from
+> `bootc-migrate-composefs` to `bootc-migrate`. `release.yml` already publishes under the
 > new name, so from **v0.6.0** the tarball, the binary inside it, and the
 > container image are all `bootc-migrate`. The commands below reflect that.
 > To install the older v0.2.0 artifacts, substitute `bootc-migrate-composefs`
@@ -77,14 +77,14 @@ sudo install -m755 target/release/bootc-migrate /usr/local/bin/
 ```
 </details>
 
-**2. Dry-run** — makes no changes, just checks your system is ready:
+**2. Dry-run** — makes no changes and checks that your system is ready:
 
 ```bash
 sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable --dry-run
 ```
 
-**3. Migrate** (~5–25 min depending on cache/network):
+**3. Migrate** (~5–25 min; the time changes with cache and network):
 
 ```bash
 sudo bootc-migrate \
@@ -110,7 +110,7 @@ sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 > side won't be reflected if you roll back to OSTree (and vice versa). Commit
 > only when you're satisfied with the new system.
 
-That's it. For flags, rollback, troubleshooting, and the full phase-by-phase
+That's it. For flags, rollback, problems, and the full phase-by-phase
 breakdown, see [Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
 On **Bluefin LTS** (XFS) or systems with **LVM / LUKS / a dedicated `/var`
 partition**, the tool handles those automatically — see
@@ -143,13 +143,13 @@ Universal Blue, TunaOS, and Zirconium images; Utah appears as coming soon until
 its registry tag is published. The selected image reference and backend are
 shown before you continue. OSTree targets use `bootc-rebase` (which must be
 installed alongside `bootc-migrate`); ComposeFS targets use the normal migrate
-path. Returning from ComposeFS to OSTree is not yet supported.
+path. The wizard cannot yet return from ComposeFS to OSTree.
 
 The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
 to choose an image, and press Space on the options page to change a setting.
-For a live run, turn off dry-run there. The final review requires typing
-`CONFIRM` and Enter before anything changes. Root is needed to run a migration,
-though you can browse the catalog without it.
+For a live run, turn off dry-run there. At the final review, type
+`CONFIRM` and press Enter before anything changes. A migration needs root, but
+you can browse the catalog without it.
 
 ## Architecture
 
@@ -291,17 +291,17 @@ Things to confirm in the report:
 
 - `Booted bootc backend: ostree` — the conversion runs from here. `composefs`
   means the conversion is already done, and the tool swaps the deployment
-  image instead (`bootc switch`) rather than refusing. Only `none` — not a
+  image instead (`bootc switch`). Only `none` — not a
   bootc deployment at all — is a blocker.
 - `UEFI Boot Mode: Yes` + `NVRAM writable: Yes` — required for the
   systemd-boot path; on BIOS-only or locked NVRAM pass `--bootloader grub2`.
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
   target image onto the ESP.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
-- `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the composefs object
-  store is built by reflinking your existing OSTree objects.
+- `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the tool builds the
+  composefs object store from reflinks of your existing OSTree objects.
 
-Optionally, preview what Phase 4's `/etc` merge will see before running it:
+Optionally, preview what Phase 4's `/etc` merge will see before you run it:
 
 ```bash
 sudo bootc-migrate etc-drift
@@ -458,19 +458,19 @@ This route is exploratory: one non-gating E2E cell exercises it. See
 
 ### Move system Steam into Flatpak Steam
 
-After installing and launching `com.valvesoftware.Steam` once, its per-user
-data can absorb a system Steam installation without re-downloading games:
+Install `com.valvesoftware.Steam` and start it once. Then its per-user data can
+absorb a system Steam installation, and you do not download the games again:
 
 ```bash
 bootc-migrate system-to-flatpak-steam --dry-run
 bootc-migrate system-to-flatpak-steam
 ```
 
-Run it as the desktop user, **without** `sudo`, after closing Steam and all
+Run it as the desktop user, **without** `sudo`, after you close Steam and all
 Steam games. It uses filesystem renames only—never a recursive copy—to move
 `steamapps`, `userdata`, and `config` from `~/.local/share/Steam` into Flatpak
-Steam's data directory. The pre-existing Flatpak versions and both library
-registries are retained in a timestamped rollback directory under
+Steam's data directory. A timestamped rollback directory keeps the pre-existing Flatpak versions and
+both library registries under
 `~/.var/app/com.valvesoftware.Steam/`.
 
 The command deliberately leaves the native Steam runtime files and unrelated
@@ -488,7 +488,7 @@ deployment stays bootable:
   `/ostree/deploy/<n>/var/` stay on disk.
 - Phase 4 either copies `/var` to `state/os/default/var` or, for a dedicated
   filesystem/Btrfs subvolume, reuses it in place through a persistent BLS mount
-  argument. The original data is not deleted during migration.
+  argument. The migration does not delete the original data.
 - We push `Linux Boot Manager` (systemd-boot) to the front of NVRAM `BootOrder`
   but the `Fedora` shim entry (which boots GRUB → OSTree) remains listed.
 
@@ -506,13 +506,13 @@ This verifies prerequisites, re-orders UEFI `BootOrder` so the OSTree entry (Fed
 
 #### Manual firmware recovery
 
-If the system fails to boot into composefs or NVRAM state is interrupted:
+If the system fails to boot into composefs or an NVRAM write stops before it ends:
 
 1. Power on; tap the firmware boot-menu key (commonly **F12**, **F8**, or **Esc**).
 2. Pick the `Fedora` entry. GRUB will show the original `ostree:0` menu.
 3. Boot it. You land on the pre-migration system with its `/var` and `/etc` intact.
 
-Or, from a working composefs login, one-shot:
+Or, from a composefs login that works, for one boot only:
 
 ```bash
 sudo efibootmgr -v | grep -E 'Fedora|Linux Boot Manager'
@@ -520,9 +520,9 @@ sudo efibootmgr --bootnext <Boot####-of-Fedora>
 sudo systemctl reboot
 ```
 
-Pre-migration diagnostic snapshots and logs are automatically recorded under `/var/log/bootc-migrate/` on every run (`preflight-*.json` and `migration.log`) so boot configuration can be manually reconstructed if NVRAM is ever wiped.
+Each run records pre-migration diagnostic snapshots and logs under `/var/log/bootc-migrate/` (`preflight-*.json` and `migration.log`). If NVRAM is ever erased, you can use them to rebuild the boot configuration manually.
 
-After running `bootc-migrate commit`, the OSTree fallback is removed
+After you run `bootc-migrate commit`, the tool removes the OSTree fallback
 from the ESP and rollback becomes a fresh install. The E2E test exercises the
 full round-trip (composefs → OSTree → composefs) on every run.
 
@@ -600,7 +600,7 @@ cargo build --release
 ```
 
 Drops a single binary at `target/release/bootc-migrate`.
-Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
+You need Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
@@ -661,7 +661,7 @@ A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md) for why):
   wizard. Its E2E cells are untouchable regression gates — this binary's
   behavior doesn't change as new capability lands in `bootc-rebase`.
 - `crates/bootc-rebase` — the universal re-base engine binary; see below.
-- `tests/run-e2e.sh` — QEMU E2E harness exercising both binaries.
+- `tests/run-e2e.sh` — QEMU E2E harness for both binaries.
 
 ## `bootc-rebase` — the universal re-base engine
 
@@ -728,7 +728,7 @@ choose X over Y."
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and
 [REVIEW.md](REVIEW.md) for the code-review expectations. Run `just check` (clippy,
-rustfmt, unit tests, shellcheck) before opening a PR. AI-assisted contributions
+rustfmt, unit tests, shellcheck) before you open a PR. AI-assisted contributions
 should follow [AGENTS.md](AGENTS.md).
 
 ## License
