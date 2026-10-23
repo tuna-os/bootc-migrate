@@ -181,6 +181,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   own `remount,rw`. That only worked while the preflight probe left
   `/sysroot` writable by mistake, which #419 fixed, so both OstreeInstall E2E
   cells failed with `Read-only file system`.
+- Phase 0 now includes two expanded copies of the target image and 5 GiB of
+  initrd-rebuild headroom in its free-space estimate. XFS migrations that use
+  both the ext4 ComposeFS loopback and podman fallback storage now stop before
+  image pulls instead of filling the root during Phase 5 (#390).
 
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
