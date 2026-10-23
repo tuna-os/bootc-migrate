@@ -17,6 +17,8 @@ qemu.log
 serial-*.log
 ovmf_vars.fd
 *.fd
+.e2e-package-images/
+package-cloud-init.iso
 
 # Scratch agent transcripts / notes (not versioned)
 2026-*.txt*

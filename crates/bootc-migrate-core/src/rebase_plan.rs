@@ -154,7 +154,7 @@ const ROUTES: &[Route] = &[
         from: Backend::Package,
         to: Backend::Ostree,
         strategy: Strategy::PackageInstall,
-        implemented: false,
+        implemented: true,
     },
 ];
 
@@ -208,21 +208,6 @@ pub fn plan(from: Backend, to: Backend) -> Option<RebasePlan> {
         phases,
         bootloader,
     })
-}
-
-/// Standalone bootloader migration is a one-phase plan. The live operation
-/// remains gated behind issue #65's ESP/NVRAM implementation.
-pub fn bootloader_plan() -> RebasePlan {
-    RebasePlan {
-        route: Route {
-            from: Backend::Ostree,
-            to: Backend::Composefs,
-            strategy: Strategy::CoreMigration,
-            implemented: false,
-        },
-        phases: vec![Phase::Bootloader],
-        bootloader: BootloaderPolicy::Target,
-    }
 }
 
 #[cfg(test)]
@@ -308,9 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn package_to_ostree_is_planned() {
+    fn package_to_ostree_is_implemented() {
         let r = route(Backend::Package, Backend::Ostree).unwrap();
-        assert!(!r.implemented);
+        assert!(r.implemented);
         assert_eq!(r.strategy, Strategy::PackageInstall);
         let p = plan(Backend::Package, Backend::Ostree).unwrap();
         assert_eq!(p.phase_names(), "preflight -> pull -> deploy -> bootloader");
@@ -330,12 +315,5 @@ mod tests {
                 .unwrap()
                 .implemented
         );
-    }
-
-    #[test]
-    fn standalone_bootloader_plan_does_not_select_rootfs_phases() {
-        let p = bootloader_plan();
-        assert_eq!(p.phases, vec![Phase::Bootloader]);
-        assert_eq!(p.bootloader, BootloaderPolicy::Target);
     }
 }
