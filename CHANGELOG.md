@@ -32,6 +32,14 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
 
+- ComposeFS migrations now run a post-seal integrity pass. The native
+  composefs-rs backend runs `fsck` on the store. Both backends read and verify
+  every object. The check reports fs-verity storage failures before reboot,
+  not later as EIO.
+- OSTree imports now use object IDs from the store's SHA-512 fs-verity digest.
+  They enable fs-verity before they pull the target image. The imported
+  objects then match the integrity check.
+
 - A versioned application replacement catalog shared with wootc maps Windows
   display names and rpm, deb, and pacman package names to Flatpak IDs and
   portability guidance. The typed core reader validates and bundles the table
@@ -54,13 +62,6 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   hook. Both `bootc-migrate` and `bootc-rebase` route through the same live
   controller, and the QEMU E2E matrix covers the OVMF trial, resync,
   promotion, and undo path (#382).
-- ComposeFS migrations now run a post-seal integrity pass: the native
-  composefs-rs backend fscks the store, and both backends read and verify every
-  object, so fs-verity backing-store failures are reported before reboot instead
-  of later as EIO.
-- OSTree imports now use the store's SHA-512 fs-verity object IDs and enable
-  fs-verity before the target image is pulled, keeping the imported objects
-  compatible with the integrity check.
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
