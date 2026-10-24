@@ -585,13 +585,17 @@ impl InstallConfig<'_> {
                 self.source.route_name()
             );
         }
-        for tool in ["podman", "efibootmgr"] {
-            if which(tool).is_none() {
-                bail!(
-                    "`{tool}` is required for the {} route and was not found",
-                    self.source.route_name()
-                );
-            }
+        if which("podman").is_none() {
+            bail!(
+                "`podman` is required for the {} route and was not found",
+                self.source.route_name()
+            );
+        }
+        if which("efibootmgr").is_none() {
+            println!(
+                "Note: this host has no `efibootmgr`; the NVRAM steps run the target \
+                 image's own `efibootmgr` through podman."
+            );
         }
         refuse_existing_deploy(self.source, self.force)?;
 
@@ -1048,7 +1052,7 @@ impl InstallConfig<'_> {
             // Everything is staged by now; a failed NVRAM write must not
             // abort the run before the report, so it is best-effort like
             // the entry registration above.
-            systemd_boot_entry = match put_systemd_boot_first() {
+            systemd_boot_entry = match put_systemd_boot_first(self.target_image) {
                 Ok(id) => id,
                 Err(e) => {
                     eprintln!(
@@ -1071,7 +1075,7 @@ impl InstallConfig<'_> {
                     esp_resident::manual_workaround()
                 );
             }
-            put_grub_first()?
+            put_grub_first(self.target_image)?
         };
 
         let rendered = if self.source == InstallSource::Package {
@@ -1172,9 +1176,50 @@ impl InstallConfig<'_> {
     }
 }
 
+/// The argv prefix that runs the target image's `efibootmgr` with the
+/// host's `/dev` and `/sys`, the way bootupd ran from the same container.
+fn target_efibootmgr_prefix(target_image: &str) -> Vec<String> {
+    [
+        "podman",
+        "run",
+        "--rm",
+        "--privileged",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        "/dev:/dev",
+        "-v",
+        "/sys:/sys",
+        target_image,
+        "efibootmgr",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// The argv prefix for `efibootmgr`: the host's when it ships one, else the
+/// target image's. Some composefs hosts ship none (TunaOS Marlin), and on an
+/// image-based host the operator cannot just install it, so this route
+/// would otherwise refuse before it starts. Pure so it is table-tested.
+fn efibootmgr_prefix(target_image: &str, host_has_efibootmgr: bool) -> Vec<String> {
+    if host_has_efibootmgr {
+        vec!["efibootmgr".to_string()]
+    } else {
+        target_efibootmgr_prefix(target_image)
+    }
+}
+
+/// An `efibootmgr` command, from the host or the target image.
+fn efibootmgr(target_image: &str) -> Command {
+    let argv = efibootmgr_prefix(target_image, which("efibootmgr").is_some());
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd
+}
+
 /// Whether `efibootmgr -v` lists a "Linux Boot Manager" entry.
-fn systemd_boot_entry_present() -> bool {
-    Command::new("efibootmgr")
+fn systemd_boot_entry_present(target_image: &str) -> bool {
+    efibootmgr(target_image)
         .arg("-v")
         .output()
         .map(|o| {
@@ -1189,19 +1234,8 @@ fn systemd_boot_entry_present() -> bool {
 /// target image's efibootmgr, the way bootupd registered its own entry
 /// moments earlier from the same container. Pure so it is table-tested.
 pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec<String> {
-    vec![
-        "podman".into(),
-        "run".into(),
-        "--rm".into(),
-        "--privileged".into(),
-        "--security-opt".into(),
-        "label=disable".into(),
-        "-v".into(),
-        "/dev:/dev".into(),
-        "-v".into(),
-        "/sys:/sys".into(),
-        target_image.into(),
-        "efibootmgr".into(),
+    let mut argv = target_efibootmgr_prefix(target_image);
+    argv.extend([
         "--create".into(),
         "--disk".into(),
         disk.into(),
@@ -1211,7 +1245,8 @@ pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec
         "\\EFI\\systemd\\systemd-bootx64.efi".into(),
         "--label".into(),
         "Linux Boot Manager".into(),
-    ]
+    ]);
+    argv
 }
 
 /// Make sure a firmware entry reaches the restored systemd-boot loader.
@@ -1221,7 +1256,7 @@ pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec
 /// is the fallback. Returns whether the entry exists afterwards.
 fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
     crate::migration::boot::register_systemd_boot_nvram(esp);
-    if systemd_boot_entry_present() {
+    if systemd_boot_entry_present(target_image) {
         return true;
     }
     let Some((disk, part)) = crate::migration::boot::get_esp_disk_and_part(esp) else {
@@ -1237,7 +1272,7 @@ fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
         ),
         Err(e) => eprintln!("Warning: could not run efibootmgr in the target image: {e}"),
     }
-    let present = systemd_boot_entry_present();
+    let present = systemd_boot_entry_present(target_image);
     if present {
         println!("[nvram] registered \"Linux Boot Manager\" through the target image's efibootmgr");
     }
@@ -1921,8 +1956,8 @@ fn seed_var_from_target(target_image: &str, stateroot_var: &str) {
 /// it. Returns the entry id, or `None` with a warning when no such entry
 /// exists — the firmware's removable-media fallback (`EFI/BOOT/BOOTX64.EFI`,
 /// which bootupd also writes) then boots GRUB.
-fn put_grub_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
+fn put_grub_first(target_image: &str) -> Result<Option<String>> {
+    let out = efibootmgr(target_image)
         .arg("-v")
         .output()
         .context("running efibootmgr")?;
@@ -1943,7 +1978,7 @@ fn put_grub_first() -> Result<Option<String>> {
     let order = rollback::parse_boot_order(&txt).unwrap_or_default();
     let new_order = rollback::build_new_boot_order(&order, &id);
     run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        efibootmgr(target_image).args(["--bootorder", &new_order]),
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (GRUB entry Boot{id} first)");
@@ -1954,8 +1989,8 @@ fn put_grub_first() -> Result<Option<String>> {
 /// `BootOrder`, for the layout where GRUB cannot boot the deployment
 /// (#305). Returns the entry id, or `None` with a warning when there is
 /// no such entry.
-fn put_systemd_boot_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
+fn put_systemd_boot_first(target_image: &str) -> Result<Option<String>> {
+    let out = efibootmgr(target_image)
         .arg("-v")
         .output()
         .context("running efibootmgr")?;
@@ -1973,7 +2008,7 @@ fn put_systemd_boot_first() -> Result<Option<String>> {
     let order = rollback::parse_boot_order(&txt).unwrap_or_default();
     let new_order = rollback::build_new_boot_order(&order, &id);
     run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        efibootmgr(target_image).args(["--bootorder", &new_order]),
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (systemd-boot entry Boot{id} first)");
@@ -1983,6 +2018,19 @@ fn put_systemd_boot_first() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn efibootmgr_falls_back_to_the_target_image_when_the_host_has_none() {
+        assert_eq!(efibootmgr_prefix("img", true), ["efibootmgr"]);
+        let argv = efibootmgr_prefix("ghcr.io/projectbluefin/utah:testing", false);
+        assert_eq!(argv[..4], ["podman", "run", "--rm", "--privileged"]);
+        assert!(
+            argv.join(" ").contains(
+                "-v /dev:/dev -v /sys:/sys ghcr.io/projectbluefin/utah:testing efibootmgr"
+            )
+        );
+        assert_eq!(argv.last().map(String::as_str), Some("efibootmgr"));
+    }
 
     #[test]
     fn seed_var_command_never_overwrites_carried_data() {

@@ -163,6 +163,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The composefs → OSTree route (`OstreeInstall`) no longer needs
+  `efibootmgr` on the host. When the host has none, it runs the target
+  image's `efibootmgr` through podman. TunaOS Marlin ships no `efibootmgr`,
+  so the route used to refuse there before it changed anything.
+
 - `bootc-rebase scan` and the other registry readers decode zstd layers
   themselves. They used to pass them to `tar -a`, which needs an external
   `zstd` program. On a host without one, every zstd layer read as empty, and
