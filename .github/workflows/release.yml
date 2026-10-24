@@ -74,7 +74,7 @@ jobs:
           fi
 
           # Manual dispatch builds without releasing, so the Containerfile and
-          # both cross-arch builds stay validated between releases.
+          # all architecture builds stay validated between releases.
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             printf 'tag=\nbuild=true\npublish=false\n' >> "$GITHUB_OUTPUT"
             echo "::notice::dispatch — building without releasing"
@@ -116,6 +116,8 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
         with:
@@ -127,7 +129,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
       - name: Build + package
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: |
           set -euo pipefail
           cargo build --release --target ${{ matrix.target }}

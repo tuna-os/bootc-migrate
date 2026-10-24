@@ -20,6 +20,12 @@ composefs = "0.9"
 composefs-oci = { version = "0.9", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
+# postmarketOS-family hosts use musl.  The static release target cannot link
+# the system OpenSSL used by composefs, so build that target from vendored
+# sources while keeping normal GNU builds on the distribution library.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [lints]
 workspace = true
 

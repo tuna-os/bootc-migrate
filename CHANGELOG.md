@@ -25,6 +25,9 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Releases include a static `aarch64-unknown-linux-musl` archive so
+  `bootc-rebase` runs directly on postmarketOS-family ARM64 hosts (#461).
+
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
   issuers with the firmware's `db` CA generations. It refuses known mismatches

@@ -31,8 +31,10 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 > storage, and user accounts — but treat it as risky until you've rebooted and
 > confirmed everything works. It's reversible until you run `commit` (step 5).
 
-**1. Get the migrator.** Download the latest prebuilt binary (x86_64; for arm64
-swap in `aarch64-unknown-linux-gnu`):
+**1. Get the migrator.** Download the latest prebuilt binary. Use
+`x86_64-unknown-linux-gnu` on x86_64, `aarch64-unknown-linux-gnu` on arm64
+glibc systems, or `aarch64-unknown-linux-musl` on arm64 musl systems such as
+postmarketOS and Alpine:
 
 > **Release-naming note.** The project name changed from
 > `bootc-migrate-composefs` to `bootc-migrate` after v0.2.0.
