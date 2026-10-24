@@ -50,6 +50,8 @@ pub struct ApplicationMatches {
     pub rpm: Vec<String>,
     pub deb: Vec<String>,
     pub pacman: Vec<String>,
+    #[serde(default)]
+    pub apk: Vec<String>,
 }
 
 impl ApplicationMatches {
@@ -58,6 +60,7 @@ impl ApplicationMatches {
             PackageDb::Rpm => &self.rpm,
             PackageDb::Dpkg => &self.deb,
             PackageDb::Pacman => &self.pacman,
+            PackageDb::Apk => &self.apk,
         }
     }
 }

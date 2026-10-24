@@ -66,12 +66,11 @@ Route availability by frontend (mechanism fact, not a support claim):
 ## Package-based source hosts
 
 These rows are separate from the general route table.
-Detection of rpm, dpkg, or pacman plus the readiness checks does not prove
+Detection of rpm, dpkg, pacman or apk plus the readiness checks does not prove
 that a package host can migrate or boot. A row stays **UNPROVEN** until its
 cell turns green on `main`. Issue #380 owns these cells.
-A green Fedora row does not promote Ubuntu, Debian, or Arch.
+A green Fedora row does not promote Ubuntu, Debian, Arch, or postmarketOS.
 A green UEFI/ext4 row does not promote btrfs, XFS, or BIOS.
-
 | Source | Package database | Root filesystem | Boot mode | Storage stack | Status | Proof needed |
 |---|---|---|---|---|---|---|
 | Fedora Workstation | rpm | btrfs subvolume | UEFI | plain | **UNPROVEN** | Fedora Workstation → Bluefin cell green on `main` |
@@ -80,6 +79,7 @@ A green UEFI/ext4 row does not promote btrfs, XFS, or BIOS.
 | Ubuntu | dpkg | ext4 | UEFI | plain | **UNPROVEN** | Ubuntu cross-family cell green on `main` |
 | Debian | dpkg | ext4 | UEFI | plain | **UNPROVEN** | Debian cross-family cell green on `main` |
 | Arch Linux | pacman | ext4 | UEFI | plain | **UNPROVEN** | Arch cross-family cell green on `main` |
+| postmarketOS / Alpine | apk | ext4 | UEFI | LUKS root with unencrypted ESP at /boot | **UNPROVEN** | arm64 VM cell with pmOS layout green on `main` (#461) |
 | Fedora, Ubuntu, Debian or Arch | matching database above | btrfs, XFS or ext4 | BIOS/CSM | plain | **UNPROVEN; preflight refuses** | per-distribution BIOS cell plus implementation that passes preflight |
 | Fedora, Ubuntu, Debian or Arch | matching database above | btrfs, XFS or ext4 | UEFI | LUKS and/or LVM | **UNPROVEN; preflight refuses** | per-layout cell plus implementation that passes preflight |
 
@@ -115,7 +115,7 @@ first-boot verification (#379) are not ready.
 | CoreMigration, passphrase (non-TPM2) unlock | **UNPROVEN** | harness unlocks via swtpm only; no sendkey/passphrase cell |
 | LUKS of any kind on ImageSwap / OstreeDeploy | **UNPROVEN** | no cells; both rely on `bootc switch` native behavior, which no cell exercises under encryption |
 | LUKS of any kind on OstreeInstall | **UNPROVEN** | `carry_over_kargs` keeps `rd.luks.*`/`rd.lvm.lv` in code, but the route's only cell is RED on unencrypted disk — encryption adds an unproven axis to a red route |
-
+| PackageInstall, LUKS root with unencrypted ESP at /boot (ARM64 postmarketOS) | **UNPROVEN** | core LUKS preflight, whole-ESP snapshot, bind plan, DTB gating, and kargs derivation implemented (#461); arm64 E2E cell pending |
 ## UKI (boot artifact format)
 
 | Combination | Status | Proof |

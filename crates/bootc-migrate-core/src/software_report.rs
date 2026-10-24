@@ -576,6 +576,7 @@ fn read_installed_packages(root: &Path, package_db: PackageDb) -> Result<Vec<Ins
         PackageDb::Rpm => read_rpm_packages(root),
         PackageDb::Dpkg => read_dpkg_packages(root),
         PackageDb::Pacman => read_pacman_packages(root),
+        PackageDb::Apk => read_apk_packages(root),
     }?;
     packages.sort_unstable_by(|left, right| left.name.cmp(&right.name));
 
@@ -762,6 +763,63 @@ fn pacman_files(contents: &str) -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.ends_with('/'))
         .map(|line| format!("/{line}"))
         .collect()
+}
+
+fn read_apk_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
+    let path = if root.join("lib/apk/db/installed").exists() {
+        root.join("lib/apk/db/installed")
+    } else {
+        root.join("var/lib/apk/db/installed")
+    };
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(parse_apk_installed(&content))
+}
+
+pub fn parse_apk_installed(content: &str) -> Vec<InstalledPackage> {
+    let mut packages = Vec::new();
+    let mut current_package: Option<InstalledPackage> = None;
+    let mut current_dir = String::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if let Some(pkg) = current_package.take() {
+                packages.push(pkg);
+            }
+            current_dir.clear();
+            continue;
+        }
+        if let Some(name) = line.strip_prefix("P:") {
+            if let Some(pkg) = current_package.take() {
+                packages.push(pkg);
+            }
+            current_package = Some(InstalledPackage {
+                name: name.to_string(),
+                files: Vec::new(),
+            });
+            current_dir.clear();
+        } else if let Some(dir) = line.strip_prefix("F:") {
+            current_dir = dir.trim_start_matches('/').to_string();
+        } else if let Some(file) = line.strip_prefix("R:")
+            && let Some(pkg) = current_package.as_mut()
+        {
+            let file_path = if current_dir.is_empty() {
+                format!("/{file}")
+            } else {
+                format!("/{current_dir}/{file}")
+            };
+            pkg.files.push(file_path);
+        }
+    }
+    if let Some(pkg) = current_package {
+        packages.push(pkg);
+    }
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    packages
 }
 
 fn read_enabled_services() -> Result<Vec<String>> {

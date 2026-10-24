@@ -123,6 +123,7 @@ validation named in that issue's own scope never shipped.
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 | TUI composefs-host route step (#312) | implemented: background scan, dual-capable route choice, honest notes, bootc-rebase execution | covered by state-machine tests only; tui-migrate cell runs on an ostree host and does not exercise the composefs-host screens or launch bootc-rebase | #312 |
 | Package-managed source → OSTree (`Strategy::PackageInstall`) | harness support is implemented: checksum-pinned Fedora Cloud, synthesized Workstation, and Ubuntu Cloud disks, cloud-init SSH, package fixtures and Previous system assertions | the three #380 cells are exploratory until the package route and its readiness/report/bootloader pieces (#373–#379) land; the Fedora Cloud cell must be promoted to gating after its first green run on `main` | #373–#380 |
+| postmarketOS-family ARM64 laptops (apk, LUKS root, ESP at /boot, devicetree) | implemented: apk host detection, LUKS root preflight, whole-ESP snapshot and restore, bind plan for ESP at /boot, devicetree & arm64 kargs policy, hardware check for DT platforms, and Previous system rollback entry | arm64 VM cell with pmOS layout (LUKS2 argon2id ext4, ESP at /boot, systemd-boot with devicetree) on ubuntu-24.04-arm and X13s hardware qualification remain open | #461 |
 
 Everything not in this table — the OSTree→ComposeFS migrator itself, including
 rollback and commit — is covered by the seven-cell E2E matrix.

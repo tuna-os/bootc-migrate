@@ -29,6 +29,14 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
   composefs host, where its routes have E2E coverage.
 
+- Reversible migration support for postmarketOS-family ARM64 laptops (#461):
+  - Detect apk-managed package hosts via `/lib/apk/db/installed`.
+  - Accept LUKS roots in preflight when `/boot` is on an unencrypted partition or ESP, and derive `rd.luks.name` / `root=` from `/etc/crypttab`, `pmos_root_uuid=`, or device-mapper tables.
+  - Implement full-ESP snapshot and restore for layouts where `/boot` is the ESP, preserving foreign vendor boot files (`vmlinuz`, `initramfs`, `*.dtb`, `dtbs/`, `loader/`).
+  - Provide a bind plan that mounts `/boot` at `/boot/efi` under the physical root for package-host alongside installs.
+  - Parse and preserve `devicetree` BLS lines and arm64 kernel arguments (`arm64.*`, `clk_ignore_unused`, `pd_ignore_unused`), and refuse when a devicetree host targets a kernel without DTB files.
+  - Extend hardware inventory to inspect the `platform` bus and compare `/proc/device-tree/compatible` with target DTBs.
+  - Support `Previous system` rollback staging and `bootc-rebase undo`.
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
   issuers with the firmware's `db` CA generations. It refuses known mismatches

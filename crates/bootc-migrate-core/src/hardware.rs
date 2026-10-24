@@ -44,6 +44,10 @@ pub struct TargetKernel {
     /// Firmware file paths relative to `usr/lib/firmware`, compression
     /// suffix removed (see [`norm_firmware`]).
     pub firmware: BTreeSet<String>,
+    /// DTB filenames and relative paths found under `usr/lib/modules/<kver>`.
+    pub dtbs: BTreeSet<String>,
+    /// Whether the target ships devicetree support.
+    pub has_devicetree: bool,
     /// Image layers the registry pass could not read. Non-zero means the
     /// inventory may lack modules or firmware the image does ship, so an
     /// absence is not proof: [`assess`] does not block on it.
@@ -290,11 +294,14 @@ pub struct HostHardware {
     /// The host has CPU microcode for its vendor (`intel-ucode/`,
     /// `amd-ucode/`).
     pub has_cpu_microcode: bool,
+    /// Devicetree compatible strings from `/proc/device-tree/compatible`.
+    pub devicetree_compatible: Vec<String>,
+    /// Whether the host booted with a devicetree.
+    pub boots_with_devicetree: bool,
 }
 
 /// Buses judged: the ones carrying the hardware a user notices losing.
-const BUSES: &[&str] = &["pci", "usb", "sdio", "virtio", "hid"];
-
+const BUSES: &[&str] = &["pci", "usb", "sdio", "virtio", "hid", "platform"];
 /// Read the host inventory under `sys_root` (normally `/`).
 ///
 /// `firmware_dirs` are the directories searched for firmware (normally
@@ -379,6 +386,23 @@ pub fn read_host_hardware_from(
         });
     hw.has_cpu_microcode = microcode_dir(hw.cpu_vendor.as_deref())
         .is_some_and(|d| firmware_dirs.iter().any(|f| f.join(d).is_dir()));
+    let dt_compat_path = sys_root.join("proc/device-tree/compatible");
+    let dt_compat_path_fallback = sys_root.join("sys/firmware/devicetree/base/compatible");
+    let dt_bytes = fs::read(&dt_compat_path)
+        .or_else(|_| fs::read(&dt_compat_path_fallback))
+        .unwrap_or_default();
+    let devicetree_compatible: Vec<String> = dt_bytes
+        .split(|b| *b == 0)
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let boots_with_devicetree = !devicetree_compatible.is_empty()
+        || sys_root.join("proc/device-tree").exists()
+        || sys_root.join("sys/firmware/devicetree").exists();
+    hw.devicetree_compatible = devicetree_compatible;
+    hw.boots_with_devicetree = boots_with_devicetree;
     hw
 }
 
@@ -533,6 +557,23 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
     // whether the fallback is only the firmware framebuffer).
     type LostKey = (String, Vec<String>, bool);
     let mut lost: BTreeMap<LostKey, (Severity, Vec<String>)> = BTreeMap::new();
+    if host.boots_with_devicetree && !target.has_devicetree && target.layers_skipped == 0 {
+        report.findings.push(Finding {
+            severity: Severity::Blocking,
+            subject: "devicetree".to_string(),
+            detail: format!(
+                "devicetree: the host boots with a devicetree (compatible: {}), but the target \
+                 kernel ({}) ships no devicetree or DTBs under /usr/lib/modules",
+                if host.devicetree_compatible.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    host.devicetree_compatible.join(", ")
+                },
+                target.kver
+            ),
+        });
+    }
+
     for dev in &host.devices {
         let Some(module) = &dev.module else {
             continue;
@@ -980,6 +1021,8 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            dtbs: BTreeSet::new(),
+            has_devicetree: false,
             layers_skipped: 0,
         }
     }
@@ -1250,6 +1293,8 @@ mod tests {
                     .collect(),
                 cpu_vendor: c.vendor.map(str::to_string),
                 has_cpu_microcode: c.microcode,
+                devicetree_compatible: Vec::new(),
+                boots_with_devicetree: false,
             };
             let r = assess(&host, &target());
             assert_eq!(
@@ -1458,5 +1503,38 @@ mod tests {
         );
         assert!(bad.contains("[BLOCKING] PCI x: gone"));
         assert!(render_unknown("img", "no kernel modules found").contains("could NOT be checked"));
+    }
+
+    #[test]
+    fn devicetree_host_without_target_dtb_is_blocking() {
+        let host = HostHardware {
+            devicetree_compatible: vec!["lenovo,thinkpad-x13s".into(), "qcom,sc8280xp".into()],
+            boots_with_devicetree: true,
+            ..Default::default()
+        };
+        let mut target = target();
+        target.has_devicetree = false;
+        target.dtbs.clear();
+        let report = assess(&host, &target);
+        assert!(report.has_blocking());
+        let blocking = report.blocking().next().unwrap();
+        assert_eq!(blocking.subject, "devicetree");
+        assert!(blocking.detail.contains("lenovo,thinkpad-x13s"));
+    }
+
+    #[test]
+    fn devicetree_host_with_target_dtb_passes() {
+        let host = HostHardware {
+            devicetree_compatible: vec!["lenovo,thinkpad-x13s".into(), "qcom,sc8280xp".into()],
+            boots_with_devicetree: true,
+            ..Default::default()
+        };
+        let mut target = target();
+        target.has_devicetree = true;
+        target
+            .dtbs
+            .insert("sc8280xp-lenovo-thinkpad-x13s.dtb".into());
+        let report = assess(&host, &target);
+        assert!(!report.has_blocking());
     }
 }

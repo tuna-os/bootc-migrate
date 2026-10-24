@@ -475,13 +475,20 @@ fn kernel_inventory_paths(names: &[String]) -> Vec<String> {
         "modules.builtin",
         "modules.alias",
         "modules.builtin.alias",
+        "devicetree",
     ];
     names
         .iter()
         .filter(|n| {
             n.strip_prefix("usr/lib/modules/")
                 .and_then(|rest| rest.split_once('/'))
-                .is_some_and(|(kver, file)| !kver.is_empty() && FILES.contains(&file))
+                .is_some_and(|(kver, file)| {
+                    !kver.is_empty()
+                        && (FILES.contains(&file)
+                            || file.ends_with(".dtb")
+                            || file.starts_with("dtb/")
+                            || file.starts_with("dtbs/"))
+                })
         })
         .cloned()
         .collect()
@@ -509,11 +516,35 @@ fn read_target_kernel(
     aliases.extend(crate::hardware::parse_module_aliases(&read(
         "modules.builtin.alias",
     )));
+    let mut dtbs = std::collections::BTreeSet::new();
+    let devicetree_symlink = dir.join("devicetree");
+    let has_devicetree_file = devicetree_symlink.exists();
+    if has_devicetree_file {
+        dtbs.insert("devicetree".to_string());
+    }
+    for sub in ["", "dtb", "dtbs"] {
+        let sub_dir = if sub.is_empty() {
+            dir.clone()
+        } else {
+            dir.join(sub)
+        };
+        if let Ok(entries) = fs::read_dir(&sub_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".dtb") {
+                    dtbs.insert(name);
+                }
+            }
+        }
+    }
+    let has_devicetree = has_devicetree_file || !dtbs.is_empty();
     Some(crate::hardware::TargetKernel {
         modules: crate::hardware::parse_module_list(&read("modules.dep")),
         builtin: crate::hardware::parse_module_list(&read("modules.builtin")),
         aliases,
         firmware,
+        dtbs,
+        has_devicetree,
         kver,
         layers_skipped: 0,
     })

@@ -415,16 +415,39 @@ pub fn package_boot_snapshot_paths<'a>(listing: impl IntoIterator<Item = &'a str
             let top_level = !path.contains('/');
             (top_level
                 && (path.starts_with("vmlinuz-")
+                    || *path == "vmlinuz"
+                    || path.starts_with("vmlinux-")
+                    || *path == "vmlinux"
+                    || path.starts_with("kernel-")
+                    || *path == "kernel"
                     || path.starts_with("initramfs-")
-                    || path.starts_with("initrd.img-")))
+                    || *path == "initramfs"
+                    || path.starts_with("initrd.img-")
+                    || *path == "initrd.img"
+                    || path.starts_with("initrd-")
+                    || *path == "initrd"
+                    || path.ends_with(".dtb")))
+                || path.starts_with("dtbs/")
                 || (path.starts_with("loader/entries/") && path.ends_with(".conf"))
-                || matches!(*path, "grub/grub.cfg" | "grub2/grub.cfg")
+                || *path == "loader/loader.conf"
+                || matches!(*path, "grub/grub.cfg" | "grub2/grub.cfg" | "grub.cfg")
         })
         .map(str::to_string)
         .collect();
     paths.sort();
     paths.dedup();
     paths
+}
+
+/// Whether `path` is a kernel executable under `/boot`.
+pub fn is_package_kernel_path(path: &str) -> bool {
+    let p = path.trim_start_matches('/');
+    p == "vmlinuz"
+        || p.starts_with("vmlinuz-")
+        || p == "vmlinux"
+        || p.starts_with("vmlinux-")
+        || p == "kernel"
+        || p.starts_with("kernel-")
 }
 
 /// Pick the deployment `bootc install` just created from the names under
@@ -453,9 +476,38 @@ fn filtered_kargs(cmdline: &str, include_root: bool) -> Vec<String> {
                 || w.starts_with("rd.lvm.lv=")
                 || w.starts_with("rd.luks.")
                 || w.starts_with("systemd.log_level=")
+                || w.starts_with("arm64.")
+                || *w == "clk_ignore_unused"
+                || w.starts_with("clk_ignore_unused=")
+                || *w == "pd_ignore_unused"
+                || w.starts_with("pd_ignore_unused=")
+                || w.starts_with("devicetree=")
         })
         .map(str::to_string)
         .collect()
+}
+
+/// Parse a root UUID from `/etc/crypttab` content.
+pub fn parse_crypttab_root_uuid(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 2 {
+            let target = fields[0];
+            let dev = fields[1];
+            if target == "root" || line.contains("luks") {
+                if let Some(uuid) = dev.strip_prefix("UUID=") {
+                    return Some(uuid.to_string());
+                } else if let Some(uuid) = dev.strip_prefix("/dev/disk/by-uuid/") {
+                    return Some(uuid.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Kernel arguments needed beyond those bootc inherits on a composefs host.
@@ -465,9 +517,40 @@ pub fn carry_over_kargs(cmdline: &str) -> Vec<String> {
 
 /// Kernel arguments needed to mount and diagnose a package host's old root.
 /// Kernel image paths, initrd paths and backend locators are deliberately
-/// excluded.
+/// excluded. Derives `rd.luks.name` / `root=` if missing from cmdline when root is on LUKS.
 pub fn package_carry_over_kargs(cmdline: &str) -> Vec<String> {
-    filtered_kargs(cmdline, true)
+    package_carry_over_kargs_with_root(cmdline, Path::new("/"))
+}
+
+/// Same as [`package_carry_over_kargs`], inspecting `root` for `/etc/crypttab`.
+pub fn package_carry_over_kargs_with_root(cmdline: &str, root: &Path) -> Vec<String> {
+    let mut kargs = filtered_kargs(cmdline, true);
+    let has_luks = kargs.iter().any(|k| k.starts_with("rd.luks."));
+    let has_root = kargs.iter().any(|k| k.starts_with("root="));
+
+    if !has_luks {
+        let pmos_uuid = cmdline
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix("pmos_root_uuid="));
+        if let Some(uuid) = pmos_uuid {
+            kargs.push(format!("rd.luks.name={uuid}=root"));
+        } else {
+            let crypttab_path = root.join("etc/crypttab");
+            if let Ok(content) = fs::read_to_string(&crypttab_path)
+                && let Some(uuid) = parse_crypttab_root_uuid(&content)
+            {
+                kargs.push(format!("rd.luks.name={uuid}=root"));
+            }
+        }
+    }
+
+    if !has_root
+        && (kargs.iter().any(|k| k.starts_with("rd.luks.")) || cmdline.contains("pmos_root_uuid="))
+    {
+        kargs.push("root=/dev/mapper/root".to_string());
+    }
+
+    kargs
 }
 
 /// What the run did, written as JSON under [`STATE_DIR`] so it survives the
@@ -640,6 +723,22 @@ impl InstallConfig<'_> {
                 self.force,
             )?;
         }
+        let host_is_dt = Path::new("/proc/device-tree/compatible").exists()
+            || Path::new("/sys/firmware/devicetree/base/compatible").exists();
+        if host_is_dt
+            && let Some(caps) = &caps
+            && let Some(target_kernel) = &caps.kernel
+            && !target_kernel.has_devicetree
+            && target_kernel.dtbs.is_empty()
+            && !self.force
+        {
+            bail!(
+                "the host boots with a devicetree, but the target kernel ({}) \
+                 ships no devicetree or DTB files under /usr/lib/modules; refusing \
+                 rather than booting a device-tree platform with ACPI. Use --force to override.",
+                target_kernel.kver
+            );
+        }
 
         // #256/#258: lineage gate. No /etc policy can be applied to what
         // `bootc install` writes — the merge below is ours, so the policy
@@ -806,7 +905,7 @@ impl InstallConfig<'_> {
                 .unwrap_or(0)
         ));
         let snapshot_paths = if self.source == InstallSource::Package {
-            snapshot_package_boot(Path::new("/boot"), &snapshot_dir)?
+            snapshot_package_boot(Path::new("/boot"), &snapshot_dir, esp == "/boot")?
         } else {
             snapshot_esp(Path::new(&esp), &snapshot_dir)?
         };
@@ -826,7 +925,7 @@ impl InstallConfig<'_> {
             );
         }
         if self.source == InstallSource::Package
-            && !snapshot_paths.iter().any(|p| p.starts_with("vmlinuz-"))
+            && !snapshot_paths.iter().any(|p| is_package_kernel_path(p))
         {
             bail!(
                 "no package-host kernel was found under /boot; refusing before \
@@ -865,13 +964,9 @@ impl InstallConfig<'_> {
             )
         );
         println!("[deploy] streaming `bootc install` output below (OSTree import takes minutes)…");
-        let _boot_binds = if self.source == InstallSource::Composefs {
-            Some(bind_boot_into_physical_root(&esp)?)
-        } else {
-            None
-        };
+        let _boot_binds = bind_boot_into_physical_root(&esp, self.source.physical_root())?;
         let kargs = if self.source == InstallSource::Package {
-            package_carry_over_kargs(&cmdline)
+            package_carry_over_kargs_with_root(&cmdline, Path::new(self.source.physical_root()))
         } else {
             carry_over_kargs(&cmdline)
         };
@@ -1017,13 +1112,49 @@ impl InstallConfig<'_> {
                 }
             )
         );
-        let restored = if self.source == InstallSource::Composefs {
-            let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
-            println!("[esp] {} composefs artifact(s) restored", restored.len());
+        let restored = if self.source == InstallSource::Composefs || esp == "/boot" {
+            let target_esp = if esp == "/boot" {
+                Path::new("/boot")
+            } else {
+                Path::new(&esp)
+            };
+            let restored = restore_esp(&snapshot_dir, target_esp)?;
+            println!("[esp] {} artifact(s) restored", restored.len());
             restored
         } else {
             Vec::new()
         };
+        if self.source == InstallSource::Package
+            && let Ok(source_id) =
+                crate::package_rollback::source_identity_from_root(Path::new("/"))
+        {
+            let rollback_state = Path::new(crate::package_rollback::STATE_DIR);
+            let _ = fs::remove_dir_all(rollback_state);
+            if let Ok(snap) = crate::package_rollback::snapshot_source_boot(
+                &snapshot_dir,
+                rollback_state,
+                source_id,
+                &cmdline,
+            ) {
+                println!(
+                    "[rollback] snapshotted package host rollback artifacts ({})",
+                    snap.source.label()
+                );
+                let target_boot = Path::new("/boot");
+                let target_supports_bls = target_boot.join("loader/entries").is_dir()
+                    || target_boot.join("loader/loader.conf").is_file();
+                if let Ok(staged) = crate::package_rollback::stage_rollback(
+                    rollback_state,
+                    target_boot,
+                    target_supports_bls,
+                ) {
+                    println!(
+                        "[rollback] staged Previous system entry at {}",
+                        staged.entry_path.display()
+                    );
+                }
+            }
+        }
         // A composefs host installed to disk boots systemd-boot through the
         // removable-media path and may never have had a firmware entry of
         // its own; bootupd just replaced that path with shim. The restored
@@ -1539,10 +1670,20 @@ fn snapshot_esp(esp: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
 }
 
 /// Snapshot the package host's boot artifacts for the rollback-entry stage.
-fn snapshot_package_boot(boot: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
+fn snapshot_package_boot(boot: &Path, snapshot_dir: &Path, whole_esp: bool) -> Result<Vec<String>> {
     let mut listing = Vec::new();
     walk_files(boot, boot, &mut listing)?;
-    let paths = package_boot_snapshot_paths(listing.iter().map(String::as_str));
+    let paths = if whole_esp {
+        let mut p: Vec<String> = listing
+            .into_iter()
+            .map(|s| s.trim_start_matches('/').to_string())
+            .collect();
+        p.sort();
+        p.dedup();
+        p
+    } else {
+        package_boot_snapshot_paths(listing.iter().map(String::as_str))
+    };
     for rel in &paths {
         let src = boot.join(rel);
         let dst = snapshot_dir.join(rel);
@@ -1651,11 +1792,11 @@ fn live_boot_mounts(esp: &str) -> Vec<&str> {
         .collect()
 }
 
-fn bind_boot_into_physical_root(esp: &str) -> Result<BootBinds> {
+fn bind_boot_into_physical_root(esp: &str, physical_root: &str) -> Result<BootBinds> {
     let live_mounts = live_boot_mounts(esp);
     let mut bound = Vec::new();
     for (live, rel) in boot_bind_plan(esp, &live_mounts) {
-        let target = Path::new(PHYSICAL_ROOT).join(&rel);
+        let target = Path::new(physical_root).join(&rel);
         if is_mountpoint(&target) {
             continue;
         }
@@ -2479,6 +2620,61 @@ mod tests {
                 "{dropped}"
             );
         }
+    }
+
+    #[test]
+    fn package_boot_snapshot_paths_matches_pmos_files() {
+        let listing = [
+            "vmlinuz",
+            "initramfs",
+            "sc8280xp-lenovo-thinkpad-x13s.dtb",
+            "dtbs/sc8280xp.dtb",
+            "loader/entries/pmos.conf",
+            "loader/loader.conf",
+            "random-junk.txt",
+        ];
+        assert_eq!(
+            package_boot_snapshot_paths(listing),
+            vec![
+                "dtbs/sc8280xp.dtb",
+                "initramfs",
+                "loader/entries/pmos.conf",
+                "loader/loader.conf",
+                "sc8280xp-lenovo-thinkpad-x13s.dtb",
+                "vmlinuz",
+            ]
+        );
+    }
+
+    #[test]
+    fn package_carry_over_kargs_with_pmos_arm64() {
+        let cmdline = "arm64.nopauth clk_ignore_unused pd_ignore_unused \
+                       pmos_root_uuid=550e8400-e29b-41d4-a716-446655440000 pmos_boot_uuid=1111-2222";
+        let kargs = package_carry_over_kargs(cmdline);
+        assert_eq!(
+            kargs,
+            vec![
+                "arm64.nopauth",
+                "clk_ignore_unused",
+                "pd_ignore_unused",
+                "rd.luks.name=550e8400-e29b-41d4-a716-446655440000=root",
+                "root=/dev/mapper/root",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_crypttab_root_uuid_formats() {
+        let content = "# comments\nroot UUID=550e8400-e29b-41d4-a716-446655440000 none luks\n";
+        assert_eq!(
+            parse_crypttab_root_uuid(content).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        let by_uuid = "root /dev/disk/by-uuid/1234-5678 none luks\n";
+        assert_eq!(
+            parse_crypttab_root_uuid(by_uuid).as_deref(),
+            Some("1234-5678")
+        );
     }
 
     /// Snapshot then restore over a "wiped" ESP that bootupd has partially
