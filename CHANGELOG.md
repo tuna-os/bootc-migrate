@@ -178,6 +178,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The E2E cells that migrate OSTree to composefs on a 40G disk use 60G.
+  Since #440 the free-space check counts the target image, and Bluefin →
+  Dakota needs about 33 GB free where a 40G disk has 32.7 GB. The
+  migration refused before it changed anything, so `main` went red.
+
 - A cross-family re-base keeps the flatpak apps the old OS preinstalled.
   `flatpak preinstall` records each app it installs in the `xa.preinstalled`
   key of `/var/lib/flatpak/repo/config`. On a later run it uninstalls every
