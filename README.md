@@ -332,10 +332,11 @@ Things to confirm in the report:
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
   target image onto the ESP.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
-- `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the composefs object
-  store is built by reflinking your existing OSTree objects.
+- `ComposeFS free space` includes the source OSTree import, two expanded
+  copies of the target image (ComposeFS and podman fallback storage), and 5 GiB
+  of temporary headroom for the initrd rebuild.
 
-Optionally, preview what Phase 4's `/etc` merge will see before running it:
+Optionally, preview what Phase 4's `/etc` merge will see before you run it:
 
 ```bash
 sudo bootc-migrate etc-drift
@@ -601,7 +602,7 @@ What's intentionally *not* carried forward:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Phase 0 refuses with "System is not booted into a bootc deployment" | Neither an ostree nor a composefs deployment is booted | Nothing to migrate from; check `bootc status` |
-| Phase 2 fails with ENOSPC mid-pull | `/sysroot/composefs` is tight on the 1.1× heuristic | Free space or grow the partition, then rerun |
+| Phase 0 refuses with insufficient free space | The root cannot hold the source import, ComposeFS target, podman fallback copy, and initrd rebuild headroom | Free space or grow the partition, then rerun |
 | Post-reboot `cat /proc/cmdline` shows `ostree=` not `composefs=` | Firmware ignored the new NVRAM entry, or OVMF loaded `Fedora\shim` instead | Use firmware boot menu to pick `Linux Boot Manager`; if that fails, fall back to OSTree and report the firmware quirk |
 | `bootc status` says "No manifest_digest in origin" | You're on an old build of this tool | Update to `main` — version info is on the first line of the migration log |
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |

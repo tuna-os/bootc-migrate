@@ -42,8 +42,10 @@ repo at `/sysroot/ostree/repo` into the composefs object store at
 `/sysroot/composefs/objects`. Reflink is ~instant and uses no extra disk space on
 btrfs, so this phase is cheap.
 
-`check_free_space` uses a **1.1× multiplier** when reflink is available (vs 1.5×
-without), since a reflink share means almost no additional blocks are consumed.
+The Phase 0 free-space estimate counts the source repo at **1.1×** when
+reflink is available (vs 1.5× without). It also counts space for two expanded
+copies of the target image (ComposeFS and podman fallback storage) and 5 GiB of
+temporary initrd-rebuild headroom.
 
 ### Phase 3 — EROFS seal
 
@@ -68,14 +70,19 @@ which requires initrd changes before the composefs boot can succeed.
 ### Phase 0 — preflight
 
 Same fs-type detection. `is_btrfs = false`, `fs_type = "xfs"`. Reflink is probed
-separately (XFS supports reflink on many configurations but not all).
+separately (XFS supports reflink on many configurations but not all). The
+free-space check fetches the target image's compressed layer size before any
+image pull or storage setup and includes both expanded target copies plus
+initrd-rebuild headroom in the required root space. This catches a tight XFS
+root before the sparse loopback and podman storage consume it.
 
 ### Pre-Phase 1 — ext4 loopback for fs-verity
 
-`setup_composefs_loopback_if_needed()` runs before Phase 1 when `fs_type == "xfs"`:
+`prepare_composefs_storage()` runs before Phase 1 when `fs_type == "xfs"`:
 
-1. Creates a sparse file at `/sysroot/composefs-loopback.ext4`.  
-   Size = `clamp(ceil(ostree_repo_GB × 1.5 + 5), 10, 30)` GB.
+1. Creates a sparse file at `/sysroot/composefs-loopback.ext4`.
+   Its nominal size is `ceil(ostree_repo_GB × 1.5 + 25)` GB, with a 30 GB
+   floor and a cap at 90% of the now-free space.
 2. Formats it as ext4 with `-O verity` (`mkfs.ext4 -F -O verity`).
 3. Loop-mounts it at `/sysroot/composefs` with `-o loop`.
 
@@ -89,10 +96,10 @@ detects this via `findmnt` and skips recreation.
 
 ### Phase 1 — OSTree object import
 
-On XFS without reflink, `check_free_space` uses a **1.5× multiplier** and performs
-full copies rather than reflink clones. This is slower and uses more space. If
-reflink is available on the XFS volume, the tool uses it (the probe is runtime, not
-hardcoded to XFS=no-reflink).
+On XFS without reflink, the source-repo part of the estimate uses a **1.5×
+multiplier**. Phase 1 makes full copies, not reflink clones. This is slower
+and uses more space. If reflink is available on the XFS volume, the tool uses
+it (the probe is runtime, not hardcoded to XFS=no-reflink).
 
 ### Phase 3 — EROFS seal
 
@@ -269,7 +276,7 @@ bootc-migrate \
 | fs-verity support         | native                     | ext4 loopback at /sysroot/composefs |
 | composefs store location  | /sysroot/composefs (btrfs) | /sysroot/composefs (ext4 loop)   |
 | Phase 1 object copy       | reflink (instant, ~0 extra space) | full copy or XFS reflink    |
-| Free-space multiplier     | 1.1×                       | 1.5× (without reflink)           |
+| Free-space estimate       | source repo 1.1× + target copies + 5 GiB | source repo 1.1×/1.5× + target copies + 5 GiB |
 | LVM root                  | uncommon                   | typical (Bluefin LTS default)    |
 | initrd rebuild needed     | no                         | yes — dracut --add "lvm dm"      |
 | dracut on source system   | not present                | present (CentOS Stream 10 base)  |

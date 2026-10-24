@@ -102,7 +102,7 @@ pub fn run_migration(
     // ---- Phase 0: preflight free-space check ----
     println!("=== Phase 0: Free-space check ===");
     if !dry_run {
-        host_storage::check_free_space(report.supports_reflink)?;
+        host_storage::check_free_space(report.supports_reflink, target_image)?;
     } else {
         println!("[DRY RUN] Would check free space on /sysroot/composefs.");
     }

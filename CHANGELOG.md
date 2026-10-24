@@ -187,6 +187,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   and image-swap routes, `commit`, `rollback` and `status` refused it or saw
   an OSTree boot. The OSTree fallback entries could also keep the argument.
 
+- Phase 0 now includes two expanded copies of the target image and 5 GiB of
+  initrd-rebuild headroom in its free-space estimate. XFS migrations that use
+  both the ext4 ComposeFS loopback and podman fallback storage now stop before
+  image pulls instead of filling the root during Phase 5 (#390).
+
 - The E2E SSH service now waits for all Fedora host-key generators before it
   starts `sshd -i`. The socket stays available while the system creates host
   keys. This avoids the earlier host-key race (#383).
@@ -228,12 +233,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
   deployment through systemd-boot ("Linux Boot Manager") and an
-  ESP-resident entry. The commit step still checked for a shim/GRUB
-  firmware entry, said the systemd-boot and loader entries no longer boot
-  anything, and suggested removing "Linux Boot Manager" with
-  `boot-entries --apply`, which would leave the host unbootable. When the
-  install report names an ESP-resident entry, the commit step now checks
-  for the systemd-boot entry and says to keep both.
+  ESP-resident entry. The commit step still checked for a shim/GRUB firmware
+  entry. It said that the systemd-boot and loader entries no longer booted
+  anything. It suggested `boot-entries --apply` to delete "Linux Boot
+  Manager". That action would leave the host unbootable.
+  When the install report names an ESP-resident entry, the commit step now
+  checks for the systemd-boot entry. It says to keep both.
 
 - The preflight reflink check no longer risks making the running system
   read-only. To probe reflink support it remounts `/sysroot` read-write and
