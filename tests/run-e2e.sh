@@ -2719,14 +2719,32 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    SWAP_FLAGS=""
+    if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+        # #256: a cross-family swap (for example Arch-based Marlin to
+        # Hummingbird-based Utah) must be refused until the operator opts in.
+        step "=== image-swap: asserting the cross-family gate refuses without opt-in ==="
+        if ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" \
+            > /tmp/rebase-refusal.log 2>&1; then
+            sed 's/^/[refusal] /' /tmp/rebase-refusal.log
+            echo "FAIL: a cross-family image swap ran without --accept-cross-base"; exit 1
+        fi
+        grep -q "Cross-family re-base detected" /tmp/rebase-refusal.log || {
+            sed 's/^/[refusal] /' /tmp/rebase-refusal.log
+            echo "FAIL: the refusal is not the cross-family gate"; exit 1; }
+        echo "OK: the cross-family gate refused the swap without opt-in."
+        SWAP_FLAGS="--accept-cross-base"
+    fi
+
     seed_ownership_fixture
     capture_health_baseline
-    step "=== image-swap: running bootc-rebase --target-backend composefs ==="
+    step "=== image-swap: running bootc-rebase --target-backend composefs ${SWAP_FLAGS} ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
     # long step of this mode, and a job that times out inside it must leave
     # the progress in the log.
     ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" 2>&1 \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs $SWAP_FLAGS" 2>&1 \
         | tee /tmp/rebase-out.log \
         | awk '{ print "[rebase] " $0; fflush() }'
     REBASE_RC=${PIPESTATUS[0]}

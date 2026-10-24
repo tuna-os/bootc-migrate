@@ -320,6 +320,19 @@
   # boot's journal to serial so the stalling unit shows in qemu.log.
   console_journal: true
   allow_failure: true
+- name: "tunaOS marlin gnome -> utah (cross-family composefs, ImageSwap)"
+  # A TunaOS Marlin user's move to Utah. Marlin is Arch-based
+  # (systemd-boot, composefs) and Utah is Fedora Hummingbird, so the swap
+  # must be refused until --accept-cross-base and then run through the
+  # host's own `bootc switch`. Non-gating: utah publishes only :testing.
+  base: ghcr.io/tuna-os/marlin:gnome
+  target: ghcr.io/projectbluefin/utah:testing
+  mode: image-swap
+  cross_family: true
+  disk_size: 60G
+  expect_os_id: hummingbird
+  expect_dm: gdm
+  allow_failure: true
 - name: Fedora Cloud -> fedora-bootc (package install)
   # #380: the source is an official Fedora Cloud qcow2, not a bootc image.
   # The helper grows its btrfs root/home layout and cloud-init provides the
