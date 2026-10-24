@@ -179,6 +179,8 @@ pub struct ProbeFiles {
     /// The target kernel's driver and firmware inventory, for the hardware
     /// compatibility check ([`crate::hardware`]).
     pub kernel: Option<crate::hardware::TargetKernel>,
+    /// Packages and system units extracted from the target's package database.
+    pub software: std::sync::Arc<crate::software_report::TargetInventory>,
 }
 
 /// What the target image supports, assembled from [`ProbeFiles`].
@@ -228,6 +230,11 @@ pub struct Capabilities {
     /// it is thousands of entries; [`crate::hardware`] reports on it.
     #[serde(skip)]
     pub kernel: Option<crate::hardware::TargetKernel>,
+    /// Target package inventory used by the package-host software report. It is
+    /// omitted from the capability JSON; `scan` emits the host comparison
+    /// instead of thousands of raw target package names.
+    #[serde(skip)]
+    pub software: std::sync::Arc<crate::software_report::TargetInventory>,
 }
 
 impl Capabilities {
@@ -427,6 +434,7 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
             .and_then(parse_bootc_install_filesystem),
         kernel_version: probe.kernel.as_ref().map(|k| k.kver.clone()),
         kernel: probe.kernel.clone(),
+        software: probe.software.clone(),
     }
 }
 

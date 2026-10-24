@@ -41,6 +41,14 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
 
+- ComposeFS migrations now run a post-seal integrity pass. The native
+  composefs-rs backend runs `fsck` on the store. Both backends read and verify
+  every object. The check reports fs-verity storage failures before reboot,
+  not later as EIO.
+- OSTree imports now use object IDs from the store's SHA-512 fs-verity digest.
+  They enable fs-verity before they pull the target image. The imported
+  objects then match the integrity check.
+
 - A versioned application replacement catalog shared with wootc maps Windows
   display names and rpm, deb, and pacman package names to Flatpak IDs and
   portability guidance. The typed core reader validates and bundles the table
@@ -80,6 +88,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   the btrfs subvolume layout, `/boot` and `/home`, free space against the
   target image's size, running package managers and SELinux. It prints a
   reason for each refusal, then the hardware report.
+- Package-host software report (#377): `bootc-rebase scan` and package-host
+  `--dry-run` compare rpm, dpkg or pacman package databases with target image.
+  They classify packages absent from image. They suggest Flatpak, Homebrew,
+  toolbox/distrobox or derived-image replacements. The report also records
+  third-party repositories, enabled services absent from image, and DKMS/akmods
+  packages. Non-dry commands write the report to JSON and Markdown files under
+  `/var/lib/bootc-rebase`.
 - `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
   database, no ostree or composefs state) as `Backend::Package` and executes
   the `package -> ostree` route through `PackageInstall`. The shared

@@ -25,6 +25,15 @@ Bluefin **LTS** (CentOS Stream 10-based) ships XFS by default.
 
 ---
 
+### Post-seal integrity verification
+
+The native composefs-rs backend runs structural `fsck` on the store after the
+composefs seal completes. Both backends then read and verify every object
+in `/sysroot/composefs/objects`. This read checks data, not only the stored
+fs-verity descriptor. It makes storage corruption fail during migration.
+A failure stops migration before it stages a boot entry. The check does not
+wait for first boot.
+
 ## btrfs path (Bluefin stable → Dakota stable)
 
 The happy path. No workarounds needed.
@@ -46,6 +55,10 @@ The Phase 0 free-space estimate counts the source repo at **1.1×** when
 reflink is available (vs 1.5× without). It also counts space for two expanded
 copies of the target image (ComposeFS and podman fallback storage) and 5 GiB of
 temporary initrd-rebuild headroom.
+
+Each imported object uses its SHA-512 fs-verity digest as its name. The import
+enables fs-verity before it pulls the target image. Native and legacy store
+writers then see the same verified object layout.
 
 ### Phase 3 — EROFS seal
 
