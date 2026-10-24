@@ -472,6 +472,7 @@ fn main() {
                 booted_image: None,
                 pending_transaction: preflight::PendingTransactionStatus::Clean,
                 is_uefi: true,
+                secure_boot: preflight::SecureBootFacts::default(),
                 nvram_writable: true,
                 esp_path: Some("/boot/efi".to_string()),
                 esp_free_space_bytes: 500 * 1024 * 1024,

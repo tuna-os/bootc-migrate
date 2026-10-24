@@ -620,6 +620,21 @@ impl InstallConfig<'_> {
             );
         }
 
+        if !self.skip_preflight {
+            let secure_boot =
+                preflight::secure_boot::read_from_efivars(Path::new("/sys/firmware/efi/efivars"));
+            let loaders = caps
+                .as_ref()
+                .map(|caps| caps.target_bootloaders.as_slice())
+                .unwrap_or(&[]);
+            preflight::secure_boot::enforce_target_bootloaders(
+                &secure_boot,
+                loaders,
+                preflight::secure_boot::TargetBootloaderKind::Shim,
+                self.force,
+            )?;
+        }
+
         // #256/#258: lineage gate. No /etc policy can be applied to what
         // `bootc install` writes — the merge below is ours, so the policy
         // applies there exactly as in Phase 4.

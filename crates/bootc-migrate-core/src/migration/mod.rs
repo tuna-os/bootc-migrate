@@ -73,6 +73,29 @@ pub fn run_migration(
     force: bool,
     etc_policy: EtcPolicy<'_>,
 ) -> Result<()> {
+    // Gate the target loader before Phase 0 can create composefs state or
+    // change the ESP. The registry scan is cached, so callers that already
+    // performed the capability pass do not download the image twice.
+    let use_systemd_boot = bootloader != "grub2"
+        && report.is_uefi
+        && report.nvram_writable
+        && report.esp_ready_for_systemd_boot;
+    if use_systemd_boot && report.secure_boot.enabled == Some(true) {
+        println!("=== Secure Boot target-loader preflight ===");
+        match crate::scan::scan_target_image(target_image) {
+            Ok(caps) => crate::preflight::secure_boot::enforce_target_bootloaders(
+                &report.secure_boot,
+                &caps.target_bootloaders,
+                crate::preflight::secure_boot::TargetBootloaderKind::SystemdBoot,
+                force,
+            )?,
+            Err(error) => eprintln!(
+                "[secure-boot] WARNING: could not inspect target image {target_image} before \
+                 installing its systemd-boot loader: {error:#}"
+            ),
+        }
+    }
+
     // Hold the mutation guards for the whole run; a dry run holds none.
     let _lifecycle = MigrationLifecycle::acquire(dry_run)?;
 

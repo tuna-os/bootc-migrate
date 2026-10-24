@@ -25,12 +25,23 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Secure Boot / UEFI CA preflight (#386): the preflight checks the target
+  `systemd-boot` and bootupd shim payloads. It compares their Authenticode
+  issuers with the firmware's `db` CA generations. It refuses known mismatches
+  before migration changes the ESP or boot order.
+
 - Package-based base-image E2E coverage (#380): `package-install` boots
   checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
   through cloud-init, creates package/home/desktop fixtures, runs the package
   → OSTree migration, and verifies the target plus the `Previous system`
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
+
+- A versioned application replacement catalog shared with wootc maps Windows
+  display names and rpm, deb, and pacman package names to Flatpak IDs and
+  portability guidance. The typed core reader validates and bundles the table
+  for the package-host software report, while the catalog workflow publishes
+  `apps.json` beside the image feed (#388).
 
 - TUI route selection on composefs hosts (#312). On an ostree host the
   wizard flow is unchanged (the conversion route); on a composefs host the
@@ -152,6 +163,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   initrd-rebuild headroom in its free-space estimate. XFS migrations that use
   both the ext4 ComposeFS loopback and podman fallback storage now stop before
   image pulls instead of filling the root during Phase 5 (#390).
+
+- The E2E SSH service now waits for all Fedora host-key generators before it
+  starts `sshd -i`. The socket stays available while the system creates host
+  keys. This avoids the earlier host-key race (#383).
 
 - Cross-base OstreeDeploy now remaps ownership in the stateroot's physical,
   shared `/var` instead of looking for a nonexistent `var` inside the staged
