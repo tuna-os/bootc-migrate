@@ -38,10 +38,10 @@
       "published": true
     },
     {
-      "name": "Utah",
-      "image": "",
+      "name": "Utah (pre-alpha)",
+      "image": "ghcr.io/projectbluefin/utah:testing",
       "backend": "composefs",
-      "published": false
+      "published": true
     },
     {
       "name": "Skipjack GNOME",

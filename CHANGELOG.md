@@ -25,6 +25,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- The TUI catalog lists Utah as "Utah (pre-alpha)" with
+  `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
+  composefs host, where its routes have E2E coverage.
+
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
   issuers with the firmware's `db` CA generations. It refuses known mismatches
@@ -173,6 +177,67 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
+
+- The E2E checks after an OSTree → composefs migration look for the staged
+  deployment in `/sysroot/state` first again. A lookup added for
+  `OstreeInstall` put `/sysroot/ostree` first. That is the source system in
+  these modes, so the TUI cell looked for the staged repair tool in the
+  old deployment and failed.
+
+- The E2E cells that migrate OSTree to composefs on a 40G disk use 60G.
+  Since #440 the free-space check counts the target image, and Bluefin →
+  Dakota needs about 33 GB free where a 40G disk has 32.7 GB. The
+  migration refused before it changed anything, so `main` went red.
+
+- A cross-family re-base keeps the flatpak apps the old OS preinstalled.
+  `flatpak preinstall` records each app it installs in the `xa.preinstalled`
+  key of `/var/lib/flatpak/repo/config`. On a later run it uninstalls every
+  recorded app that the OS's `preinstall.d` no longer lists. The record came
+  across with `/var`, so Utah's first-boot `flatpak-preinstall.service`
+  removed Firefox and Extension Manager from a migrated tunaOS Marlin host.
+  The re-base now removes the key from the carried `/var`, and the
+  cross-family report lists the apps it kept.
+
+- The `OstreeInstall` SELinux step also labels the physical root's `/boot`
+  with the target's policy when `/boot` is on the root filesystem.
+  `bootc install` writes GRUB and `bootupd-state.json` there. A host that
+  ran without SELinux (tunaOS Marlin) left them unlabeled, and Utah denied
+  `systemd-logind` access to `/boot/efi`. A failure on `/boot` is a
+  warning, not an error.
+
+- `bootc-rebase commit` no longer refuses when only flatpak metadata
+  caches are missing from the live `/var`: `lib/flatpak/appstream` and
+  ostree's scratch directory `lib/flatpak/repo/tmp`. A metadata refresh on
+  either system replaces the appstream checkout, so the check refused every
+  Marlin → Utah commit. Installed apps and runtimes stay checked.
+
+- `OstreeInstall` no longer tries the host's `efibootmgr` when the host has
+  none. It goes straight to the target image's `efibootmgr`, without the
+  "failed to invoke efibootmgr" warning.
+
+- A cross-family `OstreeInstall` writes its cross-family report to the new
+  stateroot's `/var/lib/bootc-rebase`. It used to write the report to the
+  OSTree deployment root. That directory is immutable after `bootc install`,
+  so the route failed with `Operation not permitted` at the end, after all
+  the work was done.
+
+- The composefs → OSTree route (`OstreeInstall`) no longer needs
+  `efibootmgr` on the host. When the host has none, it runs the target
+  image's `efibootmgr` through podman. TunaOS Marlin ships no `efibootmgr`,
+  so the route used to refuse there before it changed anything.
+
+- `bootc-rebase scan` and the other registry readers decode zstd layers
+  themselves. They used to pass them to `tar -a`, which needs an external
+  `zstd` program. On a host without one, every zstd layer read as empty, and
+  `scan` reported bootc images such as Marlin and Utah as "not an
+  ostree/bootc image".
+
+- Every check for a composefs boot accepts both forms of the kernel
+  argument: `composefs=<hex>` and `composefs.digest=v1-sha512-12:<hex>`,
+  which newer bootc writes. Current Dakota images boot with the new form.
+  Before, preflight found no backend on such a host. The composefs → OSTree
+  and image-swap routes, `commit`, `rollback` and `status` refused it or saw
+  an OSTree boot. The OSTree fallback entries could also keep the argument.
 
 - Phase 0 now includes two expanded copies of the target image and 5 GiB of
   initrd-rebuild headroom in its free-space estimate. XFS migrations that use

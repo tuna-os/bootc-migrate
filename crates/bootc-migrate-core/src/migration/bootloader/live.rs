@@ -386,7 +386,7 @@ fn build_entry(
 ) -> BlsEntry {
     let (linux, initrd) = esp_kernel_paths(entry_token, version);
     let strip = if strip_composefs {
-        &["composefs="][..]
+        crate::composefs_karg::PREFIXES
     } else {
         &[]
     };

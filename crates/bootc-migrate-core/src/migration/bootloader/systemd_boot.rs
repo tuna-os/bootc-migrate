@@ -59,7 +59,7 @@ pub fn build_migrate_bootloader_entry(
     sort_key: &str,
 ) -> BlsEntry {
     let (linux, initrd) = esp_kernel_paths(entry_token, version);
-    let options = carry_over_kargs(cmdline, &["composefs="]);
+    let options = carry_over_kargs(cmdline, crate::composefs_karg::PREFIXES);
     BlsEntry {
         title: title.to_string(),
         version: version.to_string(),

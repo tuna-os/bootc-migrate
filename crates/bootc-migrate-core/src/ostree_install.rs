@@ -569,11 +569,13 @@ impl InstallConfig<'_> {
         println!("Checking system state...");
 
         let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-        if self.source == InstallSource::Composefs && !cmdline.contains("composefs=") && !self.force
+        if self.source == InstallSource::Composefs
+            && !crate::composefs_karg::present(&cmdline)
+            && !self.force
         {
             bail!(
                 "System is not booted from a composefs deployment (/proc/cmdline has no \
-                 composefs= parameter); this route converts a composefs host back to the \
+                 composefs= or composefs.digest= parameter); this route converts a composefs host back to the \
                  OSTree backend. Use --force to override."
             );
         }
@@ -583,13 +585,17 @@ impl InstallConfig<'_> {
                 self.source.route_name()
             );
         }
-        for tool in ["podman", "efibootmgr"] {
-            if which(tool).is_none() {
-                bail!(
-                    "`{tool}` is required for the {} route and was not found",
-                    self.source.route_name()
-                );
-            }
+        if which("podman").is_none() {
+            bail!(
+                "`podman` is required for the {} route and was not found",
+                self.source.route_name()
+            );
+        }
+        if which("efibootmgr").is_none() {
+            println!(
+                "Note: this host has no `efibootmgr`; the NVRAM steps run the target \
+                 image's own `efibootmgr` through podman."
+            );
         }
         refuse_existing_deploy(self.source, self.force)?;
 
@@ -928,7 +934,10 @@ impl InstallConfig<'_> {
             let source_group = fs::read_to_string("/etc/group").unwrap_or_default();
             cross_family::apply_post_merge(&cross_family::PostMergeInputs {
                 etc_outcome: outcome,
-                deploy_dir: &deploy_root,
+                // The deployment root is immutable once `bootc install`
+                // returns (EPERM, found by the Marlin -> Utah E2E run), so
+                // the report goes beside this route's own carried report.
+                report_dir: &Path::new(self.source.stateroot_var()).join("lib/bootc-rebase"),
                 etc_dir: &deploy_root.join("etc"),
                 staged_var: if var_copied {
                     cross_family::StagedVar::Copied(Path::new(self.source.stateroot_var()))
@@ -976,7 +985,7 @@ impl InstallConfig<'_> {
             step(
                 7,
                 TOTAL_STEPS,
-                "SELinux: labelling the merged /etc and the carried /var"
+                "SELinux: labelling the merged /etc, the carried /var and /boot"
             )
         );
         match relabel_with_target_policy(
@@ -1046,7 +1055,7 @@ impl InstallConfig<'_> {
             // Everything is staged by now; a failed NVRAM write must not
             // abort the run before the report, so it is best-effort like
             // the entry registration above.
-            systemd_boot_entry = match put_systemd_boot_first() {
+            systemd_boot_entry = match put_systemd_boot_first(self.target_image) {
                 Ok(id) => id,
                 Err(e) => {
                     eprintln!(
@@ -1069,7 +1078,7 @@ impl InstallConfig<'_> {
                     esp_resident::manual_workaround()
                 );
             }
-            put_grub_first()?
+            put_grub_first(self.target_image)?
         };
 
         let rendered = if self.source == InstallSource::Package {
@@ -1170,9 +1179,50 @@ impl InstallConfig<'_> {
     }
 }
 
+/// The argv prefix that runs the target image's `efibootmgr` with the
+/// host's `/dev` and `/sys`, the way bootupd ran from the same container.
+fn target_efibootmgr_prefix(target_image: &str) -> Vec<String> {
+    [
+        "podman",
+        "run",
+        "--rm",
+        "--privileged",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        "/dev:/dev",
+        "-v",
+        "/sys:/sys",
+        target_image,
+        "efibootmgr",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// The argv prefix for `efibootmgr`: the host's when it ships one, else the
+/// target image's. Some composefs hosts ship none (TunaOS Marlin), and on an
+/// image-based host the operator cannot just install it, so this route
+/// would otherwise refuse before it starts. Pure so it is table-tested.
+fn efibootmgr_prefix(target_image: &str, host_has_efibootmgr: bool) -> Vec<String> {
+    if host_has_efibootmgr {
+        vec!["efibootmgr".to_string()]
+    } else {
+        target_efibootmgr_prefix(target_image)
+    }
+}
+
+/// An `efibootmgr` command, from the host or the target image.
+fn efibootmgr(target_image: &str) -> Command {
+    let argv = efibootmgr_prefix(target_image, which("efibootmgr").is_some());
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd
+}
+
 /// Whether `efibootmgr -v` lists a "Linux Boot Manager" entry.
-fn systemd_boot_entry_present() -> bool {
-    Command::new("efibootmgr")
+fn systemd_boot_entry_present(target_image: &str) -> bool {
+    efibootmgr(target_image)
         .arg("-v")
         .output()
         .map(|o| {
@@ -1187,19 +1237,8 @@ fn systemd_boot_entry_present() -> bool {
 /// target image's efibootmgr, the way bootupd registered its own entry
 /// moments earlier from the same container. Pure so it is table-tested.
 pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec<String> {
-    vec![
-        "podman".into(),
-        "run".into(),
-        "--rm".into(),
-        "--privileged".into(),
-        "--security-opt".into(),
-        "label=disable".into(),
-        "-v".into(),
-        "/dev:/dev".into(),
-        "-v".into(),
-        "/sys:/sys".into(),
-        target_image.into(),
-        "efibootmgr".into(),
+    let mut argv = target_efibootmgr_prefix(target_image);
+    argv.extend([
         "--create".into(),
         "--disk".into(),
         disk.into(),
@@ -1209,17 +1248,21 @@ pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec
         "\\EFI\\systemd\\systemd-bootx64.efi".into(),
         "--label".into(),
         "Linux Boot Manager".into(),
-    ]
+    ]);
+    argv
 }
 
 /// Make sure a firmware entry reaches the restored systemd-boot loader.
 /// The host's own efibootmgr is tried first (Phase 5's helper); on the
 /// eighth E2E run Dakota's failed with exit 5 while bootupd's, run from
 /// the target container with /dev and /sys, had just succeeded, so that
-/// is the fallback. Returns whether the entry exists afterwards.
+/// is the fallback, and the only way on a host with no efibootmgr at all
+/// (tunaOS Marlin). Returns whether the entry exists afterwards.
 fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
-    crate::migration::boot::register_systemd_boot_nvram(esp);
-    if systemd_boot_entry_present() {
+    if which("efibootmgr").is_some() {
+        crate::migration::boot::register_systemd_boot_nvram(esp);
+    }
+    if systemd_boot_entry_present(target_image) {
         return true;
     }
     let Some((disk, part)) = crate::migration::boot::get_esp_disk_and_part(esp) else {
@@ -1235,7 +1278,7 @@ fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
         ),
         Err(e) => eprintln!("Warning: could not run efibootmgr in the target image: {e}"),
     }
-    let present = systemd_boot_entry_present();
+    let present = systemd_boot_entry_present(target_image);
     if present {
         println!("[nvram] registered \"Linux Boot Manager\" through the target image's efibootmgr");
     }
@@ -1263,6 +1306,15 @@ fn deployment_enables_selinux(deploy_root: &Path) -> bool {
     }
 }
 
+/// Where `p`, a path under `physical_root`, appears in the relabel
+/// container.
+fn container_path(physical_root: &str, p: &Path) -> String {
+    match p.strip_prefix(physical_root).unwrap_or(p) {
+        rel if rel.as_os_str().is_empty() => CONTAINER_TARGET.to_string(),
+        rel => Path::new(CONTAINER_TARGET).join(rel).display().to_string(),
+    }
+}
+
 /// The `podman run` argv that labels `paths` with the target image's own
 /// `setfiles` and policy, each matched against its `alt_root`.
 fn relabel_command_for_root(
@@ -1270,10 +1322,7 @@ fn relabel_command_for_root(
     physical_root: &str,
     jobs: &[(&Path, &Path)],
 ) -> Vec<Vec<String>> {
-    let to_container = |p: &Path| -> String {
-        let rel = p.strip_prefix(physical_root).unwrap_or(p);
-        Path::new(CONTAINER_TARGET).join(rel).display().to_string()
-    };
+    let to_container = |p: &Path| container_path(physical_root, p);
     jobs.iter()
         .map(|(alt_root, path)| {
             vec![
@@ -1297,14 +1346,65 @@ fn relabel_command_for_root(
         .collect()
 }
 
+/// Whether `boot` is a directory on the same filesystem as `physical_root`.
+///
+/// `bootc install` writes the target's `/boot` (GRUB, `bootupd-state.json`,
+/// the OSTree kernels) there when the host has no separate boot
+/// partition. A host that ran without SELinux (tunaOS Marlin is Arch) has
+/// no labels on that filesystem, so the target booted with `/boot/efi`
+/// `unlabeled_t` and `systemd-logind` was denied on it. A separate boot
+/// partition carries labels of its own and is left alone.
+fn boot_shares_the_root_filesystem(physical_root: &Path, boot: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (
+        fs::symlink_metadata(physical_root),
+        fs::symlink_metadata(boot),
+    ) {
+        (Ok(root), Ok(boot)) => boot.is_dir() && boot.dev() == root.dev(),
+        _ => false,
+    }
+}
+
+/// The mount points strictly below `dir`, from `/proc/self/mountinfo`.
+fn mounts_below(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(|p| PathBuf::from(crate::package_data::decode_mountinfo_path(p)))
+        .filter(|p| p != dir && p.starts_with(dir))
+        .collect()
+}
+
+/// The relabel argv for the physical root's `/boot`, matched against the
+/// physical root so it gets the policy's `/boot` labels. Each mount point
+/// in `mounts` (an ESP mounted below `/boot`) is excluded with `-e`:
+/// `setfiles` has no option that keeps it on one filesystem.
+fn boot_relabel_command(
+    target_image: &str,
+    physical_root: &str,
+    boot: &Path,
+    mounts: &[PathBuf],
+) -> Vec<String> {
+    let root = Path::new(physical_root);
+    let mut argv = relabel_command_for_root(target_image, physical_root, &[(root, boot)])
+        .pop()
+        .expect("one job gives one command");
+    let at = argv.iter().position(|a| a == "-F").expect("setfiles -F") + 1;
+    let excludes = mounts
+        .iter()
+        .flat_map(|m| ["-e".to_string(), container_path(physical_root, m)]);
+    argv.splice(at..at, excludes);
+    argv
+}
+
 /// Composefs-source relabel command, retained as the public planning helper.
 pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<String>> {
     relabel_command_for_root(target_image, PHYSICAL_ROOT, jobs)
 }
 
-/// Label the merged `/etc` and, when it was copied, the stateroot `/var`
-/// with the target's policy. `Ok(None)` when the target does not enable
-/// SELinux.
+/// Label the merged `/etc`, the stateroot `/var` when it was copied, and
+/// the physical root's `/boot` when it is on the root filesystem, with the
+/// target's policy. `Ok(None)` when the target does not enable SELinux.
 fn relabel_with_target_policy(
     target_image: &str,
     deploy_root: &Path,
@@ -1329,8 +1429,7 @@ fn relabel_with_target_policy(
     if var_copied {
         jobs.push((stateroot.as_path(), var));
     }
-    let mut done = 0;
-    for mut argv in relabel_command_for_root(target_image, physical_root, &jobs) {
+    let with_policy = |mut argv: Vec<String>| {
         if let Some(fc) = argv
             .iter_mut()
             .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
@@ -1338,11 +1437,39 @@ fn relabel_with_target_policy(
             *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
         }
         println!("[selinux] {}", argv.join(" "));
+        argv
+    };
+    let mut done = 0;
+    for argv in relabel_command_for_root(target_image, physical_root, &jobs) {
+        let argv = with_policy(argv);
         run_checked(
             Command::new(&argv[0]).args(&argv[1..]),
             "setfiles in the target image",
         )?;
         done += 1;
+    }
+    // Best-effort: bootc labelled what it needs to boot, and an error here
+    // must not undo a migration whose /etc and /var are labelled.
+    let boot = Path::new(physical_root).join("boot");
+    if boot_shares_the_root_filesystem(Path::new(physical_root), &boot) {
+        let mounts = fs::read_to_string("/proc/self/mountinfo")
+            .map(|m| mounts_below(&m, &boot))
+            .unwrap_or_default();
+        let argv = with_policy(boot_relabel_command(
+            target_image,
+            physical_root,
+            &boot,
+            &mounts,
+        ));
+        match run_checked(
+            Command::new(&argv[0]).args(&argv[1..]),
+            "setfiles on /boot in the target image",
+        ) {
+            Ok(()) => done += 1,
+            Err(e) => eprintln!(
+                "Warning: labelling /boot failed ({e:#}); the target boots, but may deny access to unlabeled files there."
+            ),
+        }
     }
     Ok(Some(done))
 }
@@ -1563,13 +1690,12 @@ struct SourceEtc {
 }
 
 /// The fs-verity digest of the booted composefs image, from the kernel
-/// command line's `composefs=` argument. Pure so it is table-tested.
+/// command line's composefs argument in either form
+/// ([`crate::composefs_karg`]). Pure so it is table-tested.
 pub fn booted_composefs_verity(cmdline: &str) -> Option<String> {
-    cmdline
-        .split_whitespace()
-        .find_map(|t| t.strip_prefix("composefs="))
-        .map(|v| v.trim_start_matches("sha512:").to_string())
-        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_hexdigit()))
+    crate::composefs_karg::digest(cmdline)
+        .filter(|v| v.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
 }
 
 /// Mount the booted composefs image read-only from the host's own store
@@ -1920,8 +2046,8 @@ fn seed_var_from_target(target_image: &str, stateroot_var: &str) {
 /// it. Returns the entry id, or `None` with a warning when no such entry
 /// exists — the firmware's removable-media fallback (`EFI/BOOT/BOOTX64.EFI`,
 /// which bootupd also writes) then boots GRUB.
-fn put_grub_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
+fn put_grub_first(target_image: &str) -> Result<Option<String>> {
+    let out = efibootmgr(target_image)
         .arg("-v")
         .output()
         .context("running efibootmgr")?;
@@ -1942,7 +2068,7 @@ fn put_grub_first() -> Result<Option<String>> {
     let order = rollback::parse_boot_order(&txt).unwrap_or_default();
     let new_order = rollback::build_new_boot_order(&order, &id);
     run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        efibootmgr(target_image).args(["--bootorder", &new_order]),
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (GRUB entry Boot{id} first)");
@@ -1953,8 +2079,8 @@ fn put_grub_first() -> Result<Option<String>> {
 /// `BootOrder`, for the layout where GRUB cannot boot the deployment
 /// (#305). Returns the entry id, or `None` with a warning when there is
 /// no such entry.
-fn put_systemd_boot_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
+fn put_systemd_boot_first(target_image: &str) -> Result<Option<String>> {
+    let out = efibootmgr(target_image)
         .arg("-v")
         .output()
         .context("running efibootmgr")?;
@@ -1972,7 +2098,7 @@ fn put_systemd_boot_first() -> Result<Option<String>> {
     let order = rollback::parse_boot_order(&txt).unwrap_or_default();
     let new_order = rollback::build_new_boot_order(&order, &id);
     run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        efibootmgr(target_image).args(["--bootorder", &new_order]),
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (systemd-boot entry Boot{id} first)");
@@ -1982,6 +2108,19 @@ fn put_systemd_boot_first() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn efibootmgr_falls_back_to_the_target_image_when_the_host_has_none() {
+        assert_eq!(efibootmgr_prefix("img", true), ["efibootmgr"]);
+        let argv = efibootmgr_prefix("ghcr.io/projectbluefin/utah:testing", false);
+        assert_eq!(argv[..4], ["podman", "run", "--rm", "--privileged"]);
+        assert!(
+            argv.join(" ").contains(
+                "-v /dev:/dev -v /sys:/sys ghcr.io/projectbluefin/utah:testing efibootmgr"
+            )
+        );
+        assert_eq!(argv.last().map(String::as_str), Some("efibootmgr"));
+    }
 
     #[test]
     fn seed_var_command_never_overwrites_carried_data() {
@@ -2142,6 +2281,57 @@ mod tests {
     }
 
     #[test]
+    fn boot_relabel_stays_on_the_root_filesystem() {
+        let boot = Path::new(PHYSICAL_ROOT).join("boot");
+        let argv =
+            boot_relabel_command("quay.io/fedora/fedora-bootc:44", PHYSICAL_ROOT, &boot, &[])
+                .join(" ");
+        assert!(
+            argv.ends_with("setfiles -F -r /target /etc/selinux/targeted/contexts/files/file_contexts /target/boot"),
+            "{argv}"
+        );
+        let mountinfo = "\
+            22 1 0:30 / / rw - btrfs /dev/vda3 rw\n\
+            40 22 0:30 /boot /sysroot/boot rw - btrfs /dev/vda3 rw\n\
+            41 40 8:2 / /sysroot/boot/efi rw - vfat /dev/vda2 rw\n\
+            42 40 8:4 / /sysroot/boot/my\\040esp rw - vfat /dev/vda4 rw\n\
+            43 22 8:2 / /sysroot/bootx rw - vfat /dev/vda2 rw\n";
+        let mounts = mounts_below(mountinfo, &boot);
+        assert_eq!(
+            mounts,
+            [boot.join("efi"), boot.join("my esp")],
+            "{mounts:?}"
+        );
+        let argv = boot_relabel_command(
+            "quay.io/fedora/fedora-bootc:44",
+            PHYSICAL_ROOT,
+            &boot,
+            &mounts,
+        );
+        let at = argv.iter().position(|a| a == "setfiles").unwrap();
+        assert_eq!(
+            argv[at..at + 6],
+            [
+                "setfiles",
+                "-F",
+                "-e",
+                "/target/boot/efi",
+                "-e",
+                "/target/boot/my esp"
+            ]
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let boot = root.path().join("boot");
+        assert!(!boot_shares_the_root_filesystem(root.path(), &boot));
+        fs::create_dir(&boot).unwrap();
+        assert!(boot_shares_the_root_filesystem(root.path(), &boot));
+        let link = root.path().join("boot-link");
+        std::os::unix::fs::symlink(&boot, &link).unwrap();
+        assert!(!boot_shares_the_root_filesystem(root.path(), &link));
+    }
+
+    #[test]
     fn booted_composefs_verity_table() {
         assert_eq!(
             booted_composefs_verity("initrd=x rw composefs=abc123 console=ttyS0"),
@@ -2149,6 +2339,10 @@ mod tests {
         );
         assert_eq!(
             booted_composefs_verity("composefs=sha512:0f1e"),
+            Some("0f1e".to_string())
+        );
+        assert_eq!(
+            booted_composefs_verity("rw composefs.digest=v1-sha512-12:0f1e lockdown=integrity"),
             Some("0f1e".to_string())
         );
         assert_eq!(
