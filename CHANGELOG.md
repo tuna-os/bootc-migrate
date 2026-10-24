@@ -25,12 +25,23 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Secure Boot / UEFI CA preflight (#386): the preflight checks the target
+  `systemd-boot` and bootupd shim payloads. It compares their Authenticode
+  issuers with the firmware's `db` CA generations. It refuses known mismatches
+  before migration changes the ESP or boot order.
+
 - Package-based base-image E2E coverage (#380): `package-install` boots
   checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
   through cloud-init, creates package/home/desktop fixtures, runs the package
   → OSTree migration, and verifies the target plus the `Previous system`
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
+
+- A versioned application replacement catalog shared with wootc maps Windows
+  display names and rpm, deb, and pacman package names to Flatpak IDs and
+  portability guidance. The typed core reader validates and bundles the table
+  for the package-host software report, while the catalog workflow publishes
+  `apps.json` beside the image feed (#388).
 
 - TUI route selection on composefs hosts (#312). On an ostree host the
   wizard flow is unchanged (the conversion route); on a composefs host the

@@ -1451,6 +1451,7 @@ mod tests {
             systemd_boot_payload: false,
             bootc_present: true,
             bootupd_present: true,
+            target_bootloaders: vec![],
             desktops: vec![],
             base,
             sysusers: vec![],

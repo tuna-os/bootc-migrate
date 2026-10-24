@@ -312,6 +312,7 @@ mod tests {
             kernel_version: None,
             kernel: None,
             software: Default::default(),
+            target_bootloaders: Vec::new(),
         }
     }
 
