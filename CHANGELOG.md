@@ -178,6 +178,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The E2E checks after an OSTree → composefs migration look for the staged
+  deployment in `/sysroot/state` first again. A lookup added for
+  `OstreeInstall` put `/sysroot/ostree` first. That is the source system in
+  these modes, so the TUI cell looked for the staged repair tool in the
+  old deployment and failed.
+
 - The E2E cells that migrate OSTree to composefs on a 40G disk use 60G.
   Since #440 the free-space check counts the target image, and Bluefin →
   Dakota needs about 33 GB free where a 40G disk has 32.7 GB. The

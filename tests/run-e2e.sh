@@ -3326,17 +3326,20 @@ if [ "$E2E_CROSS_FAMILY" = "1" ]; then
 
     ssh $SSH_OPTS root@localhost bash <<'CROSSCHECK'
 set -e
-DEPLOY=$(find /sysroot/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 \
-    -type d -name '*.0' -print -quit 2>/dev/null || true)
-if [ -z "$DEPLOY" ]; then
-    DEPLOY=$(echo /sysroot/state/deploy/*)
+# The modes that reach this point stage composefs: /sysroot/state is the
+# target, and /sysroot/ostree is the source the host still runs. Look in
+# /sysroot/ostree only when no composefs deployment was staged.
+DEPLOY=$(echo /sysroot/state/deploy/*)
+if [ ! -d "$DEPLOY" ]; then
+    DEPLOY=$(find /sysroot/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 \
+        -type d -name '*.0' -print -quit 2>/dev/null || true)
 fi
 [ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment found"; exit 1; }
 ETC="$DEPLOY/etc"
 echo "--- staged deployment: $DEPLOY ---"
-REPORT=/sysroot/ostree/deploy/default/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+REPORT="$DEPLOY/bootc-migrate-cross-family-report.json"
 if [ ! -f "$REPORT" ]; then
-    REPORT="$DEPLOY/bootc-migrate-cross-family-report.json"
+    REPORT=/sysroot/ostree/deploy/default/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
 fi
 test -f "$REPORT" || { echo "FAIL: cross-family report JSON missing"; exit 1; }
 head -c 2000 "$REPORT"; echo
@@ -3387,10 +3390,12 @@ fi
 step "=== Re-injecting e2e-sshd into the staged deployment ==="
 ssh $SSH_OPTS root@localhost bash <<'CFS_POSTMERGEFIX'
 set -e
-DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
-    -type d -name etc -print -quit 2>/dev/null || true)
-if [ -z "$DEPLOY_ETC" ]; then
-    DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+# /sysroot/state is the staged target in the modes that get here; the
+# OSTree deployment is the source (see the cross-family check above).
+DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+if [ ! -d "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+        -type d -name etc -print -quit 2>/dev/null || true)
 fi
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found"; exit 1; }
 
@@ -3454,13 +3459,15 @@ step "=== first-boot repair: sabotaging the canary tree (#309) ==="
 ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
 set -e
 CANARY_REL=home/realuser/repair-canary
-for V in /sysroot/ostree/deploy/default/var /sysroot/state/os/default/var /var; do
+for V in /sysroot/state/os/default/var /sysroot/ostree/deploy/default/var /var; do
     [ -d "$V/$CANARY_REL" ] && break
 done
-DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
-    -type d -name etc -print -quit 2>/dev/null || true)
-if [ -z "$DEPLOY_ETC" ]; then
-    DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+# /sysroot/state is the staged target in the modes that get here; the
+# OSTree deployment is the source (see the cross-family check above).
+DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+if [ ! -d "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+        -type d -name etc -print -quit 2>/dev/null || true)
 fi
 test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
 test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
