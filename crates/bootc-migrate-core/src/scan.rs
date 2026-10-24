@@ -12,6 +12,7 @@
 //! `--target-backend` and refuse impossible routes with evidence instead of
 //! mid-phase failures.
 
+use crate::preflight::secure_boot::TargetBootloader;
 use serde::Serialize;
 use std::path::Path;
 
@@ -158,6 +159,8 @@ pub struct ProbeFiles {
     pub session_files: Vec<String>,
     /// `/usr/lib/systemd/boot/efi/systemd-bootx64.efi` present.
     pub has_systemd_boot_payload: bool,
+    /// EFI loaders found under the target's systemd-boot and bootupd payloads.
+    pub target_bootloaders: Vec<TargetBootloader>,
     /// `/usr/bin/bootc` (or `/usr/lib/bootc/`) present.
     pub has_bootc: bool,
     /// `/usr/bin/bootupctl` present together with `/usr/lib/bootupd/updates`:
@@ -188,6 +191,8 @@ pub struct Capabilities {
     /// Ships the systemd-boot EFI payload (bootloader migration possible
     /// even when the *source* OS lacks the binaries — the phase-5 property).
     pub systemd_boot_payload: bool,
+    /// Target EFI loaders and their best-effort Authenticode CA inspection.
+    pub target_bootloaders: Vec<TargetBootloader>,
     /// Ships bootc (required for switch-based strategies).
     pub bootc_present: bool,
     /// Ships bootupd (required by `bootc install` on the ostree backend,
@@ -390,6 +395,7 @@ pub fn assemble(probe: &ProbeFiles) -> Capabilities {
             .is_some_and(ComposefsMode::is_enabled),
         ostree_capable: probe.prepare_root.is_some(),
         systemd_boot_payload: probe.has_systemd_boot_payload,
+        target_bootloaders: probe.target_bootloaders.clone(),
         bootc_present: probe.has_bootc,
         bootupd_present: probe.has_bootupd,
         desktops: desktops_from_sessions(&probe.session_files),
