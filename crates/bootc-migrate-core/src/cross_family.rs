@@ -694,6 +694,10 @@ pub struct CrossFamilyReport {
     pub var_remap_deferred: bool,
     pub relabel_scheduled: bool,
     pub firstboot_unit_installed: bool,
+    /// Flatpak refs the old OS preinstalled, dropped from flatpak's
+    /// preinstall record so the target's `flatpak preinstall` keeps them
+    /// (see [`crate::flatpak_preinstall`]).
+    pub flatpak_preinstalls_kept: Vec<String>,
 }
 
 /// The report's file name inside [`PostMergeInputs::report_dir`].
@@ -757,6 +761,25 @@ pub fn apply_post_merge(inputs: &PostMergeInputs<'_>) -> Result<CrossFamilyRepor
         );
     }
 
+    let flatpak_var = match inputs.staged_var {
+        StagedVar::Copied(var) => Some(var),
+        StagedVar::InPlace => Some(Path::new("/var")),
+        StagedVar::PreviouslyStaged => None,
+    };
+    let flatpak_preinstalls_kept = match flatpak_var {
+        Some(var) => crate::flatpak_preinstall::forget_preinstalled(var)
+            .context("failed to clear flatpak's preinstall record")?,
+        None => Vec::new(),
+    };
+    if !flatpak_preinstalls_kept.is_empty() {
+        println!(
+            "[phase4] flatpak: {} app(s) the old OS preinstalled stay installed (the target's \
+             `flatpak preinstall` would remove them): {}",
+            flatpak_preinstalls_kept.len(),
+            flatpak_preinstalls_kept.join(", ")
+        );
+    }
+
     let relabel_scheduled = relabel_needed(
         inputs.host_selinux.as_ref(),
         outcome.target_selinux.as_ref(),
@@ -789,6 +812,7 @@ pub fn apply_post_merge(inputs: &PostMergeInputs<'_>) -> Result<CrossFamilyRepor
         var_remap_deferred,
         relabel_scheduled,
         firstboot_unit_installed,
+        flatpak_preinstalls_kept,
     };
     fs::create_dir_all(inputs.report_dir)
         .with_context(|| format!("failed to create {}", inputs.report_dir.display()))?;

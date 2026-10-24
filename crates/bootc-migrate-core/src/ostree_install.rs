@@ -985,7 +985,7 @@ impl InstallConfig<'_> {
             step(
                 7,
                 TOTAL_STEPS,
-                "SELinux: labelling the merged /etc and the carried /var"
+                "SELinux: labelling the merged /etc, the carried /var and /boot"
             )
         );
         match relabel_with_target_policy(
@@ -1256,9 +1256,12 @@ pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec
 /// The host's own efibootmgr is tried first (Phase 5's helper); on the
 /// eighth E2E run Dakota's failed with exit 5 while bootupd's, run from
 /// the target container with /dev and /sys, had just succeeded, so that
-/// is the fallback. Returns whether the entry exists afterwards.
+/// is the fallback, and the only way on a host with no efibootmgr at all
+/// (tunaOS Marlin). Returns whether the entry exists afterwards.
 fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
-    crate::migration::boot::register_systemd_boot_nvram(esp);
+    if which("efibootmgr").is_some() {
+        crate::migration::boot::register_systemd_boot_nvram(esp);
+    }
     if systemd_boot_entry_present(target_image) {
         return true;
     }
@@ -1311,8 +1314,10 @@ fn relabel_command_for_root(
     jobs: &[(&Path, &Path)],
 ) -> Vec<Vec<String>> {
     let to_container = |p: &Path| -> String {
-        let rel = p.strip_prefix(physical_root).unwrap_or(p);
-        Path::new(CONTAINER_TARGET).join(rel).display().to_string()
+        match p.strip_prefix(physical_root).unwrap_or(p) {
+            rel if rel.as_os_str().is_empty() => CONTAINER_TARGET.to_string(),
+            rel => Path::new(CONTAINER_TARGET).join(rel).display().to_string(),
+        }
     };
     jobs.iter()
         .map(|(alt_root, path)| {
@@ -1337,14 +1342,46 @@ fn relabel_command_for_root(
         .collect()
 }
 
+/// Whether `boot` is a directory on the same filesystem as `physical_root`.
+///
+/// `bootc install` writes the target's `/boot` (GRUB, `bootupd-state.json`,
+/// the OSTree kernels) there when the host has no separate boot
+/// partition. A host that ran without SELinux (tunaOS Marlin is Arch) has
+/// no labels on that filesystem, so the target booted with `/boot/efi`
+/// `unlabeled_t` and `systemd-logind` was denied on it. A separate boot
+/// partition carries labels of its own and is left alone.
+fn boot_shares_the_root_filesystem(physical_root: &Path, boot: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (
+        fs::symlink_metadata(physical_root),
+        fs::symlink_metadata(boot),
+    ) {
+        (Ok(root), Ok(boot)) => boot.is_dir() && boot.dev() == root.dev(),
+        _ => false,
+    }
+}
+
+/// The relabel argv for the physical root's `/boot`, matched against the
+/// physical root so it gets the policy's `/boot` labels. `-x` keeps
+/// `setfiles` on that filesystem, out of an ESP mounted below it.
+fn boot_relabel_command(target_image: &str, physical_root: &str, boot: &Path) -> Vec<String> {
+    let root = Path::new(physical_root);
+    let mut argv = relabel_command_for_root(target_image, physical_root, &[(root, boot)])
+        .pop()
+        .expect("one job gives one command");
+    let at = argv.iter().position(|a| a == "-F").expect("setfiles -F") + 1;
+    argv.insert(at, "-x".into());
+    argv
+}
+
 /// Composefs-source relabel command, retained as the public planning helper.
 pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<String>> {
     relabel_command_for_root(target_image, PHYSICAL_ROOT, jobs)
 }
 
-/// Label the merged `/etc` and, when it was copied, the stateroot `/var`
-/// with the target's policy. `Ok(None)` when the target does not enable
-/// SELinux.
+/// Label the merged `/etc`, the stateroot `/var` when it was copied, and
+/// the physical root's `/boot` when it is on the root filesystem, with the
+/// target's policy. `Ok(None)` when the target does not enable SELinux.
 fn relabel_with_target_policy(
     target_image: &str,
     deploy_root: &Path,
@@ -1369,8 +1406,7 @@ fn relabel_with_target_policy(
     if var_copied {
         jobs.push((stateroot.as_path(), var));
     }
-    let mut done = 0;
-    for mut argv in relabel_command_for_root(target_image, physical_root, &jobs) {
+    let with_policy = |mut argv: Vec<String>| {
         if let Some(fc) = argv
             .iter_mut()
             .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
@@ -1378,11 +1414,31 @@ fn relabel_with_target_policy(
             *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
         }
         println!("[selinux] {}", argv.join(" "));
+        argv
+    };
+    let mut done = 0;
+    for argv in relabel_command_for_root(target_image, physical_root, &jobs) {
+        let argv = with_policy(argv);
         run_checked(
             Command::new(&argv[0]).args(&argv[1..]),
             "setfiles in the target image",
         )?;
         done += 1;
+    }
+    // Best-effort: bootc labelled what it needs to boot, and an error here
+    // must not undo a migration whose /etc and /var are labelled.
+    let boot = Path::new(physical_root).join("boot");
+    if boot_shares_the_root_filesystem(Path::new(physical_root), &boot) {
+        let argv = with_policy(boot_relabel_command(target_image, physical_root, &boot));
+        match run_checked(
+            Command::new(&argv[0]).args(&argv[1..]),
+            "setfiles on /boot in the target image",
+        ) {
+            Ok(()) => done += 1,
+            Err(e) => eprintln!(
+                "Warning: labelling /boot failed ({e:#}); the target boots, but may deny access to unlabeled files there."
+            ),
+        }
     }
     Ok(Some(done))
 }
@@ -2191,6 +2247,29 @@ mod tests {
         let var_cmd = cmds[1].join(" ");
         assert!(var_cmd.contains("-r /target/ostree/deploy/default "));
         assert!(var_cmd.ends_with("/target/ostree/deploy/default/var"));
+    }
+
+    #[test]
+    fn boot_relabel_stays_on_the_root_filesystem() {
+        let argv = boot_relabel_command(
+            "quay.io/fedora/fedora-bootc:44",
+            PHYSICAL_ROOT,
+            &Path::new(PHYSICAL_ROOT).join("boot"),
+        )
+        .join(" ");
+        assert!(
+            argv.ends_with("setfiles -F -x -r /target /etc/selinux/targeted/contexts/files/file_contexts /target/boot"),
+            "{argv}"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let boot = root.path().join("boot");
+        assert!(!boot_shares_the_root_filesystem(root.path(), &boot));
+        fs::create_dir(&boot).unwrap();
+        assert!(boot_shares_the_root_filesystem(root.path(), &boot));
+        let link = root.path().join("boot-link");
+        std::os::unix::fs::symlink(&boot, &link).unwrap();
+        assert!(!boot_shares_the_root_filesystem(root.path(), &link));
     }
 
     #[test]

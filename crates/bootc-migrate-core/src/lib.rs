@@ -44,6 +44,7 @@ pub mod de_migrate;
 pub mod etc_conflict;
 pub mod firstboot_repair;
 pub mod firstboot_verify;
+pub mod flatpak_preinstall;
 pub mod hardware;
 pub mod mergetc;
 pub mod migration;

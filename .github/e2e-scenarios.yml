@@ -333,6 +333,28 @@
   expect_os_id: hummingbird
   expect_dm: gdm
   allow_failure: true
+- name: "tunaOS marlin gnome -> utah (cross-family composefs -> ostree, OstreeInstall)"
+  # The route a Marlin user takes to Utah today. Marlin's own bootc
+  # cannot pull utah:testing, so the image swap cell above does not
+  # finish. OstreeInstall runs the target's bootc in podman instead.
+  # Marlin is Arch: no efibootmgr, no SELinux, and its system flatpaks
+  # come from `flatpak preinstall`, so this cell covers the NVRAM
+  # fallback, the /boot relabel and the kept preinstalled apps.
+  base: ghcr.io/tuna-os/marlin:gnome
+  target: ghcr.io/projectbluefin/utah:testing
+  mode: composefs-to-ostree
+  # The Marlin store, the pulled utah image, the OSTree deployment and
+  # a second /var (14 GB of it) did not fit in less.
+  disk_size: 80G
+  expect_os_id: hummingbird
+  expect_dm: gdm
+  # Utah's brew-setup.service unpacks Homebrew into /home/linuxbrew on
+  # a host that had none, with mkdir, tar and cp and no restorecon. All
+  # of it inherits home_root_t from /var/home. Utah writes these files
+  # after the migration is done. /etc and every other home stay fully
+  # checked.
+  allowed_mislabeled: "/var/home/linuxbrew /var/home/linuxbrew/*"
+  allow_failure: true
 - name: Fedora Cloud -> fedora-bootc (package install)
   # #380: the source is an official Fedora Cloud qcow2, not a bootc image.
   # The helper grows its btrfs root/home layout and cloud-init provides the

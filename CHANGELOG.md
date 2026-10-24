@@ -178,6 +178,26 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- A cross-family re-base keeps the flatpak apps the old OS preinstalled.
+  `flatpak preinstall` records each app it installs in the `xa.preinstalled`
+  key of `/var/lib/flatpak/repo/config`. On a later run it uninstalls every
+  recorded app that the OS's `preinstall.d` no longer lists. The record came
+  across with `/var`, so Utah's first-boot `flatpak-preinstall.service`
+  removed Firefox and Extension Manager from a migrated tunaOS Marlin host.
+  The re-base now removes the key from the carried `/var`, and the
+  cross-family report lists the apps it kept.
+
+- The `OstreeInstall` SELinux step also labels the physical root's `/boot`
+  with the target's policy when `/boot` is on the root filesystem.
+  `bootc install` writes GRUB and `bootupd-state.json` there. A host that
+  ran without SELinux (tunaOS Marlin) left them unlabeled, and Utah denied
+  `systemd-logind` access to `/boot/efi`. A failure on `/boot` is a
+  warning, not an error.
+
+- `OstreeInstall` no longer tries the host's `efibootmgr` when the host has
+  none. It goes straight to the target image's `efibootmgr`, without the
+  "failed to invoke efibootmgr" warning.
+
 - A cross-family `OstreeInstall` writes its cross-family report to the new
   stateroot's `/var/lib/bootc-rebase`. It used to write the report to the
   OSTree deployment root. That directory is immutable after `bootc install`,
