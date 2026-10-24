@@ -138,8 +138,8 @@ sudo bootc-migrate tui
 
 The image picker fetches the latest CI-published catalog, then uses a cached
 or bundled JSON snapshot if offline. It lists published Bluefin, Universal
-Blue, TunaOS, and Zirconium images. Utah stays marked as coming soon until its
-registry tag appears. You see the selected image reference and backend before
+Blue, TunaOS, Zirconium, and Utah images. Utah is pre-alpha, so the picker
+offers only its `:testing` tag. You see the selected image reference and backend before
 you continue. OSTree targets use `bootc-rebase`, which you must install
 alongside `bootc-migrate`; ComposeFS targets use the normal migrate path. The
 tool does not support a return from ComposeFS to OSTree.

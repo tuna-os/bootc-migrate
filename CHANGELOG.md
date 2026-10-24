@@ -25,6 +25,9 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- The TUI catalog lists Utah as "Utah (pre-alpha)" with
+  `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
+  composefs host, where its routes have E2E coverage.
 - Package-based base-image E2E coverage (#380): `package-install` boots
   checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
   through cloud-init, creates package/home/desktop fixtures, runs the package
@@ -147,6 +150,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
+
+- `bootc-rebase scan` and the other registry readers decode zstd layers
+  themselves. They used to pass them to `tar -a`, which needs an external
+  `zstd` program. On a host without one, every zstd layer read as empty, and
+  `scan` reported bootc images such as Marlin and Utah as "not an
+  ostree/bootc image".
 
 - Every check for a composefs boot accepts both forms of the kernel
   argument: `composefs=<hex>` and `composefs.digest=v1-sha512-12:<hex>`,

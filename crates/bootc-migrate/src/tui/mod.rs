@@ -133,9 +133,17 @@ fn image_choices_from_catalog(
     if backend == Some(Backend::Package) {
         choices.retain(|choice| choice.backend == "ostree");
     }
+    // Utah's tested routes start from a composefs host (ImageSwap,
+    // OstreeInstall). The catalog lists it, but from an OSTree host its
+    // `composefs` backend would select the full conversion, which no E2E
+    // cell covers, so only composefs hosts are offered it (below).
+    if backend != Some(Backend::Composefs) {
+        choices.retain(|choice| choice.image != UTAH_TESTING);
+    }
     // On an existing composefs system, keep the current image as the first
     // one-click choice. Otherwise Dakota remains the known conversion path.
     if backend == Some(Backend::Composefs) {
+        choices.retain(|c| c.image != UTAH_TESTING && !c.label.starts_with("Utah"));
         if let Some(current) = booted_image {
             choices.retain(|c| c.image != current);
             choices.insert(
@@ -152,10 +160,9 @@ fn image_choices_from_catalog(
         }
         // Dakota -> Utah is the flagship reverse migration (#312). Utah is
         // pre-alpha and neither route to it has a green main E2E cell
-        // (docs/support-matrix.md), so the note says so.
-        if let Some(pos) = choices.iter().position(|c| c.label == "Utah") {
-            choices.remove(pos);
-        }
+        // (docs/support-matrix.md), so the note says so. The catalog's own
+        // Utah entry was replaced by this one before the current image row
+        // went in.
         if booted_image != Some(UTAH_TESTING) {
             choices.push(ImageChoice {
                 label: "Utah testing".to_owned(),
@@ -1946,11 +1953,18 @@ mod tests {
     #[test]
     fn unpublished_catalog_entry_cannot_advance() {
         let mut app = app_on(Screen::SelectImage);
-        let index = app
-            .image_choices
-            .iter()
-            .position(|c| c.label == "Utah")
-            .unwrap();
+        app.image_choices.insert(
+            0,
+            ImageChoice {
+                label: "Not yet released".into(),
+                image: String::new(),
+                note: "coming soon".into(),
+                custom: false,
+                backend: "composefs".into(),
+                published: false,
+            },
+        );
+        let index = 0;
         app.image_list_state.select(Some(index));
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.screen, Screen::SelectImage);

@@ -4,8 +4,8 @@
 desktop and hardware tag patterns, and target backends. Edit it when an upstream
 image family or tag rule changes. CI probes candidate tags in GHCR and adds
 the ones currently published. A primary choice stays visible but becomes
-unselectable if its tag disappears. Utah stays listed without a reference until
-its first release.
+unselectable if its tag disappears. Utah is listed as "Utah (pre-alpha)" with its
+`:testing` tag, the only tag it publishes.
 
 `python3 catalog/generate.py --probe` composes `images.json` using `skopeo`
 manifest checks. The `Image catalog` workflow runs on source changes and daily,

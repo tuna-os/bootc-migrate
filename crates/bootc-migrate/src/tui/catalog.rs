@@ -161,7 +161,9 @@ mod tests {
         ] {
             assert!(rows.iter().any(|r| r.label.starts_with(name)), "{name}");
         }
-        assert!(!rows.iter().find(|r| r.label == "Utah").unwrap().published);
+        let utah = rows.iter().find(|r| r.label.starts_with("Utah")).unwrap();
+        assert!(utah.published);
+        assert_eq!(utah.image, "ghcr.io/projectbluefin/utah:testing");
     }
     #[test]
     fn rejects_bad_catalogs() {
