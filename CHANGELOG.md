@@ -194,6 +194,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `systemd-logind` access to `/boot/efi`. A failure on `/boot` is a
   warning, not an error.
 
+- `bootc-rebase commit` no longer refuses when only flatpak metadata
+  caches are missing from the live `/var`: `lib/flatpak/appstream` and
+  ostree's scratch directory `lib/flatpak/repo/tmp`. A metadata refresh on
+  either system replaces the appstream checkout, so the check refused every
+  Marlin → Utah commit. Installed apps and runtimes stay checked.
+
 - `OstreeInstall` no longer tries the host's `efibootmgr` when the host has
   none. It goes straight to the target image's `efibootmgr`, without the
   "failed to invoke efibootmgr" warning.

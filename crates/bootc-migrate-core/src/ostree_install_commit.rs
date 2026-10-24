@@ -73,6 +73,11 @@ pub const VOLATILE_VAR_PATHS: &[&str] = &[
     // the copy (at the shutdown before the reboot); the live system
     // regenerates it.
     "lib/NetworkManager/NetworkManager.state",
+    // Flatpak metadata caches, downloaded again from the remotes. A
+    // metadata refresh on either side checks out a new appstream commit
+    // and removes the old one, and ostree's `repo/tmp` is scratch space.
+    "lib/flatpak/appstream",
+    "lib/flatpak/repo/tmp",
 ];
 
 /// Where the commit record is written, beside the install report.
@@ -1082,6 +1087,31 @@ mod tests {
         let diff = diff_var(&old, &live).unwrap();
         assert!(diff.missing.is_empty(), "missing: {:?}", diff.missing);
         assert_eq!(diff.volatile_missing, 1);
+    }
+
+    /// A flatpak metadata refresh replaces the appstream checkout and
+    /// clears ostree's scratch space; the installed apps stay checked.
+    #[test]
+    fn diff_var_ignores_flatpak_metadata_caches_only() {
+        let d = tempdir().unwrap();
+        let (old, live) = (d.path().join("old"), d.path().join("live"));
+        write(
+            &old.join("lib/flatpak/appstream/flathub/x86_64/abc/appstream.xml"),
+            "x",
+        );
+        write(
+            &old.join("lib/flatpak/repo/tmp/cache/summaries/flathub.sub"),
+            "x",
+        );
+        write(
+            &old.join("lib/flatpak/app/org.mozilla.firefox/current"),
+            "x",
+        );
+        fs::create_dir_all(live.join("lib/flatpak/appstream/flathub/x86_64")).unwrap();
+        fs::create_dir_all(live.join("lib/flatpak/repo/tmp")).unwrap();
+
+        let diff = diff_var(&old, &live).unwrap();
+        assert_eq!(diff.missing, ["lib/flatpak/app"]);
     }
 
     #[test]

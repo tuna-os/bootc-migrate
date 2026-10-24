@@ -1306,6 +1306,15 @@ fn deployment_enables_selinux(deploy_root: &Path) -> bool {
     }
 }
 
+/// Where `p`, a path under `physical_root`, appears in the relabel
+/// container.
+fn container_path(physical_root: &str, p: &Path) -> String {
+    match p.strip_prefix(physical_root).unwrap_or(p) {
+        rel if rel.as_os_str().is_empty() => CONTAINER_TARGET.to_string(),
+        rel => Path::new(CONTAINER_TARGET).join(rel).display().to_string(),
+    }
+}
+
 /// The `podman run` argv that labels `paths` with the target image's own
 /// `setfiles` and policy, each matched against its `alt_root`.
 fn relabel_command_for_root(
@@ -1313,12 +1322,7 @@ fn relabel_command_for_root(
     physical_root: &str,
     jobs: &[(&Path, &Path)],
 ) -> Vec<Vec<String>> {
-    let to_container = |p: &Path| -> String {
-        match p.strip_prefix(physical_root).unwrap_or(p) {
-            rel if rel.as_os_str().is_empty() => CONTAINER_TARGET.to_string(),
-            rel => Path::new(CONTAINER_TARGET).join(rel).display().to_string(),
-        }
-    };
+    let to_container = |p: &Path| container_path(physical_root, p);
     jobs.iter()
         .map(|(alt_root, path)| {
             vec![
@@ -1361,16 +1365,35 @@ fn boot_shares_the_root_filesystem(physical_root: &Path, boot: &Path) -> bool {
     }
 }
 
+/// The mount points strictly below `dir`, from `/proc/self/mountinfo`.
+fn mounts_below(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(|p| PathBuf::from(crate::package_data::decode_mountinfo_path(p)))
+        .filter(|p| p != dir && p.starts_with(dir))
+        .collect()
+}
+
 /// The relabel argv for the physical root's `/boot`, matched against the
-/// physical root so it gets the policy's `/boot` labels. `-x` keeps
-/// `setfiles` on that filesystem, out of an ESP mounted below it.
-fn boot_relabel_command(target_image: &str, physical_root: &str, boot: &Path) -> Vec<String> {
+/// physical root so it gets the policy's `/boot` labels. Each mount point
+/// in `mounts` (an ESP mounted below `/boot`) is excluded with `-e`:
+/// `setfiles` has no option that keeps it on one filesystem.
+fn boot_relabel_command(
+    target_image: &str,
+    physical_root: &str,
+    boot: &Path,
+    mounts: &[PathBuf],
+) -> Vec<String> {
     let root = Path::new(physical_root);
     let mut argv = relabel_command_for_root(target_image, physical_root, &[(root, boot)])
         .pop()
         .expect("one job gives one command");
     let at = argv.iter().position(|a| a == "-F").expect("setfiles -F") + 1;
-    argv.insert(at, "-x".into());
+    let excludes = mounts
+        .iter()
+        .flat_map(|m| ["-e".to_string(), container_path(physical_root, m)]);
+    argv.splice(at..at, excludes);
     argv
 }
 
@@ -1429,7 +1452,15 @@ fn relabel_with_target_policy(
     // must not undo a migration whose /etc and /var are labelled.
     let boot = Path::new(physical_root).join("boot");
     if boot_shares_the_root_filesystem(Path::new(physical_root), &boot) {
-        let argv = with_policy(boot_relabel_command(target_image, physical_root, &boot));
+        let mounts = fs::read_to_string("/proc/self/mountinfo")
+            .map(|m| mounts_below(&m, &boot))
+            .unwrap_or_default();
+        let argv = with_policy(boot_relabel_command(
+            target_image,
+            physical_root,
+            &boot,
+            &mounts,
+        ));
         match run_checked(
             Command::new(&argv[0]).args(&argv[1..]),
             "setfiles on /boot in the target image",
@@ -2251,15 +2282,43 @@ mod tests {
 
     #[test]
     fn boot_relabel_stays_on_the_root_filesystem() {
+        let boot = Path::new(PHYSICAL_ROOT).join("boot");
+        let argv =
+            boot_relabel_command("quay.io/fedora/fedora-bootc:44", PHYSICAL_ROOT, &boot, &[])
+                .join(" ");
+        assert!(
+            argv.ends_with("setfiles -F -r /target /etc/selinux/targeted/contexts/files/file_contexts /target/boot"),
+            "{argv}"
+        );
+        let mountinfo = "\
+            22 1 0:30 / / rw - btrfs /dev/vda3 rw\n\
+            40 22 0:30 /boot /sysroot/boot rw - btrfs /dev/vda3 rw\n\
+            41 40 8:2 / /sysroot/boot/efi rw - vfat /dev/vda2 rw\n\
+            42 40 8:4 / /sysroot/boot/my\\040esp rw - vfat /dev/vda4 rw\n\
+            43 22 8:2 / /sysroot/bootx rw - vfat /dev/vda2 rw\n";
+        let mounts = mounts_below(mountinfo, &boot);
+        assert_eq!(
+            mounts,
+            [boot.join("efi"), boot.join("my esp")],
+            "{mounts:?}"
+        );
         let argv = boot_relabel_command(
             "quay.io/fedora/fedora-bootc:44",
             PHYSICAL_ROOT,
-            &Path::new(PHYSICAL_ROOT).join("boot"),
-        )
-        .join(" ");
-        assert!(
-            argv.ends_with("setfiles -F -x -r /target /etc/selinux/targeted/contexts/files/file_contexts /target/boot"),
-            "{argv}"
+            &boot,
+            &mounts,
+        );
+        let at = argv.iter().position(|a| a == "setfiles").unwrap();
+        assert_eq!(
+            argv[at..at + 6],
+            [
+                "setfiles",
+                "-F",
+                "-e",
+                "/target/boot/efi",
+                "-e",
+                "/target/boot/my esp"
+            ]
         );
 
         let root = tempfile::tempdir().unwrap();
