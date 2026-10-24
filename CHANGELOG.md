@@ -163,6 +163,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- A cross-family `OstreeInstall` writes its cross-family report to the new
+  stateroot's `/var/lib/bootc-rebase`. It used to write the report to the
+  OSTree deployment root. That directory is immutable after `bootc install`,
+  so the route failed with `Operation not permitted` at the end, after all
+  the work was done.
+
 - The composefs → OSTree route (`OstreeInstall`) no longer needs
   `efibootmgr` on the host. When the host has none, it runs the target
   image's `efibootmgr` through podman. TunaOS Marlin ships no `efibootmgr`,

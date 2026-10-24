@@ -934,7 +934,10 @@ impl InstallConfig<'_> {
             let source_group = fs::read_to_string("/etc/group").unwrap_or_default();
             cross_family::apply_post_merge(&cross_family::PostMergeInputs {
                 etc_outcome: outcome,
-                deploy_dir: &deploy_root,
+                // The deployment root is immutable once `bootc install`
+                // returns (EPERM, found by the Marlin -> Utah E2E run), so
+                // the report goes beside this route's own carried report.
+                report_dir: &Path::new(self.source.stateroot_var()).join("lib/bootc-rebase"),
                 etc_dir: &deploy_root.join("etc"),
                 staged_var: if var_copied {
                     cross_family::StagedVar::Copied(Path::new(self.source.stateroot_var()))

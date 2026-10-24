@@ -680,9 +680,8 @@ pub enum StagedVar<'a> {
     PreviouslyStaged,
 }
 
-/// The record of everything the cross-family steps did, written beside
-/// the deployment as `bootc-migrate-cross-family-report.json` so it
-/// survives the reboot.
+/// The record of everything the cross-family steps did, written as
+/// `bootc-migrate-cross-family-report.json` where it survives the reboot.
 #[derive(Debug, Clone, Serialize)]
 pub struct CrossFamilyReport {
     pub host: BaseInfo,
@@ -697,7 +696,7 @@ pub struct CrossFamilyReport {
     pub firstboot_unit_installed: bool,
 }
 
-/// The report's file name inside the deployment directory.
+/// The report's file name inside [`PostMergeInputs::report_dir`].
 pub const REPORT_FILE: &str = "bootc-migrate-cross-family-report.json";
 
 /// Everything the post-merge steps need, gathered by the Phase 4
@@ -705,7 +704,10 @@ pub const REPORT_FILE: &str = "bootc-migrate-cross-family-report.json";
 #[derive(Debug)]
 pub struct PostMergeInputs<'a> {
     pub etc_outcome: &'a CrossFamilyEtcOutcome,
-    pub deploy_dir: &'a Path,
+    /// Where the report goes. It must be writable now and survive the
+    /// reboot: a composefs deployment directory, or the new OSTree
+    /// stateroot's `/var` (an OSTree deployment root is immutable).
+    pub report_dir: &'a Path,
     pub etc_dir: &'a Path,
     pub staged_var: StagedVar<'a>,
     /// The host's live `/etc/selinux/config`, if any.
@@ -788,7 +790,9 @@ pub fn apply_post_merge(inputs: &PostMergeInputs<'_>) -> Result<CrossFamilyRepor
         relabel_scheduled,
         firstboot_unit_installed,
     };
-    let report_path = inputs.deploy_dir.join(REPORT_FILE);
+    fs::create_dir_all(inputs.report_dir)
+        .with_context(|| format!("failed to create {}", inputs.report_dir.display()))?;
+    let report_path = inputs.report_dir.join(REPORT_FILE);
     fs::write(
         &report_path,
         serde_json::to_string_pretty(&report).expect("CrossFamilyReport serialization cannot fail"),

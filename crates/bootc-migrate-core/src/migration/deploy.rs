@@ -124,7 +124,7 @@ pub fn phase4_stage_deploy(
             .context("failed to read /etc/group for the cross-family remap")?;
         cross_family::apply_post_merge(&PostMergeInputs {
             etc_outcome: outcome,
-            deploy_dir: &layout.deploy_dir,
+            report_dir: &layout.deploy_dir,
             etc_dir: &layout.etc_dir,
             staged_var,
             host_selinux: selinux::read_host_selinux_config(),
