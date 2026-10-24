@@ -484,11 +484,14 @@ instead:
 - When the target enforces an SELinux policy that the source did not, a
   one-shot unit relabels `/etc` and `/var` on first boot.
 
-The tool prints the report and writes it to
+The tool prints the report and keeps it across the reboot. A composefs
+deployment stores it at
 `/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
-This route is exploratory: one non-gating E2E cell exercises it. See
-[ROADMAP.md](ROADMAP.md) and
-[#256](https://github.com/tuna-os/bootc-migrate/issues/256).
+The composefs → OSTree route stores it in the new stateroot's
+`/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json`, because an
+OSTree deployment root is immutable after installation. This route is
+exploratory: one non-gating E2E cell exercises it. See [ROADMAP.md](ROADMAP.md)
+and [#256](https://github.com/tuna-os/bootc-migrate/issues/256).
 
 ### Move system Steam into Flatpak Steam
 

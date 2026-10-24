@@ -3326,13 +3326,20 @@ if [ "$E2E_CROSS_FAMILY" = "1" ]; then
 
     ssh $SSH_OPTS root@localhost bash <<'CROSSCHECK'
 set -e
-DEPLOY=$(echo /sysroot/state/deploy/*)
-[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment under /sysroot/state/deploy"; exit 1; }
+DEPLOY=$(find /sysroot/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 \
+    -type d -name '*.0' -print -quit 2>/dev/null || true)
+if [ -z "$DEPLOY" ]; then
+    DEPLOY=$(echo /sysroot/state/deploy/*)
+fi
+[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment found"; exit 1; }
 ETC="$DEPLOY/etc"
 echo "--- staged deployment: $DEPLOY ---"
-test -f "$DEPLOY/bootc-migrate-cross-family-report.json" \
-    || { echo "FAIL: cross-family report JSON missing"; exit 1; }
-head -c 2000 "$DEPLOY/bootc-migrate-cross-family-report.json"; echo
+REPORT=/sysroot/ostree/deploy/default/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+if [ ! -f "$REPORT" ]; then
+    REPORT="$DEPLOY/bootc-migrate-cross-family-report.json"
+fi
+test -f "$REPORT" || { echo "FAIL: cross-family report JSON missing"; exit 1; }
+head -c 2000 "$REPORT"; echo
 # Both families ship default/useradd: the target's copy, and our edit beside it.
 grep -q "e2e cross-family edit" "$ETC/default/useradd" \
     && { echo "FAIL: /etc/default/useradd still carries the source edit (target default did not win)"; exit 1; }
@@ -3380,8 +3387,12 @@ fi
 step "=== Re-injecting e2e-sshd into the staged deployment ==="
 ssh $SSH_OPTS root@localhost bash <<'CFS_POSTMERGEFIX'
 set -e
-DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
-[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found (/sysroot/state/deploy/*/etc)"; exit 1; }
+DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+    -type d -name etc -print -quit 2>/dev/null || true)
+if [ -z "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+fi
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found"; exit 1; }
 
 mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
 printf '%s\n' \
@@ -3443,10 +3454,14 @@ step "=== first-boot repair: sabotaging the canary tree (#309) ==="
 ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
 set -e
 CANARY_REL=home/realuser/repair-canary
-for V in /sysroot/state/os/default/var /var; do
+for V in /sysroot/ostree/deploy/default/var /sysroot/state/os/default/var /var; do
     [ -d "$V/$CANARY_REL" ] && break
 done
-DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+    -type d -name etc -print -quit 2>/dev/null || true)
+if [ -z "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+fi
 test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
 test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
 test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
@@ -3993,7 +4008,10 @@ elif [ -f /etc/dpkg/dpkg.cfg.rebase-old ]; then
 else
     echo "FAIL: expected a source-vendor-only .rebase-old sidecar in live /etc"; exit 1
 fi
-REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+REPORT=/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+if [ ! -f "$REPORT" ]; then
+    REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+fi
 test -f "$REPORT" || { echo "FAIL: cross-family report missing after reboot"; exit 1; }
 if grep -q '"firstboot_unit_installed": true' "$REPORT"; then
     if [ -e /etc/bootc-migrate/cross-family-firstboot ]; then
