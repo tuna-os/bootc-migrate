@@ -135,9 +135,9 @@ options root=UUID=aaaa-bbbb rw ostree=/ostree/boot.1/fedora/abc123/0
 ```
 /sysroot/                           # Physical root
 ├── composefs/                      # ComposeFS repository (mode 0700)
-│   ├── objects/                    # SHA-512 content-addressed objects
-│   │   ├── xx/                     # First two hex chars of SHA-512
-│   │   │   └── <sha512_hash>       # Content-object files
+│   ├── objects/                    # SHA-512 fs-verity-addressed objects
+│   │   ├── xx/                     # First two hex chars of the fs-verity digest
+│   │   │   └── <fsverity_sha512>   # Content-object files
 │   │   └── ...
 │   ├── images/                     # Bootable EROFS images
 │   │   └── <sha512_hash>.erofs     # Each image is an EROFS filesystem
@@ -491,9 +491,9 @@ The conversion process:
 2. Convert ostree objects to composefs objects:
    For each object in /ostree/repo/objects/:
      - Read the ostree file object
-     - Compute SHA-512 content digest (raw bytes, NOT including ostree metadata header)
-     - FICLONE into /sysroot/composefs/objects/XX/<sha512>
-     - Optionally enable fsverity on the new object
+     - Compute the SHA-512 fs-verity digest over the file contents
+     - FICLONE into /sysroot/composefs/objects/XX/<fsverity_sha512>
+     - Enable fsverity on the new object
 
 3. Create the composefs EROFS image:
    mkcomposefs --from-file /sysroot/composefs/objects/ <target_dir>

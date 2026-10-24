@@ -54,6 +54,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   hook. Both `bootc-migrate` and `bootc-rebase` route through the same live
   controller, and the QEMU E2E matrix covers the OVMF trial, resync,
   promotion, and undo path (#382).
+- ComposeFS migrations now run a post-seal integrity pass: the native
+  composefs-rs backend fscks the store, and both backends read and verify every
+  object, so fs-verity backing-store failures are reported before reboot instead
+  of later as EIO.
+- OSTree imports now use the store's SHA-512 fs-verity object IDs and enable
+  fs-verity before the target image is pulled, keeping the imported objects
+  compatible with the integrity check.
 - `bootc-rebase commit` removes the composefs state that a composefs → ostree
   re-base keeps as rollback (#315). Without `--apply` it is a dry run that
   checks the booted deployment, the ESP snapshot, the firmware entry and the
