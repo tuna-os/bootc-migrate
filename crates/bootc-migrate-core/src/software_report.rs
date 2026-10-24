@@ -576,6 +576,7 @@ fn read_installed_packages(root: &Path, package_db: PackageDb) -> Result<Vec<Ins
         PackageDb::Rpm => read_rpm_packages(root),
         PackageDb::Dpkg => read_dpkg_packages(root),
         PackageDb::Pacman => read_pacman_packages(root),
+        PackageDb::Apk => read_apk_packages(root),
     }?;
     packages.sort_unstable_by(|left, right| left.name.cmp(&right.name));
 
@@ -762,6 +763,62 @@ fn pacman_files(contents: &str) -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.ends_with('/'))
         .map(|line| format!("/{line}"))
         .collect()
+}
+
+fn read_apk_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
+    let path = if root.join("lib/apk/db/installed").exists() {
+        root.join("lib/apk/db/installed")
+    } else {
+        root.join("var/lib/apk/db/installed")
+    };
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(parse_apk_installed(&content))
+}
+
+pub fn parse_apk_installed(content: &str) -> Vec<InstalledPackage> {
+    let mut packages = Vec::new();
+    let mut current_package: Option<InstalledPackage> = None;
+    let mut current_dir = String::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if let Some(pkg) = current_package.take() {
+                packages.push(pkg);
+            }
+            current_dir.clear();
+            continue;
+        }
+        if let Some(name) = line.strip_prefix("P:") {
+            if let Some(pkg) = current_package.take() {
+                packages.push(pkg);
+            }
+            current_package = Some(InstalledPackage {
+                name: name.to_string(),
+                files: Vec::new(),
+            });
+            current_dir.clear();
+        } else if let Some(dir) = line.strip_prefix("F:") {
+            current_dir = dir.trim_start_matches('/').to_string();
+        } else if let Some(file) = line.strip_prefix("R:")
+            && let Some(pkg) = current_package.as_mut()
+        {
+            let file_path = if current_dir.is_empty() {
+                format!("/{file}")
+            } else {
+                format!("/{current_dir}/{file}")
+            };
+            pkg.files.push(file_path);
+        }
+    }
+    if let Some(pkg) = current_package {
+        packages.push(pkg);
+    }
+    packages
 }
 
 fn read_enabled_services() -> Result<Vec<String>> {
@@ -1312,6 +1369,51 @@ mod tests {
         assert_eq!(
             pacman_files("%FILES%\nusr/bin/tool\nusr/share/doc/tool/\n\n"),
             ["/usr/bin/tool"]
+        );
+        // apk records are blank-line separated; `F:` sets the directory that
+        // the `R:` names below it belong to, and the caller sorts, so the
+        // parser keeps the database order.
+        assert_eq!(
+            parse_apk_installed(
+                "C:Q1x\nP:zlib\nV:1.3.1-r0\nF:usr/lib\nR:libz.so.1\n\nP:alpine-base\nF:/etc\nR:motd\nF:sbin\nR:init\n"
+            ),
+            [
+                package("zlib", &["/usr/lib/libz.so.1"]),
+                package("alpine-base", &["/etc/motd", "/sbin/init"]),
+            ]
+        );
+        // A record whose files precede any `F:` line lands at the root.
+        assert_eq!(
+            parse_apk_installed("P:root-file\nR:bootstrap\n"),
+            [package("root-file", &["/bootstrap"])]
+        );
+    }
+
+    #[test]
+    fn apk_database_prefers_lib_over_var_lib() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_apk_packages(root.path()).unwrap().is_empty());
+
+        fs::create_dir_all(root.path().join("var/lib/apk/db")).unwrap();
+        fs::write(
+            root.path().join("var/lib/apk/db/installed"),
+            "P:fallback\nF:usr/bin\nR:fallback\n\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_apk_packages(root.path()).unwrap(),
+            [package("fallback", &["/usr/bin/fallback"])]
+        );
+
+        fs::create_dir_all(root.path().join("lib/apk/db")).unwrap();
+        fs::write(
+            root.path().join("lib/apk/db/installed"),
+            "P:preferred\nF:usr/bin\nR:preferred\n\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_apk_packages(root.path()).unwrap(),
+            [package("preferred", &["/usr/bin/preferred"])]
         );
     }
 
