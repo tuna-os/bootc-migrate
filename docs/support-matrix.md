@@ -71,6 +71,7 @@ that a package host can migrate or boot. A row stays **UNPROVEN** until its
 cell turns green on `main`. Issue #380 owns these cells.
 A green Fedora row does not promote Ubuntu, Debian, Arch, or postmarketOS.
 A green UEFI/ext4 row does not promote btrfs, XFS, or BIOS.
+
 | Source | Package database | Root filesystem | Boot mode | Storage stack | Status | Proof needed |
 |---|---|---|---|---|---|---|
 | Fedora Workstation | rpm | btrfs subvolume | UEFI | plain | **UNPROVEN** | Fedora Workstation → Bluefin cell green on `main` |
@@ -116,6 +117,7 @@ first-boot verification (#379) are not ready.
 | LUKS of any kind on ImageSwap / OstreeDeploy | **UNPROVEN** | no cells; both rely on `bootc switch` native behavior, which no cell exercises under encryption |
 | LUKS of any kind on OstreeInstall | **UNPROVEN** | `carry_over_kargs` keeps `rd.luks.*`/`rd.lvm.lv` in code, but the route's only cell is RED on unencrypted disk — encryption adds an unproven axis to a red route |
 | PackageInstall, LUKS root with unencrypted ESP at /boot (ARM64 postmarketOS) | **UNPROVEN** | core LUKS preflight, whole-ESP snapshot, bind plan, DTB gating, and kargs derivation implemented (#461); arm64 E2E cell pending |
+
 ## UKI (boot artifact format)
 
 | Combination | Status | Proof |

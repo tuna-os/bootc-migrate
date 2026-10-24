@@ -31,12 +31,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 - Reversible migration support for postmarketOS-family ARM64 laptops (#461):
   - Detect apk-managed package hosts via `/lib/apk/db/installed`.
-  - Accept LUKS roots in preflight when `/boot` is on an unencrypted partition or ESP, and derive `rd.luks.name` / `root=` from `/etc/crypttab`, `pmos_root_uuid=`, or device-mapper tables.
+  - Accept LUKS roots in preflight when `/boot` is on an unencrypted partition or ESP, and derive `rd.luks.name` / `root=` from the live device-mapper identity, `/etc/crypttab`, or `pmos_root_uuid=`, binding the UUID and mapper name to the volume that actually backs `/`. A LUKS root with no derivable `root=` is refused before any change.
   - Implement full-ESP snapshot and restore for layouts where `/boot` is the ESP, preserving foreign vendor boot files (`vmlinuz`, `initramfs`, `*.dtb`, `dtbs/`, `loader/`).
   - Provide a bind plan that mounts `/boot` at `/boot/efi` under the physical root for package-host alongside installs.
-  - Parse and preserve `devicetree` BLS lines and arm64 kernel arguments (`arm64.*`, `clk_ignore_unused`, `pd_ignore_unused`), and refuse when a devicetree host targets a kernel without DTB files.
-  - Extend hardware inventory to inspect the `platform` bus and compare `/proc/device-tree/compatible` with target DTBs.
-  - Support `Previous system` rollback staging and `bootc-rebase undo`.
+  - Parse and preserve `devicetree` BLS lines and arm64 kernel arguments (`arm64.*`, `clk_ignore_unused`, `pd_ignore_unused`), and refuse when a devicetree host targets a kernel that ships no DTB — or none for the host's own board.
+  - Extend hardware inventory to inspect the `platform` bus and match `/proc/device-tree/compatible` against the target kernel's DTB names, read from the layer listing instead of extracting every blob. Collect `aa64` and `ia32` EFI payloads too, so the Secure Boot preflight inspects something on arm64.
+  - Support `Previous system` rollback staging and `bootc-rebase undo`: the rollback state is mirrored into the new stateroot's `/var` so `undo` still finds it after the reboot, the pre-install `BootOrder` is captured and restored, and a failure to stage it is reported instead of leaving a migration that only looks reversible.
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
   issuers with the firmware's `db` CA generations. It refuses known mismatches

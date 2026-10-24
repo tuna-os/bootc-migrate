@@ -49,6 +49,7 @@ pub fn required_free_bytes(compressed_image_bytes: u64) -> u64 {
 }
 
 const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelinuxMode {
@@ -116,6 +117,16 @@ fn check(name: &'static str, verdict: Verdict, detail: impl Into<String>) -> Che
 
 fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / GIB as f64)
+}
+
+/// Render a size the way an operator reads it: MiB below a gibibyte, so the
+/// /boot budget does not collapse into "0.0 GiB".
+fn size(bytes: u64) -> String {
+    if bytes < GIB {
+        format!("{:.0} MiB", bytes as f64 / MIB as f64)
+    } else {
+        gib(bytes)
+    }
 }
 
 /// Assess `facts` for the package → ostree install. `compressed_image_bytes`
@@ -217,10 +228,17 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
             Some(false) => check(
                 "ext4 fs-verity",
                 Warning,
-                "root ext4 filesystem does not have the verity feature enabled; run \
-                 `tune2fs -O verity <device>` before composefs conversion",
+                "root ext4 filesystem does not have the verity feature enabled, so composefs \
+                 cannot seal its images with fs-verity; the migration still works. ext4 \
+                 refuses to add the feature to a mounted filesystem, so enabling it means \
+                 `tune2fs -O verity <device>` offline from a live image",
             ),
-            None => check("ext4 fs-verity", Ready, "feature check skipped"),
+            None => check(
+                "ext4 fs-verity",
+                Warning,
+                "the root ext4 feature list could not be read (tune2fs missing or failed), \
+                 so whether composefs can seal its images with fs-verity is unknown",
+            ),
         });
     }
 
@@ -253,8 +271,8 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
                 Ready,
                 format!(
                     "{} free on /boot (about {} needed)",
-                    gib(free),
-                    gib(REQUIRED_BOOT_FREE_BYTES)
+                    size(free),
+                    size(REQUIRED_BOOT_FREE_BYTES)
                 ),
             ),
             Some(free) => check(
@@ -263,14 +281,18 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
                 format!(
                     "{} free on /boot, about {} needed for the target boot set (kernel, \
                      initramfs and DTB). Free up space on /boot and run again.",
-                    gib(free),
-                    gib(REQUIRED_BOOT_FREE_BYTES)
+                    size(free),
+                    size(REQUIRED_BOOT_FREE_BYTES)
                 ),
             ),
             None => check(
                 "/boot free space",
-                Ready,
-                "free space on /boot could not be read",
+                Warning,
+                format!(
+                    "free space on /boot could not be read; the target boot set needs \
+                     about {} free",
+                    size(REQUIRED_BOOT_FREE_BYTES)
+                ),
             ),
         });
     }
@@ -640,12 +662,15 @@ mod tests {
         }
     }
 
-    fn verdict_of(checks: &[Check], name: &str) -> Verdict {
+    fn check_named<'a>(checks: &'a [Check], name: &str) -> &'a Check {
         checks
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("no check {name}: {checks:?}"))
-            .verdict
+    }
+
+    fn verdict_of(checks: &[Check], name: &str) -> Verdict {
+        check_named(checks, name).verdict
     }
 
     #[test]
@@ -894,11 +919,38 @@ mod tests {
     }
 
     #[test]
-    fn boot_free_space_refusal() {
+    fn boot_free_space_refusal_reads_in_mib() {
         let mut f = fedora();
-        f.free_boot_bytes = Some(50 * 1024 * 1024); // 50 MiB < 200 MiB
+        f.free_boot_bytes = Some(50 * MIB); // 50 MiB < 200 MiB
         let checks = assess(&f, Some(4 * GIB));
-        assert_eq!(verdict_of(&checks, "/boot free space"), Verdict::Refused);
+        let c = check_named(&checks, "/boot free space");
+        assert_eq!(c.verdict, Verdict::Refused);
+        assert!(
+            c.detail
+                .starts_with("50 MiB free on /boot, about 200 MiB needed"),
+            "MiB-scale sizes must not collapse into GiB: {:?}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn unreadable_boot_free_space_warns_instead_of_passing() {
+        let mut f = fedora();
+        f.free_boot_bytes = None;
+        let checks = assess(&f, Some(4 * GIB));
+        let c = check_named(&checks, "/boot free space");
+        assert_eq!(c.verdict, Verdict::Warning);
+        assert!(c.detail.contains("200 MiB"), "{:?}", c.detail);
+        assert_eq!(decision(&checks), Verdict::Warning);
+    }
+
+    #[test]
+    fn sizes_switch_from_mib_to_gib_at_one_gibibyte() {
+        assert_eq!(size(0), "0 MiB");
+        assert_eq!(size(REQUIRED_BOOT_FREE_BYTES), "200 MiB");
+        assert_eq!(size(GIB - MIB), "1023 MiB");
+        assert_eq!(size(GIB), "1.0 GiB");
+        assert_eq!(size(3 * GIB / 2), "1.5 GiB");
     }
 
     #[test]
@@ -907,6 +959,27 @@ mod tests {
         f.root = Some(mount("ext4", "/dev/nvme0n1p3"));
         f.ext4_has_verity = Some(false);
         let checks = assess(&f, Some(4 * GIB));
-        assert_eq!(verdict_of(&checks, "ext4 fs-verity"), Verdict::Warning);
+        let c = check_named(&checks, "ext4 fs-verity");
+        assert_eq!(c.verdict, Verdict::Warning);
+        assert!(
+            c.detail.contains("offline from a live image"),
+            "advice must be followable on a mounted root: {:?}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn unreadable_ext4_verity_warns_instead_of_passing() {
+        let mut f = fedora();
+        f.root = Some(mount("ext4", "/dev/nvme0n1p3"));
+        f.ext4_has_verity = None;
+        let checks = assess(&f, Some(4 * GIB));
+        let c = check_named(&checks, "ext4 fs-verity");
+        assert_eq!(c.verdict, Verdict::Warning);
+        assert!(
+            c.detail.contains("could not be read"),
+            "an unreadable feature list must say so: {:?}",
+            c.detail
+        );
     }
 }

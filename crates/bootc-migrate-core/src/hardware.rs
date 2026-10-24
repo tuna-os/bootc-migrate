@@ -255,6 +255,38 @@ pub fn apply_firmware_listing(set: &mut BTreeSet<String>, names: &[String]) {
     }
 }
 
+/// Apply one layer's `usr/lib/modules` listing to the DTB set, oldest layer
+/// first, the way [`apply_firmware_listing`] applies a firmware listing:
+/// OCI whiteouts remove what earlier layers added.
+///
+/// Entries are kept as `<kver>/<path below that kernel's directory>`
+/// (`6.17.1/dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb`). An arm64 kernel
+/// ships about 1500 DTBs and only their names are ever compared with the
+/// host, so the registry scan reads them from the layer listing and extracts
+/// none of them.
+pub fn apply_dtb_listing(set: &mut BTreeSet<String>, names: &[String]) {
+    const PREFIX: &str = "usr/lib/modules/";
+    for raw in names {
+        let name = raw.trim_start_matches("./");
+        let Some(rel) = name.strip_prefix(PREFIX) else {
+            continue;
+        };
+        // A bare `<kver>` member holds nothing; every DTB is below it.
+        let Some((dir, base)) = rel.rsplit_once('/') else {
+            continue;
+        };
+        if base == ".wh..wh..opq" {
+            let prefix = format!("{dir}/");
+            set.retain(|d| !d.starts_with(&prefix));
+        } else if let Some(gone) = base.strip_prefix(".wh.") {
+            let gone = format!("{dir}/{gone}");
+            set.retain(|d| d != &gone && !d.starts_with(&format!("{gone}/")));
+        } else if base.ends_with(".dtb") {
+            set.insert(rel.to_string());
+        }
+    }
+}
+
 /// A device that is bound to a driver on this machine today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostDevice {
@@ -398,12 +430,17 @@ pub fn read_host_hardware_from(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let boots_with_devicetree = !devicetree_compatible.is_empty()
-        || sys_root.join("proc/device-tree").exists()
-        || sys_root.join("sys/firmware/devicetree").exists();
     hw.devicetree_compatible = devicetree_compatible;
-    hw.boots_with_devicetree = boots_with_devicetree;
+    hw.boots_with_devicetree = boots_with_devicetree(sys_root);
     hw
+}
+
+/// Whether the host at `sys_root` boots with a devicetree: it exposes
+/// compatible strings, or the devicetree tree itself. (The compatible
+/// strings are read out of one of these two trees, so a host that has them
+/// has the tree as well.)
+pub fn boots_with_devicetree(sys_root: &Path) -> bool {
+    sys_root.join("proc/device-tree").exists() || sys_root.join("sys/firmware/devicetree").exists()
 }
 
 /// Read this machine's inventory: `/sys`, `/proc/cpuinfo`, the firmware
@@ -544,6 +581,33 @@ fn firmware_fb_drivers(target: &TargetKernel) -> Vec<String> {
         .collect()
 }
 
+/// Whether `dtb` (a name or a path below the target kernel's module
+/// directory) is the devicetree of the board named by the `compatible`
+/// string `compat` (`lenovo,thinkpad-x13s`).
+///
+/// Kernel DTB file names are `<soc>-<board>.dtb`
+/// (`dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb`), writing the vendor of the
+/// compatible string with a dash or leaving it out altogether
+/// (`rockchip/rk3399-pinephone-pro.dtb` for `pine64,pinephone-pro`), so both
+/// spellings are matched against the end of the file name.
+fn dtb_matches_compatible(dtb: &str, compat: &str) -> bool {
+    let file = dtb.rsplit('/').next().unwrap_or(dtb);
+    let Some(stem) = file.strip_suffix(".dtb") else {
+        return false;
+    };
+    let stem = stem.to_ascii_lowercase();
+    let compat = compat.trim().to_ascii_lowercase();
+    let board = compat.split_once(',').map_or(compat.as_str(), |(_, b)| b);
+    if board.is_empty() {
+        return false;
+    }
+    let vendor_dashed = compat.replace(',', "-");
+    [board, vendor_dashed.as_str()].iter().any(|name| {
+        stem.strip_suffix(*name)
+            .is_some_and(|head| head.is_empty() || head.ends_with('-'))
+    })
+}
+
 /// Compare `host` with the target kernel inventory.
 pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
     let mut report = HardwareReport {
@@ -557,21 +621,57 @@ pub fn assess(host: &HostHardware, target: &TargetKernel) -> HardwareReport {
     // whether the fallback is only the firmware framebuffer).
     type LostKey = (String, Vec<String>, bool);
     let mut lost: BTreeMap<LostKey, (Severity, Vec<String>)> = BTreeMap::new();
-    if host.boots_with_devicetree && !target.has_devicetree && target.layers_skipped == 0 {
-        report.findings.push(Finding {
-            severity: Severity::Blocking,
-            subject: "devicetree".to_string(),
-            detail: format!(
-                "devicetree: the host boots with a devicetree (compatible: {}), but the target \
-                 kernel ({}) ships no devicetree or DTBs under /usr/lib/modules",
-                if host.devicetree_compatible.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    host.devicetree_compatible.join(", ")
-                },
-                target.kver
-            ),
-        });
+    if host.boots_with_devicetree && target.layers_skipped == 0 {
+        if !target.has_devicetree {
+            report.findings.push(Finding {
+                severity: Severity::Blocking,
+                subject: "devicetree".to_string(),
+                detail: format!(
+                    "devicetree: the host boots with a devicetree (compatible: {}), but the \
+                     target kernel ({}) ships no devicetree or DTBs under /usr/lib/modules",
+                    if host.devicetree_compatible.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        host.devicetree_compatible.join(", ")
+                    },
+                    target.kver
+                ),
+            });
+        } else if !target.dtbs.contains("devicetree") {
+            // The target ships per-board DTBs, so one of them has to be this
+            // board's; a single `devicetree` file is the kernel's own and
+            // names no board, which is as far as this check can go.
+            if host.devicetree_compatible.is_empty() {
+                report.findings.push(Finding {
+                    severity: Severity::Warning,
+                    subject: "devicetree".to_string(),
+                    detail: format!(
+                        "devicetree: the host boots with a devicetree but its board compatible \
+                         could not be read, so whether the target kernel ({}) ships this board's \
+                         DTB among the {} it carries is unknown",
+                        target.kver,
+                        target.dtbs.len()
+                    ),
+                });
+            } else if !host
+                .devicetree_compatible
+                .iter()
+                .any(|c| target.dtbs.iter().any(|d| dtb_matches_compatible(d, c)))
+            {
+                report.findings.push(Finding {
+                    severity: Severity::Blocking,
+                    subject: "devicetree".to_string(),
+                    detail: format!(
+                        "devicetree: the target kernel ({}) ships {} DTBs, none of them for this \
+                         board (compatible: {}), so it has no devicetree to boot this machine \
+                         with",
+                        target.kver,
+                        target.dtbs.len(),
+                        host.devicetree_compatible.join(", ")
+                    ),
+                });
+            }
+        }
     }
 
     for dev in &host.devices {
@@ -1536,5 +1636,174 @@ mod tests {
             .insert("sc8280xp-lenovo-thinkpad-x13s.dtb".into());
         let report = assess(&host, &target);
         assert!(!report.has_blocking());
+    }
+
+    #[test]
+    fn dtb_listing_collects_nested_names_and_applies_whiteouts() {
+        let names = |l: &[&str]| -> Vec<String> { l.iter().map(|s| s.to_string()).collect() };
+        let mut set = BTreeSet::new();
+        apply_dtb_listing(
+            &mut set,
+            &names(&[
+                "./usr/lib/modules/6.17.1/dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb",
+                "usr/lib/modules/6.17.1/dtb/qcom/sc8280xp-crd.dtb",
+                "usr/lib/modules/6.17.1/dtb/qcom/",
+                "usr/lib/modules/6.17.1/modules.dep",
+                "usr/lib/modules/6.17.1/kernel/fs/xfs/xfs.ko.xz",
+                "usr/lib/modules/6.17.1",
+                "usr/lib/firmware/qcom/a660_gmu.bin",
+            ]),
+        );
+        assert_eq!(
+            set,
+            [
+                "6.17.1/dtb/qcom/sc8280xp-crd.dtb".to_string(),
+                "6.17.1/dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb".to_string(),
+            ]
+            .into()
+        );
+
+        // A later layer removes one DTB and adds another kernel's.
+        apply_dtb_listing(
+            &mut set,
+            &names(&[
+                "usr/lib/modules/6.17.1/dtb/qcom/.wh.sc8280xp-crd.dtb",
+                "usr/lib/modules/6.16.0/dtb/rockchip/rk3399-pinephone-pro.dtb",
+            ]),
+        );
+        assert_eq!(
+            set,
+            [
+                "6.16.0/dtb/rockchip/rk3399-pinephone-pro.dtb".to_string(),
+                "6.17.1/dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb".to_string(),
+            ]
+            .into()
+        );
+
+        // An opaque directory takes everything below it.
+        apply_dtb_listing(
+            &mut set,
+            &names(&["usr/lib/modules/6.17.1/dtb/.wh..wh..opq"]),
+        );
+        assert_eq!(
+            set,
+            ["6.16.0/dtb/rockchip/rk3399-pinephone-pro.dtb".to_string()].into()
+        );
+    }
+
+    #[test]
+    fn dtb_names_match_the_board_they_are_built_for() {
+        let cases: &[(&str, &str, bool)] = &[
+            (
+                "dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb",
+                "lenovo,thinkpad-x13s",
+                true,
+            ),
+            (
+                "sc8280xp-lenovo-thinkpad-x13s.dtb",
+                "LENOVO,ThinkPad-X13s",
+                true,
+            ),
+            // Some boards' DTBs leave the vendor out of the file name.
+            (
+                "dtbs/rockchip/rk3399-pinephone-pro.dtb",
+                "pine64,pinephone-pro",
+                true,
+            ),
+            ("qcom/sc8280xp.dtb", "qcom,sc8280xp", true),
+            ("qcom/sc8280xp-crd.dtb", "lenovo,thinkpad-x13s", false),
+            // The SoC compatible must not pass another board's DTB off as
+            // this board's.
+            ("qcom/sc8280xp-crd.dtb", "qcom,sc8280xp", false),
+            // Only whole dash-separated names count.
+            (
+                "qcom/sc8280xp-lenovo-thinkpad-x13s-aux.dtb",
+                "lenovo,thinkpad-x13s",
+                false,
+            ),
+            ("devicetree", "lenovo,thinkpad-x13s", false),
+        ];
+        for (dtb, compat, want) in cases {
+            assert_eq!(
+                dtb_matches_compatible(dtb, compat),
+                *want,
+                "{dtb} vs {compat}"
+            );
+        }
+    }
+
+    #[test]
+    fn devicetree_host_without_a_dtb_for_its_own_board_is_blocking() {
+        let host = HostHardware {
+            devicetree_compatible: vec!["pine64,pinephone-pro".into(), "rockchip,rk3399".into()],
+            boots_with_devicetree: true,
+            ..Default::default()
+        };
+        let mut target = target();
+        target.has_devicetree = true;
+        target.dtbs = [
+            "dtb/qcom/sc8280xp-crd.dtb".to_string(),
+            "dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb".to_string(),
+        ]
+        .into();
+        let report = assess(&host, &target);
+        let blocking = report
+            .blocking()
+            .next()
+            .expect("a DT host with no DTB for its board must be refused");
+        assert_eq!(blocking.subject, "devicetree");
+        assert!(
+            blocking.detail.contains("pine64,pinephone-pro"),
+            "{}",
+            blocking.detail
+        );
+
+        // Read from a partial inventory, the same absence proves nothing.
+        target.layers_skipped = 1;
+        assert!(!assess(&host, &target).has_blocking());
+
+        // The board's own DTB, below the vendor directory the kernel nests
+        // them in, clears the finding.
+        target.layers_skipped = 0;
+        target
+            .dtbs
+            .insert("dtb/rockchip/rk3399-pinephone-pro.dtb".to_string());
+        assert!(!assess(&host, &target).has_blocking());
+    }
+
+    /// A kernel that ships a single `devicetree` file names no board, so
+    /// there is nothing to match the host against — and nothing to refuse.
+    #[test]
+    fn single_devicetree_file_target_is_not_matched_per_board() {
+        let host = HostHardware {
+            devicetree_compatible: vec!["lenovo,thinkpad-x13s".into()],
+            boots_with_devicetree: true,
+            ..Default::default()
+        };
+        let mut target = target();
+        target.has_devicetree = true;
+        target.dtbs = ["devicetree".to_string()].into();
+        assert!(assess(&host, &target).findings.is_empty());
+    }
+
+    /// An unreadable board identity is not a pass: the check could not be
+    /// made, and says so.
+    #[test]
+    fn devicetree_host_with_unknown_board_warns_instead_of_passing() {
+        let host = HostHardware {
+            boots_with_devicetree: true,
+            ..Default::default()
+        };
+        let mut target = target();
+        target.has_devicetree = true;
+        target.dtbs = ["dtb/qcom/sc8280xp-crd.dtb".to_string()].into();
+        let report = assess(&host, &target);
+        assert!(!report.has_blocking());
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.subject == "devicetree")
+            .expect("an unreadable board identity must still be reported");
+        assert_eq!(finding.severity, Severity::Warning);
     }
 }

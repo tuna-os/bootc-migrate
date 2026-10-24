@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::boot_cleanup::live::{NvramSnapshot, snapshot_from_output};
 
 /// Persistent state for a package-host rollback, kept on the old root's `/var`.
 pub const STATE_DIR: &str = "/var/lib/bootc-rebase/package-rollback";
@@ -30,6 +32,8 @@ pub const ROLLBACK_DIR: &str = "bootc-migrate-rollback";
 pub const ROLLBACK_ENTRY: &str = "bootc-migrate-rollback.conf";
 /// The stem used by GRUB's `saved_entry` and systemd-boot's `set-default`.
 pub const ROLLBACK_ENTRY_ID: &str = "bootc-migrate-rollback";
+/// Schema of the snapshot JSON this build writes and understands.
+pub const SNAPSHOT_SCHEMA: u32 = 1;
 
 /// Whether the source entry came from BLS or a legacy GRUB configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +334,15 @@ fn modified_unix_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Capture time for the NVRAM snapshot; 0 on a clock set before the epoch,
+/// which only makes the stamp useless, never the snapshot.
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn valid_entry(boot_root: &Path, mut entry: BootEntry) -> Option<BootEntry> {
     if source_boot_file(boot_root, &entry.linux).is_err()
         || entry
@@ -515,7 +528,6 @@ pub struct PackageRollbackSnapshot {
     pub schema_version: u32,
     pub source_format: BootEntryFormat,
     pub source: SourceIdentity,
-    pub source_title: String,
     pub version: String,
     pub options: String,
     pub linux: SnapshotArtifact,
@@ -525,6 +537,12 @@ pub struct PackageRollbackSnapshot {
     /// BLS/GRUB paths on some hosts include `/boot`; retain that spelling when
     /// rendering the staged entry because the bootloader root differs by layout.
     pub uses_boot_prefix: bool,
+    /// NVRAM as it was before the install: `undo` restores the `BootOrder`
+    /// the firmware had, because re-pointing the loader default alone
+    /// leaves the install's own entry first and the old chain unreachable
+    /// (#461). `None` when `efibootmgr` could not be read.
+    #[serde(default)]
+    pub nvram: Option<NvramSnapshot>,
 }
 
 impl PackageRollbackSnapshot {
@@ -633,12 +651,15 @@ fn uses_boot_prefix(path: &str) -> bool {
     path == "boot" || path.starts_with("boot/")
 }
 
-/// Snapshot the source package host's newest usable kernel/initramfs pair.
+/// Snapshot the source package host's newest usable kernel/initramfs pair,
+/// plus the NVRAM state `undo` has to put back. `nvram` is `efibootmgr -v`
+/// output read before the install touched the firmware.
 pub fn snapshot_source_boot(
     boot_root: &Path,
     state_dir: &Path,
     source: SourceIdentity,
     cmdline: &str,
+    nvram: Option<&str>,
 ) -> Result<PackageRollbackSnapshot> {
     if state_dir.exists() {
         bail!(
@@ -665,10 +686,9 @@ pub fn snapshot_source_boot(
         });
 
     let snapshot = PackageRollbackSnapshot {
-        schema_version: 1,
+        schema_version: SNAPSHOT_SCHEMA,
         source_format: discovered.format,
         source,
-        source_title: discovered.entry.title,
         version: discovered.entry.version,
         options,
         linux: SnapshotArtifact {
@@ -687,6 +707,7 @@ pub fn snapshot_source_boot(
             .collect(),
         devicetree: devicetree_artifact,
         uses_boot_prefix: uses_boot_prefix(&discovered.entry.linux),
+        nvram: nvram.map(|text| snapshot_from_output(text, now_unix_secs())),
     };
 
     fs::create_dir_all(
@@ -715,13 +736,25 @@ pub fn snapshot_source_boot(
     Ok(snapshot)
 }
 
-/// Read a previously saved package-host rollback snapshot.
+/// Read a previously saved package-host rollback snapshot. A snapshot from
+/// a newer schema is refused rather than half-understood: `undo` acts on a
+/// boot chain, and silently ignoring fields it cannot read is how it would
+/// restore the wrong one.
 pub fn read_snapshot(state_dir: &Path) -> Result<PackageRollbackSnapshot> {
     let path = state_dir.join(SNAPSHOT_FILE);
     let content = fs::read_to_string(&path)
         .with_context(|| format!("reading package rollback snapshot {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("parsing package rollback snapshot {}", path.display()))
+    let snapshot: PackageRollbackSnapshot = serde_json::from_str(&content)
+        .with_context(|| format!("parsing package rollback snapshot {}", path.display()))?;
+    if snapshot.schema_version > SNAPSHOT_SCHEMA {
+        bail!(
+            "package rollback snapshot {} has schema version {} but this build understands \
+             version {SNAPSHOT_SCHEMA}; roll back with the bootc-rebase that wrote it",
+            path.display(),
+            snapshot.schema_version
+        );
+    }
+    Ok(snapshot)
 }
 
 /// Result of staging the rollback artifacts.
@@ -834,6 +867,16 @@ pub fn default_command(bootloader: Bootloader, setter: &str) -> Vec<String> {
     }
 }
 
+/// Build the command that puts a saved `BootOrder` back. Separate from
+/// running it so the restore is testable without NVRAM.
+pub fn boot_order_command(boot_order: &str) -> Vec<String> {
+    vec![
+        "efibootmgr".to_string(),
+        "--bootorder".to_string(),
+        boot_order.to_string(),
+    ]
+}
+
 fn command_exists(command: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(command).is_file()))
@@ -868,9 +911,10 @@ fn rollback_entry_exists(boot_root: &Path) -> bool {
 }
 
 /// Make the package-host rollback entry the default without deleting the new
-/// bootc deployment. With `reboot`, the next boot immediately enters it.
+/// bootc deployment, and put the firmware boot order back the way the
+/// install found it. With `reboot`, the next boot immediately enters it.
 pub fn run_undo(state_dir: &Path, boot_root: &Path, dry_run: bool, reboot: bool) -> Result<()> {
-    let _snapshot = read_snapshot(state_dir)?;
+    let snapshot = read_snapshot(state_dir)?;
     if !rollback_entry_exists(boot_root) {
         bail!(
             "package rollback entry is missing below {}; re-run the migration or restore the saved entry",
@@ -906,6 +950,31 @@ pub fn run_undo(state_dir: &Path, boot_root: &Path, dry_run: bool, reboot: bool)
         println!(
             "Package-host rollback entry is now the default; the bootc deployment was not removed."
         );
+    }
+
+    // The loader default alone is only half the chain: the install put its
+    // own firmware entry first, so without the saved order the firmware
+    // still starts the new deployment's loader and never shows the
+    // rollback entry (#461).
+    match snapshot
+        .nvram
+        .as_ref()
+        .and_then(|n| n.boot_order.as_deref())
+    {
+        Some(order) => {
+            let command = boot_order_command(order);
+            if dry_run {
+                println!("[DRY RUN] Would execute: {}", command.join(" "));
+            } else {
+                run_command(&command, "restoring the pre-install BootOrder")?;
+                println!("Pre-install BootOrder restored ({order}).");
+            }
+        }
+        None => eprintln!(
+            "Warning: the rollback snapshot has no pre-install BootOrder, so the firmware \
+             order is left as the install set it; if the next boot does not offer the \
+             package system, pick its entry in the firmware boot menu."
+        ),
     }
 
     if reboot {
@@ -987,10 +1056,9 @@ mod tests {
     #[test]
     fn renderers_keep_devicetree_and_old_cmdline() {
         let snapshot = PackageRollbackSnapshot {
-            schema_version: 1,
+            schema_version: SNAPSHOT_SCHEMA,
             source_format: BootEntryFormat::Bls,
             source: source(),
-            source_title: "postmarketOS".into(),
             version: "6.12".into(),
             options: "arm64.nopauth clk_ignore_unused rw".into(),
             linux: SnapshotArtifact {
@@ -1006,6 +1074,7 @@ mod tests {
                 stored_name: "dtb-sc8280xp.dtb".into(),
             }),
             uses_boot_prefix: false,
+            nvram: None,
         };
         let bls = snapshot.render_bls_entry();
         assert!(bls.contains("title Previous system (postmarketOS edge)"));
@@ -1040,6 +1109,7 @@ mod tests {
             &state,
             source(),
             "arm64.nopauth clk_ignore_unused rw",
+            None,
         )
         .unwrap();
         fs::remove_dir_all(&boot).unwrap();
@@ -1058,15 +1128,113 @@ mod tests {
         assert!(boot.join("loader/entries").join(ROLLBACK_ENTRY).is_file());
     }
 
+    /// A staged entry the undo command cannot name is a rollback that
+    /// silently does nothing: systemd-boot is given the BLS *filename*,
+    /// GRUB the menuentry's `--id`, so both are taken from the artifact
+    /// `stage_rollback` actually wrote rather than restated here.
     #[test]
-    fn undo_command_shapes_do_not_remove_the_new_deployment() {
+    fn staged_entry_id_is_the_one_undo_selects() {
+        let root = tempdir().unwrap();
+        let boot = root.path().join("boot");
+        fs::create_dir_all(boot.join("loader/entries")).unwrap();
+        fs::write(boot.join("vmlinuz"), "kernel").unwrap();
+        fs::write(boot.join("initramfs"), "initrd").unwrap();
+        fs::write(
+            boot.join("loader/entries/pmos.conf"),
+            "title postmarketOS\nversion 6.12\nlinux /vmlinuz\ninitrd /initramfs\noptions rw\n",
+        )
+        .unwrap();
+        let state = root.path().join("var/lib/rollback");
+        snapshot_source_boot(&boot, &state, source(), "rw", None).unwrap();
+
+        let bls_boot = root.path().join("target-bls");
+        fs::create_dir_all(bls_boot.join("loader/entries")).unwrap();
+        let staged = stage_rollback(&state, &bls_boot, true).unwrap();
+        let staged_name = staged
+            .entry_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+        assert_eq!(detect_bootloader(&bls_boot), Some(Bootloader::SystemdBoot));
         assert_eq!(
-            default_command(Bootloader::SystemdBoot, "bootctl"),
-            ["bootctl", "set-default", ROLLBACK_ENTRY]
+            default_command(Bootloader::SystemdBoot, "bootctl").last(),
+            Some(&staged_name)
         );
+        assert!(rollback_entry_exists(&bls_boot));
+
+        let grub_boot = root.path().join("target-grub");
+        fs::create_dir_all(&grub_boot).unwrap();
+        let staged = stage_rollback(&state, &grub_boot, false).unwrap();
+        let menuentry = fs::read_to_string(&staged.entry_path).unwrap();
+        let staged_id = menuentry
+            .split("--id ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        assert_eq!(detect_bootloader(&grub_boot), Some(Bootloader::Grub));
         assert_eq!(
-            default_command(Bootloader::Grub, "grub2-set-default"),
-            ["grub2-set-default", ROLLBACK_ENTRY_ID]
+            default_command(Bootloader::Grub, "grub2-set-default").last(),
+            Some(&staged_id)
         );
+        assert!(rollback_entry_exists(&grub_boot));
+    }
+
+    /// `undo` restores the firmware order the install replaced, so the
+    /// order has to survive the snapshot JSON and reach the command.
+    #[test]
+    fn pre_install_boot_order_survives_the_snapshot() {
+        const EFIBOOTMGR_V: &str = "BootCurrent: 0002\n\
+            Timeout: 1 seconds\n\
+            BootOrder: 0002,0000,0001\n\
+            Boot0000* Fedora\tHD(1,GPT,abc)/File(\\EFI\\fedora\\shimx64.efi)\n\
+            Boot0002* Linux Boot Manager\tHD(1,GPT,abc)/File(\\EFI\\systemd\\systemd-bootx64.efi)\n";
+        let root = tempdir().unwrap();
+        let boot = root.path().join("boot");
+        fs::create_dir_all(boot.join("loader/entries")).unwrap();
+        fs::write(boot.join("vmlinuz"), "kernel").unwrap();
+        fs::write(boot.join("initramfs"), "initrd").unwrap();
+        fs::write(
+            boot.join("loader/entries/pmos.conf"),
+            "title postmarketOS\nversion 6.12\nlinux /vmlinuz\ninitrd /initramfs\noptions rw\n",
+        )
+        .unwrap();
+
+        let state = root.path().join("var/lib/rollback");
+        snapshot_source_boot(&boot, &state, source(), "rw", Some(EFIBOOTMGR_V)).unwrap();
+        let nvram = read_snapshot(&state).unwrap().nvram.unwrap();
+        assert_eq!(nvram.boot_order.as_deref(), Some("0002,0000,0001"));
+        assert_eq!(nvram.boot_current.as_deref(), Some("0002"));
+        assert_eq!(
+            boot_order_command(nvram.boot_order.as_deref().unwrap()),
+            ["efibootmgr", "--bootorder", "0002,0000,0001"]
+        );
+
+        // A host whose NVRAM could not be read still gets a rollback entry;
+        // it just has no order to put back.
+        let without = root.path().join("var/lib/rollback-no-nvram");
+        snapshot_source_boot(&boot, &without, source(), "rw", None).unwrap();
+        assert!(read_snapshot(&without).unwrap().nvram.is_none());
+    }
+
+    /// A snapshot from a newer build describes a boot chain this one cannot
+    /// fully read; acting on it would restore the wrong thing.
+    #[test]
+    fn newer_snapshot_schema_is_refused() {
+        let root = tempdir().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        let newer = format!(
+            "{{\"schema_version\":{},\"source_format\":\"bls\",\"source\":{{\"id\":\"x\",\
+             \"version_id\":\"1\",\"name\":\"X\",\"pretty_name\":\"X 1\"}},\"version\":\"6\",\
+             \"options\":\"rw\",\"linux\":{{\"original_path\":\"/vmlinuz\",\
+             \"stored_name\":\"kernel-vmlinuz\"}},\"initrds\":[],\"uses_boot_prefix\":false}}",
+            SNAPSHOT_SCHEMA + 1
+        );
+        fs::write(state.join(SNAPSHOT_FILE), newer).unwrap();
+        let err = format!("{:#}", read_snapshot(&state).unwrap_err());
+        assert!(err.contains("schema version"), "{err}");
+        assert!(err.contains(&(SNAPSHOT_SCHEMA + 1).to_string()), "{err}");
     }
 }

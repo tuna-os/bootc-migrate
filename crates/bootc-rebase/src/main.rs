@@ -44,7 +44,9 @@ enum Commands {
     /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
     Rollback(RollbackArgs),
     /// Make the previous package-host system the default without removing the
-    /// new bootc deployment (issue #374, #461).
+    /// new bootc deployment: re-points the bootloader default at the saved
+    /// "Previous system" entry and restores the pre-install BootOrder
+    /// (issue #374, #461).
     Undo(UndoArgs),
     /// GRUB2 -> systemd-boot bootloader migration (issue #65). Stages a
     /// one-boot `BootNext` trial while preserving the existing BootOrder;

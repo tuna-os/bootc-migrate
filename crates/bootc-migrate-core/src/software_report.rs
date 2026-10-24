@@ -818,7 +818,6 @@ pub fn parse_apk_installed(content: &str) -> Vec<InstalledPackage> {
     if let Some(pkg) = current_package {
         packages.push(pkg);
     }
-    packages.sort_by(|a, b| a.name.cmp(&b.name));
     packages
 }
 
@@ -1370,6 +1369,51 @@ mod tests {
         assert_eq!(
             pacman_files("%FILES%\nusr/bin/tool\nusr/share/doc/tool/\n\n"),
             ["/usr/bin/tool"]
+        );
+        // apk records are blank-line separated; `F:` sets the directory that
+        // the `R:` names below it belong to, and the caller sorts, so the
+        // parser keeps the database order.
+        assert_eq!(
+            parse_apk_installed(
+                "C:Q1x\nP:zlib\nV:1.3.1-r0\nF:usr/lib\nR:libz.so.1\n\nP:alpine-base\nF:/etc\nR:motd\nF:sbin\nR:init\n"
+            ),
+            [
+                package("zlib", &["/usr/lib/libz.so.1"]),
+                package("alpine-base", &["/etc/motd", "/sbin/init"]),
+            ]
+        );
+        // A record whose files precede any `F:` line lands at the root.
+        assert_eq!(
+            parse_apk_installed("P:root-file\nR:bootstrap\n"),
+            [package("root-file", &["/bootstrap"])]
+        );
+    }
+
+    #[test]
+    fn apk_database_prefers_lib_over_var_lib() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_apk_packages(root.path()).unwrap().is_empty());
+
+        fs::create_dir_all(root.path().join("var/lib/apk/db")).unwrap();
+        fs::write(
+            root.path().join("var/lib/apk/db/installed"),
+            "P:fallback\nF:usr/bin\nR:fallback\n\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_apk_packages(root.path()).unwrap(),
+            [package("fallback", &["/usr/bin/fallback"])]
+        );
+
+        fs::create_dir_all(root.path().join("lib/apk/db")).unwrap();
+        fs::write(
+            root.path().join("lib/apk/db/installed"),
+            "P:preferred\nF:usr/bin\nR:preferred\n\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_apk_packages(root.path()).unwrap(),
+            [package("preferred", &["/usr/bin/preferred"])]
         );
     }
 

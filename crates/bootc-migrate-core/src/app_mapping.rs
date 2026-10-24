@@ -114,6 +114,7 @@ impl ApplicationCatalog {
         let mut rpm = HashSet::new();
         let mut deb = HashSet::new();
         let mut pacman = HashSet::new();
+        let mut apk = HashSet::new();
         for app in &self.applications {
             if app.id.is_empty()
                 || !app
@@ -137,6 +138,7 @@ impl ApplicationCatalog {
                 && app.matches.rpm.is_empty()
                 && app.matches.deb.is_empty()
                 && app.matches.pacman.is_empty()
+                && app.matches.apk.is_empty()
             {
                 return Err(format!("application `{}` has no match aliases", app.id));
             }
@@ -150,6 +152,7 @@ impl ApplicationCatalog {
             validate_aliases("rpm", &app.id, &app.matches.rpm, &mut rpm, false)?;
             validate_aliases("deb", &app.id, &app.matches.deb, &mut deb, false)?;
             validate_aliases("pacman", &app.id, &app.matches.pacman, &mut pacman, false)?;
+            validate_aliases("apk", &app.id, &app.matches.apk, &mut apk, false)?;
         }
         Ok(())
     }
@@ -282,6 +285,16 @@ mod tests {
                 "has no match aliases",
             ),
             (
+                "duplicate apk alias",
+                r#"{"version":1,"applications":[{"id":"a","flatpak":"org.example.A","portability":"none","note":"x","match":{"windowsDisplayName":[],"rpm":[],"deb":[],"pacman":[],"apk":["same"]}},{"id":"b","flatpak":"org.example.B","portability":"none","note":"x","match":{"windowsDisplayName":[],"rpm":[],"deb":[],"pacman":[],"apk":["same"]}}]}"#,
+                "duplicate apk alias",
+            ),
+            (
+                "untrimmed apk alias",
+                r#"{"version":1,"applications":[{"id":"a","flatpak":"org.example.A","portability":"none","note":"x","match":{"windowsDisplayName":[],"rpm":[],"deb":[],"pacman":[],"apk":[" firefox"]}}]}"#,
+                "invalid or duplicate apk alias",
+            ),
+            (
                 "unknown field",
                 r#"{"version":1,"extra":true,"applications":[]}"#,
                 "unknown field",
@@ -290,5 +303,26 @@ mod tests {
             let error = ApplicationCatalog::parse(raw).unwrap_err();
             assert!(error.contains(needle), "{label}: {error}");
         }
+    }
+
+    #[test]
+    fn apk_aliases_make_an_application_matchable() {
+        let catalog = ApplicationCatalog::parse(
+            r#"{
+              "version": 1,
+              "applications": [
+                {"id":"firefox","flatpak":"org.mozilla.firefox","portability":"signin","note":"Profile moves.",
+                 "match":{"windowsDisplayName":[],"rpm":[],"deb":[],"pacman":[],"apk":["firefox","firefox-esr"]}}
+              ]
+            }"#,
+        )
+        .expect("an apk-only application is matchable");
+        assert_eq!(
+            catalog
+                .find_package(PackageDb::Apk, "firefox-esr")
+                .map(|app| app.id.as_str()),
+            Some("firefox")
+        );
+        assert!(catalog.find_package(PackageDb::Pacman, "firefox").is_none());
     }
 }

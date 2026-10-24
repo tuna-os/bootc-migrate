@@ -436,6 +436,8 @@ const PROBE_PATHS: &[&str] = &[
     "usr/share/xsessions",
     "usr/share/wayland-sessions",
     "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+    "usr/lib/systemd/boot/efi/systemd-bootaa64.efi",
+    "usr/lib/systemd/boot/efi/systemd-bootia32.efi",
     "usr/bin/bootc",
     "usr/lib/bootc",
     "usr/bin/bootupctl",
@@ -469,6 +471,10 @@ const PROBE_PATHS: &[&str] = &[
 
 /// The kernel inventory files ([`crate::hardware::TargetKernel`]'s sources)
 /// among one layer's member names.
+///
+/// DTBs are deliberately absent: an arm64 kernel ships ~1500 of them
+/// (~70 MB) and only their names are ever read, so they are collected from
+/// the layer listing instead ([`crate::hardware::apply_dtb_listing`]).
 fn kernel_inventory_paths(names: &[String]) -> Vec<String> {
     const FILES: &[&str] = &[
         "modules.dep",
@@ -482,24 +488,21 @@ fn kernel_inventory_paths(names: &[String]) -> Vec<String> {
         .filter(|n| {
             n.strip_prefix("usr/lib/modules/")
                 .and_then(|rest| rest.split_once('/'))
-                .is_some_and(|(kver, file)| {
-                    !kver.is_empty()
-                        && (FILES.contains(&file)
-                            || file.ends_with(".dtb")
-                            || file.starts_with("dtb/")
-                            || file.starts_with("dtbs/"))
-                })
+                .is_some_and(|(kver, file)| !kver.is_empty() && FILES.contains(&file))
         })
         .cloned()
         .collect()
 }
 
-/// Build the target kernel inventory from the extracted `modules.*` files.
+/// Build the target kernel inventory from the extracted `modules.*` files
+/// and `dtb_names`, the `<kver>/<path>` DTB names the layer listings carried
+/// ([`crate::hardware::apply_dtb_listing`]); no DTB blob is extracted.
 /// The newest kernel with a `modules.dep` wins (images normally ship one).
 /// `None` when the image ships no kernel modules at all.
 fn read_target_kernel(
     root: &Path,
     firmware: std::collections::BTreeSet<String>,
+    dtb_names: &std::collections::BTreeSet<String>,
 ) -> Option<crate::hardware::TargetKernel> {
     let modules_dir = root.join("usr/lib/modules");
     let mut kvers: Vec<String> = fs::read_dir(&modules_dir)
@@ -516,26 +519,18 @@ fn read_target_kernel(
     aliases.extend(crate::hardware::parse_module_aliases(&read(
         "modules.builtin.alias",
     )));
-    let mut dtbs = std::collections::BTreeSet::new();
+    // The listing covers every kernel in the image; keep this one's DTBs,
+    // named relative to its module directory (`dtb/qcom/<board>.dtb`).
+    let kver_prefix = format!("{kver}/");
+    let mut dtbs: std::collections::BTreeSet<String> = dtb_names
+        .iter()
+        .filter_map(|n| n.strip_prefix(&kver_prefix))
+        .map(str::to_string)
+        .collect();
     let devicetree_symlink = dir.join("devicetree");
     let has_devicetree_file = devicetree_symlink.exists();
     if has_devicetree_file {
         dtbs.insert("devicetree".to_string());
-    }
-    for sub in ["", "dtb", "dtbs"] {
-        let sub_dir = if sub.is_empty() {
-            dir.clone()
-        } else {
-            dir.join(sub)
-        };
-        if let Ok(entries) = fs::read_dir(&sub_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".dtb") {
-                    dtbs.insert(name);
-                }
-            }
-        }
     }
     let has_devicetree = has_devicetree_file || !dtbs.is_empty();
     Some(crate::hardware::TargetKernel {
@@ -550,14 +545,41 @@ fn read_target_kernel(
     })
 }
 
+/// EFI payload architecture suffixes. An aarch64 image ships
+/// `systemd-bootaa64.efi`, `shimaa64.efi` and `bootaa64.efi`; matching only
+/// the x86_64 spelling left the Secure Boot preflight (#386) with nothing to
+/// inspect on the arm64 targets of #461.
+const EFI_ARCH_SUFFIXES: &[&str] = &["x64", "aa64", "ia32"];
+
+/// The systemd-boot payloads the image ships: the archive-relative path of
+/// each, paired with its path under `root`.
+fn systemd_boot_payloads(root: &Path) -> Vec<(String, PathBuf)> {
+    EFI_ARCH_SUFFIXES
+        .iter()
+        .map(|arch| {
+            let logical = format!("usr/lib/systemd/boot/efi/systemd-boot{arch}.efi");
+            let path = root.join(&logical);
+            (logical, path)
+        })
+        .filter(|(_, path)| path.is_file())
+        .collect()
+}
+
+/// Whether `name` (lowercased) is `<stem><arch>.efi` for an EFI architecture:
+/// `shimx64.efi`, `shimaa64.efi`, `bootia32.efi`.
+fn is_efi_payload(name: &str, stem: &str) -> bool {
+    name.strip_prefix(stem)
+        .and_then(|rest| rest.strip_suffix(".efi"))
+        .is_some_and(|arch| EFI_ARCH_SUFFIXES.contains(&arch))
+}
+
 fn collect_target_bootloaders(root: &Path) -> Vec<TargetBootloader> {
     let mut loaders = Vec::new();
 
-    let systemd_path = root.join("usr/lib/systemd/boot/efi/systemd-bootx64.efi");
-    if systemd_path.is_file() {
+    for (logical, path) in systemd_boot_payloads(root) {
         loaders.push(inspect_target_bootloader(
-            &systemd_path,
-            "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+            &path,
+            &logical,
             TargetBootloaderKind::SystemdBoot,
         ));
     }
@@ -571,7 +593,7 @@ fn collect_target_bootloaders(root: &Path) -> Vec<TargetBootloader> {
             continue;
         };
         let lower = name.to_ascii_lowercase();
-        if lower != "shimx64.efi" && lower != "bootx64.efi" {
+        if !is_efi_payload(&lower, "shim") && !is_efi_payload(&lower, "boot") {
             continue;
         }
         let logical = path
@@ -627,15 +649,17 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .tempdir_in(LAYER_SCRATCH_DIR)
         .context("failed to create /var/tmp scratch dir for registry scan")?;
     let mut firmware = std::collections::BTreeSet::new();
+    let mut dtbs = std::collections::BTreeSet::new();
     let skipped =
         extract_paths_into_dir_with(image_ref, PROBE_PATHS, scratch.path(), &mut |listing| {
             let names = listing_names(listing);
             crate::hardware::apply_firmware_listing(&mut firmware, &names);
+            crate::hardware::apply_dtb_listing(&mut dtbs, &names);
             kernel_inventory_paths(&names)
         })?;
 
     let mut probe = crate::scan::ProbeFiles {
-        kernel: read_target_kernel(scratch.path(), firmware).map(|k| {
+        kernel: read_target_kernel(scratch.path(), firmware, &dtbs).map(|k| {
             crate::hardware::TargetKernel {
                 layers_skipped: skipped,
                 ..k
@@ -690,10 +714,7 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
     }
     probe.session_files = sessions;
 
-    probe.has_systemd_boot_payload = scratch
-        .path()
-        .join("usr/lib/systemd/boot/efi/systemd-bootx64.efi")
-        .exists();
+    probe.has_systemd_boot_payload = !systemd_boot_payloads(scratch.path()).is_empty();
     probe.target_bootloaders = collect_target_bootloaders(scratch.path());
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
@@ -1393,7 +1414,13 @@ garbage
             "usr/lib/modules/6.17.1/modules.alias",
             "usr/lib/modules/6.17.1/modules.builtin.alias",
             "usr/lib/modules/6.17.1/modules.builtin",
+            "usr/lib/modules/6.17.1/devicetree",
             "usr/lib/modules/6.17.1/kernel/fs/xfs/xfs.ko.xz",
+            // An arm64 kernel ships ~1500 of these, nested per vendor, and
+            // only their names are read: extracting them is pure cost.
+            "usr/lib/modules/6.17.1/dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb",
+            "usr/lib/modules/6.17.1/dtbs/rockchip/rk3399-pinephone-pro.dtb",
+            "usr/lib/modules/6.17.1/sc8280xp.dtb",
             "usr/lib/modules//modules.dep",
             "usr/lib/firmware/modules.dep",
         ]
@@ -1407,6 +1434,7 @@ garbage
                 "usr/lib/modules/6.17.1/modules.alias",
                 "usr/lib/modules/6.17.1/modules.builtin.alias",
                 "usr/lib/modules/6.17.1/modules.builtin",
+                "usr/lib/modules/6.17.1/devicetree",
             ]
         );
     }
@@ -1416,7 +1444,10 @@ garbage
         let root = tempfile::tempdir().unwrap();
         // No modules at all: no inventory, which the hardware check reports
         // as "could not check", never as a pass.
-        assert_eq!(read_target_kernel(root.path(), Default::default()), None);
+        assert_eq!(
+            read_target_kernel(root.path(), Default::default(), &Default::default()),
+            None
+        );
 
         let old = root.path().join("usr/lib/modules/6.16.0");
         let new = root.path().join("usr/lib/modules/6.17.1");
@@ -1448,7 +1479,7 @@ garbage
         )
         .unwrap();
         let fw: std::collections::BTreeSet<String> = ["iwlwifi-cc-a0-77.ucode".to_string()].into();
-        let k = read_target_kernel(root.path(), fw.clone()).unwrap();
+        let k = read_target_kernel(root.path(), fw.clone(), &Default::default()).unwrap();
         assert_eq!(k.kver, "6.17.1");
         assert!(
             k.modules.contains("iwlwifi") && k.modules.len() == 1,
@@ -1458,6 +1489,96 @@ garbage
         assert!(k.builtin.contains("hid_generic"));
         assert_eq!(k.aliases.len(), 2);
         assert_eq!(k.firmware, fw);
+    }
+
+    /// The real shape of an arm64 target: the DTB lives three directories
+    /// below the module directory and is never extracted, so the inventory
+    /// has to come from the layer listing alone (#461).
+    #[test]
+    fn nested_dtbs_are_discovered_from_the_layer_listing() {
+        let listing = "\
+-rw-r--r-- root/root  1048576 2026-09-01 00:00 ./usr/lib/modules/6.17.1/modules.dep
+-rw-r--r-- root/root    71680 2026-09-01 00:00 usr/lib/modules/6.17.1/dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb
+-rw-r--r-- root/root    71680 2026-09-01 00:00 usr/lib/modules/6.16.0/dtb/qcom/sc8280xp-crd.dtb
+-rw-r--r-- root/root   123456 2026-09-01 00:00 usr/lib/modules/6.17.1/kernel/fs/xfs/xfs.ko.xz
+";
+        let names = listing_names(listing);
+        assert!(
+            !kernel_inventory_paths(&names)
+                .iter()
+                .any(|p| p.ends_with(".dtb")),
+            "no DTB blob may be extracted"
+        );
+        let mut dtb_names = std::collections::BTreeSet::new();
+        crate::hardware::apply_dtb_listing(&mut dtb_names, &names);
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("usr/lib/modules/6.17.1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("modules.dep"), "kernel/fs/xfs/xfs.ko.xz:\n").unwrap();
+        let k = read_target_kernel(root.path(), Default::default(), &dtb_names).unwrap();
+        assert!(k.has_devicetree);
+        // Only this kernel's DTBs, named below its own module directory.
+        assert_eq!(
+            k.dtbs,
+            ["dtb/qcom/sc8280xp-lenovo-thinkpad-x13s.dtb".to_string()].into()
+        );
+    }
+
+    /// #386's Secure Boot preflight inspects the loaders collected here; on
+    /// an aarch64 image they are the `aa64` payloads, and matching only the
+    /// `x64` names left it with nothing to inspect.
+    #[test]
+    fn bootloaders_are_collected_for_every_efi_architecture() {
+        let root = tempfile::tempdir().unwrap();
+        let efi = root.path().join("usr/lib/systemd/boot/efi");
+        let updates = root.path().join("usr/lib/bootupd/updates/EFI/postmarketos");
+        fs::create_dir_all(&efi).unwrap();
+        fs::create_dir_all(&updates).unwrap();
+        fs::write(efi.join("systemd-bootaa64.efi"), b"not a PE image").unwrap();
+        for name in ["shimaa64.efi", "BOOTAA64.EFI", "grubaa64.efi", "mmaa64.efi"] {
+            fs::write(updates.join(name), b"not a PE image").unwrap();
+        }
+
+        let loaders = collect_target_bootloaders(root.path());
+        let found: Vec<(TargetBootloaderKind, &str)> =
+            loaders.iter().map(|l| (l.kind, l.path.as_str())).collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    TargetBootloaderKind::SystemdBoot,
+                    "usr/lib/systemd/boot/efi/systemd-bootaa64.efi"
+                ),
+                (
+                    TargetBootloaderKind::Shim,
+                    "usr/lib/bootupd/updates/EFI/postmarketos/BOOTAA64.EFI"
+                ),
+                (
+                    TargetBootloaderKind::Shim,
+                    "usr/lib/bootupd/updates/EFI/postmarketos/shimaa64.efi"
+                ),
+            ],
+            "second-stage loaders (grub, MokManager) are not firmware-launched"
+        );
+        assert!(!systemd_boot_payloads(root.path()).is_empty());
+    }
+
+    #[test]
+    fn efi_payload_names_match_only_known_architectures() {
+        for name in ["shimx64.efi", "shimaa64.efi", "shimia32.efi"] {
+            assert!(is_efi_payload(name, "shim"), "{name}");
+        }
+        for name in [
+            "shim.efi",
+            "shimriscv64.efi",
+            "shimx64.efi.signed",
+            "shimx64",
+        ] {
+            assert!(!is_efi_payload(name, "shim"), "{name}");
+        }
+        assert!(is_efi_payload("bootaa64.efi", "boot"));
+        assert!(!is_efi_payload("bootaa64.efi", "shim"));
     }
 
     #[test]
