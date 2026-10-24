@@ -212,6 +212,7 @@ dependencies = [
  "tempfile",
  "tini",
  "tokio",
+ "zstd 0.14.2",
 ]
 
 [[package]]

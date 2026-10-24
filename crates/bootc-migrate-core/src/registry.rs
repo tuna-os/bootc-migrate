@@ -309,6 +309,38 @@ pub fn extract_paths_into_dir_with(
     Ok(skipped)
 }
 
+/// The zstd frame magic number (RFC 8878, section 3.1.1).
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Replace a zstd-compressed blob with its decompressed bytes, after its
+/// digest is verified. `tar -a` gives zstd to an external `zstd` program, and
+/// on a host without one tar fails. Every extraction here ignores tar's
+/// status, because a member that is absent from a layer also fails it. So a
+/// zstd layer read as empty, and `scan` reported a bootc image as "not an
+/// ostree/bootc image". A gzip or plain blob is left as it is.
+fn decompress_zstd_in_place(blob: &Path) -> Result<()> {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    let is_zstd = fs::File::open(blob)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && magic == ZSTD_MAGIC;
+    if !is_zstd {
+        return Ok(());
+    }
+    let decoded = blob.with_extension("tar");
+    {
+        let input = fs::File::open(blob)?;
+        let mut output = fs::File::create(&decoded)
+            .with_context(|| format!("failed to create {}", decoded.display()))?;
+        if let Err(e) = zstd::stream::copy_decode(input, &mut output) {
+            let _ = fs::remove_file(&decoded);
+            return Err(e).context("invalid zstd stream");
+        }
+    }
+    fs::rename(&decoded, blob).with_context(|| format!("failed to replace {}", blob.display()))
+}
+
 /// A layer's `tar -tv` listing. Empty when tar cannot list it; the
 /// extraction then proceeds without hard-link targets, as before.
 fn layer_listing(blob: &Path) -> String {
@@ -807,7 +839,8 @@ impl RegistryEndpoint {
             let _ = fs::remove_file(dst);
             return Err(e);
         }
-        Ok(())
+        decompress_zstd_in_place(dst)
+            .with_context(|| format!("failed to decompress zstd blob {digest}"))
     }
 
     /// Resolve a (possibly multi-arch) manifest to the concrete image manifest
@@ -1184,6 +1217,51 @@ mod tests {
     use super::*;
 
     /// ostree-exported layers: the real path is a hard link to the object.
+    #[test]
+    fn zstd_layers_are_decoded_before_tar_reads_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        fs::create_dir_all(tree.join("usr/lib/ostree")).unwrap();
+        fs::write(
+            tree.join("usr/lib/ostree/prepare-root.conf"),
+            "[composefs]\n",
+        )
+        .unwrap();
+        let tar_path = dir.path().join("layer.tar");
+        assert!(
+            Command::new("tar")
+                .arg("-cf")
+                .arg(&tar_path)
+                .arg("-C")
+                .arg(&tree)
+                .arg("usr")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let plain = fs::read(&tar_path).unwrap();
+
+        // zstd: replaced by the plain tar, which tar reads with no zstd program.
+        let blob = dir.path().join("layer.blob");
+        fs::write(&blob, zstd::encode_all(&plain[..], 3).unwrap()).unwrap();
+        decompress_zstd_in_place(&blob).unwrap();
+        assert_eq!(fs::read(&blob).unwrap(), plain);
+        assert!(layer_listing(&blob).contains("usr/lib/ostree/prepare-root.conf"));
+
+        // gzip and plain blobs are left for tar's own detection.
+        let gz = [0x1f, 0x8b, 0x08, 0x00, 1, 2, 3];
+        fs::write(&blob, gz).unwrap();
+        decompress_zstd_in_place(&blob).unwrap();
+        assert_eq!(fs::read(&blob).unwrap(), gz);
+
+        // A corrupt zstd stream is an error, not an empty layer.
+        let mut bad = ZSTD_MAGIC.to_vec();
+        bad.extend_from_slice(b"not a zstd frame");
+        fs::write(&blob, &bad).unwrap();
+        assert!(decompress_zstd_in_place(&blob).is_err());
+        assert!(!blob.with_extension("tar").exists());
+    }
+
     #[test]
     fn listing_names_strip_fields_and_link_suffixes() {
         let listing = "\
