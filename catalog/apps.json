@@ -1,0 +1,437 @@
+{
+  "version": 1,
+  "applications": [
+    {
+      "id": "firefox",
+      "flatpak": "org.mozilla.firefox",
+      "portability": "portable",
+      "note": "The Firefox profile can carry bookmarks, history, passwords, extensions, and open tabs.",
+      "match": {
+        "windowsDisplayName": ["mozilla firefox", "firefox"],
+        "rpm": ["firefox"],
+        "deb": ["firefox"],
+        "pacman": ["firefox"]
+      }
+    },
+    {
+      "id": "chrome",
+      "flatpak": "com.google.Chrome",
+      "portability": "signin",
+      "note": "Bookmarks and history can move; sign in to restore synchronized data.",
+      "match": {
+        "windowsDisplayName": ["google chrome"],
+        "rpm": ["google-chrome-stable"],
+        "deb": ["google-chrome-stable"],
+        "pacman": ["google-chrome"]
+      }
+    },
+    {
+      "id": "edge",
+      "flatpak": "com.google.Chrome",
+      "portability": "signin",
+      "note": "Chrome is the suggested replacement; bookmarks and history can move, but sign-in is fresh.",
+      "match": {
+        "windowsDisplayName": ["microsoft edge"],
+        "rpm": ["microsoft-edge-stable"],
+        "deb": ["microsoft-edge-stable"],
+        "pacman": ["microsoft-edge-stable-bin"]
+      }
+    },
+    {
+      "id": "brave",
+      "flatpak": "com.brave.Browser",
+      "portability": "signin",
+      "note": "Sign in to Brave Sync to restore synchronized browser data.",
+      "match": {
+        "windowsDisplayName": ["brave"],
+        "rpm": ["brave-browser"],
+        "deb": ["brave-browser"],
+        "pacman": ["brave-bin", "brave-browser"]
+      }
+    },
+    {
+      "id": "vivaldi",
+      "flatpak": "com.vivaldi.Vivaldi",
+      "portability": "signin",
+      "note": "Sign in to Vivaldi to restore synchronized browser data.",
+      "match": {
+        "windowsDisplayName": ["vivaldi"],
+        "rpm": ["vivaldi-stable"],
+        "deb": ["vivaldi-stable"],
+        "pacman": ["vivaldi"]
+      }
+    },
+    {
+      "id": "opera",
+      "flatpak": "com.opera.Opera",
+      "portability": "signin",
+      "note": "Sign in to Opera to restore synchronized browser data.",
+      "match": {
+        "windowsDisplayName": ["opera"],
+        "rpm": ["opera-stable"],
+        "deb": ["opera-stable"],
+        "pacman": ["opera"]
+      }
+    },
+    {
+      "id": "gimp",
+      "flatpak": "org.gimp.GIMP",
+      "portability": "portable",
+      "note": "Brushes and settings are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["gimp"],
+        "rpm": ["gimp"],
+        "deb": ["gimp"],
+        "pacman": ["gimp"]
+      }
+    },
+    {
+      "id": "krita",
+      "flatpak": "org.kde.krita",
+      "portability": "portable",
+      "note": "Brushes and configuration are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["krita"],
+        "rpm": ["krita"],
+        "deb": ["krita"],
+        "pacman": ["krita"]
+      }
+    },
+    {
+      "id": "inkscape",
+      "flatpak": "org.inkscape.Inkscape",
+      "portability": "portable",
+      "note": "Preferences are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["inkscape"],
+        "rpm": ["inkscape"],
+        "deb": ["inkscape"],
+        "pacman": ["inkscape"]
+      }
+    },
+    {
+      "id": "blender",
+      "flatpak": "org.blender.Blender",
+      "portability": "portable",
+      "note": "The Blender configuration directory can be copied.",
+      "match": {
+        "windowsDisplayName": ["blender"],
+        "rpm": ["blender"],
+        "deb": ["blender"],
+        "pacman": ["blender"]
+      }
+    },
+    {
+      "id": "audacity",
+      "flatpak": "org.audacityteam.Audacity",
+      "portability": "portable",
+      "note": "Settings are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["audacity"],
+        "rpm": ["audacity"],
+        "deb": ["audacity"],
+        "pacman": ["audacity"]
+      }
+    },
+    {
+      "id": "vlc",
+      "flatpak": "org.videolan.VLC",
+      "portability": "portable",
+      "note": "Playlists and settings can be copied.",
+      "match": {
+        "windowsDisplayName": ["vlc media player"],
+        "rpm": ["vlc"],
+        "deb": ["vlc"],
+        "pacman": ["vlc"]
+      }
+    },
+    {
+      "id": "handbrake",
+      "flatpak": "fr.handbrake.ghb",
+      "portability": "portable",
+      "note": "Presets can be exported and imported.",
+      "match": {
+        "windowsDisplayName": ["handbrake"],
+        "rpm": ["HandBrake-gui"],
+        "deb": ["handbrake-gtk"],
+        "pacman": ["handbrake"]
+      }
+    },
+    {
+      "id": "obs",
+      "flatpak": "com.obsproject.Studio",
+      "portability": "portable",
+      "note": "Scenes and profiles are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["obs studio"],
+        "rpm": ["obs-studio"],
+        "deb": ["obs-studio"],
+        "pacman": ["obs-studio"]
+      }
+    },
+    {
+      "id": "qbittorrent",
+      "flatpak": "org.qbittorrent.qBittorrent",
+      "portability": "portable",
+      "note": "Settings are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["qbittorrent"],
+        "rpm": ["qbittorrent"],
+        "deb": ["qbittorrent"],
+        "pacman": ["qbittorrent"]
+      }
+    },
+    {
+      "id": "discord",
+      "flatpak": "com.discordapp.Discord",
+      "portability": "signin",
+      "note": "Servers and messages return after signing in.",
+      "match": {
+        "windowsDisplayName": ["discord"],
+        "rpm": ["discord"],
+        "deb": ["discord"],
+        "pacman": ["discord"]
+      }
+    },
+    {
+      "id": "slack",
+      "flatpak": "com.slack.Slack",
+      "portability": "signin",
+      "note": "Workspaces return after signing in.",
+      "match": {
+        "windowsDisplayName": ["slack"],
+        "rpm": ["slack"],
+        "deb": ["slack-desktop"],
+        "pacman": ["slack-desktop"]
+      }
+    },
+    {
+      "id": "spotify",
+      "flatpak": "com.spotify.Client",
+      "portability": "signin",
+      "note": "Playlists and the library return after signing in.",
+      "match": {
+        "windowsDisplayName": ["spotify"],
+        "rpm": ["spotify-client"],
+        "deb": ["spotify-client"],
+        "pacman": ["spotify", "spotify-launcher"]
+      }
+    },
+    {
+      "id": "telegram",
+      "flatpak": "org.telegram.desktop",
+      "portability": "portable",
+      "note": "Telegram Desktop session data can be copied.",
+      "match": {
+        "windowsDisplayName": ["telegram desktop"],
+        "rpm": ["telegram-desktop"],
+        "deb": ["telegram-desktop"],
+        "pacman": ["telegram-desktop"]
+      }
+    },
+    {
+      "id": "signal",
+      "flatpak": "org.signal.Signal",
+      "portability": "signin",
+      "note": "Re-link Signal Desktop with the phone after migration.",
+      "match": {
+        "windowsDisplayName": ["signal"],
+        "rpm": ["signal-desktop"],
+        "deb": ["signal-desktop"],
+        "pacman": ["signal-desktop"]
+      }
+    },
+    {
+      "id": "zoom",
+      "flatpak": "us.zoom.Zoom",
+      "portability": "signin",
+      "note": "Meetings and account-side settings return after signing in.",
+      "match": {
+        "windowsDisplayName": ["zoom"],
+        "rpm": ["zoom"],
+        "deb": ["zoom"],
+        "pacman": ["zoom"]
+      }
+    },
+    {
+      "id": "element",
+      "flatpak": "im.riot.Riot",
+      "portability": "signin",
+      "note": "Rooms return after signing in.",
+      "match": {
+        "windowsDisplayName": ["element"],
+        "rpm": ["element-desktop"],
+        "deb": ["element-desktop"],
+        "pacman": ["element-desktop"]
+      }
+    },
+    {
+      "id": "teams",
+      "flatpak": "com.github.IsmaelMartinez.teams_for_linux",
+      "portability": "signin",
+      "note": "Sign in once to restore account-side data.",
+      "match": {
+        "windowsDisplayName": ["teams"],
+        "rpm": ["teams-for-linux"],
+        "deb": ["teams-for-linux"],
+        "pacman": ["teams-for-linux"]
+      }
+    },
+    {
+      "id": "bitwarden",
+      "flatpak": "com.bitwarden.desktop",
+      "portability": "signin",
+      "note": "Unlock the server-side vault with the Bitwarden account.",
+      "match": {
+        "windowsDisplayName": ["bitwarden"],
+        "rpm": ["bitwarden"],
+        "deb": ["bitwarden"],
+        "pacman": ["bitwarden"]
+      }
+    },
+    {
+      "id": "vscode",
+      "flatpak": "com.visualstudio.code",
+      "portability": "portable",
+      "note": "Settings, keybindings, snippets, and an extension list can be copied; account sign-in is fresh.",
+      "match": {
+        "windowsDisplayName": ["visual studio code"],
+        "rpm": ["code"],
+        "deb": ["code"],
+        "pacman": ["code", "visual-studio-code-bin"]
+      }
+    },
+    {
+      "id": "notepad++",
+      "flatpak": "com.notepadqq.Notepadqq",
+      "portability": "none",
+      "note": "Notepad++ has no native Linux port; Notepadqq is the closest equivalent.",
+      "match": {
+        "windowsDisplayName": ["notepad++"],
+        "rpm": [],
+        "deb": [],
+        "pacman": ["notepadqq"]
+      }
+    },
+    {
+      "id": "sublime",
+      "flatpak": "com.sublimetext.three",
+      "portability": "portable",
+      "note": "Settings are plain files and can be copied.",
+      "match": {
+        "windowsDisplayName": ["sublime text"],
+        "rpm": ["sublime-text"],
+        "deb": ["sublime-text"],
+        "pacman": ["sublime-text"]
+      }
+    },
+    {
+      "id": "git",
+      "flatpak": "org.gnome.gitg",
+      "portability": "none",
+      "note": "Git is available on Linux; Gitg is a graphical client.",
+      "match": {
+        "windowsDisplayName": ["git"],
+        "rpm": [],
+        "deb": [],
+        "pacman": []
+      }
+    },
+    {
+      "id": "steam",
+      "flatpak": "com.valvesoftware.Steam",
+      "portability": "signin",
+      "note": "Game files can be reused; sign in once to restore the account library.",
+      "match": {
+        "windowsDisplayName": ["steam"],
+        "rpm": ["steam"],
+        "deb": ["steam-installer", "steam-launcher"],
+        "pacman": ["steam"]
+      }
+    },
+    {
+      "id": "epic",
+      "flatpak": "com.heroicgameslauncher.hgl",
+      "portability": "signin",
+      "note": "Use Heroic Games Launcher and sign in to access the Epic library.",
+      "match": {
+        "windowsDisplayName": ["epic games launcher"],
+        "rpm": ["heroic-games-launcher"],
+        "deb": ["heroic"],
+        "pacman": ["heroic-games-launcher-bin"]
+      }
+    },
+    {
+      "id": "minecraft",
+      "flatpak": "com.mojang.Minecraft",
+      "portability": "signin",
+      "note": "Sign in to restore the Minecraft account.",
+      "match": {
+        "windowsDisplayName": ["minecraft"],
+        "rpm": ["minecraft-launcher"],
+        "deb": ["minecraft-launcher"],
+        "pacman": ["minecraft-launcher"]
+      }
+    },
+    {
+      "id": "thunderbird",
+      "flatpak": "org.mozilla.Thunderbird",
+      "portability": "portable",
+      "note": "Mail accounts, local mail, and settings can be copied.",
+      "match": {
+        "windowsDisplayName": ["mozilla thunderbird"],
+        "rpm": ["thunderbird"],
+        "deb": ["thunderbird"],
+        "pacman": ["thunderbird"]
+      }
+    },
+    {
+      "id": "libreoffice",
+      "flatpak": "org.libreoffice.LibreOffice",
+      "portability": "portable",
+      "note": "Documents are plain files and user settings can be copied.",
+      "match": {
+        "windowsDisplayName": ["libreoffice"],
+        "rpm": ["libreoffice"],
+        "deb": ["libreoffice"],
+        "pacman": ["libreoffice-fresh", "libreoffice-still"]
+      }
+    },
+    {
+      "id": "acrobat",
+      "flatpak": "org.gnome.Evince",
+      "portability": "none",
+      "note": "Adobe Acrobat and Reader have no Linux version; Evince opens PDF files.",
+      "match": {
+        "windowsDisplayName": ["adobe acrobat", "adobe reader"],
+        "rpm": [],
+        "deb": [],
+        "pacman": []
+      }
+    },
+    {
+      "id": "7zip",
+      "flatpak": "org.gnome.FileRoller",
+      "portability": "none",
+      "note": "Archive support is built into Linux; File Roller provides a graphical interface.",
+      "match": {
+        "windowsDisplayName": ["7-zip", "winrar"],
+        "rpm": [],
+        "deb": [],
+        "pacman": []
+      }
+    },
+    {
+      "id": "putty",
+      "flatpak": "app.devsuite.Ptyxis",
+      "portability": "none",
+      "note": "SSH is built into Linux; Ptyxis is a modern graphical terminal.",
+      "match": {
+        "windowsDisplayName": ["putty"],
+        "rpm": ["putty"],
+        "deb": ["putty"],
+        "pacman": ["putty"]
+      }
+    }
+  ]
+}

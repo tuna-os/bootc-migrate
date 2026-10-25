@@ -1,4 +1,4 @@
-name: Image catalog
+name: Published catalogs
 
 on:
   push:
@@ -28,14 +28,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install registry inspector
         run: sudo apt-get update && sudo apt-get install -y skopeo
-      - name: Compose and validate catalog
+      - name: Compose and validate catalogs
         run: |
           python3 catalog/generate.py --probe --output public/images.json
+          cp catalog/apps.json public/apps.json
           python3 -m json.tool public/images.json >/dev/null
+          python3 -m json.tool public/apps.json >/dev/null
       - uses: actions/upload-artifact@v7
         with:
-          name: image-catalog
-          path: public/images.json
+          name: catalog-feed
+          path: public/*.json
 
   publish:
     if: github.ref == 'refs/heads/main'
@@ -49,7 +51,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
-          name: image-catalog
+          name: catalog-feed
           path: catalog-output
       - name: Publish stable raw JSON feed
         run: |
@@ -64,8 +66,9 @@ jobs:
             git rm -rf .
           fi
           cp catalog-output/images.json images.json
-          git add images.json
+          cp catalog-output/apps.json apps.json
+          git add images.json apps.json
           if ! git diff --cached --quiet; then
-            git commit -m "catalog: Refresh published image feed"
+            git commit -m "catalog: Refresh published feeds"
             git push origin catalog-feed
           fi

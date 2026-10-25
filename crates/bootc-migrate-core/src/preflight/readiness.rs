@@ -50,6 +50,10 @@ pub fn print_report(report: &PreflightReport) {
         }
     );
     println!(
+        "  - Secure Boot:           {}",
+        report.secure_boot.summary()
+    );
+    println!(
         "  - NVRAM writable:        {}",
         if report.nvram_writable { "Yes" } else { "No" }
     );
@@ -308,7 +312,7 @@ pub fn gate(report: &PreflightReport, force: bool, skip_preflight: bool) -> Migr
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::preflight::SecureBootFacts;
     /// A report with every gate green — the baseline each test perturbs.
     fn healthy() -> PreflightReport {
         PreflightReport {
@@ -316,6 +320,7 @@ mod tests {
             booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
+            secure_boot: SecureBootFacts::default(),
             nvram_writable: true,
             esp_path: Some("/boot/efi".into()),
             esp_free_space_bytes: 500 * 1024 * 1024,

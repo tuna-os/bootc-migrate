@@ -2,10 +2,12 @@
 //! per-direction validators ([`validate`]).
 
 pub mod readiness;
+pub mod secure_boot;
 pub mod snapshot;
 pub mod system_info;
 pub mod validate;
 
+pub use secure_boot::{SecureBootFacts, TargetBootloader, TargetBootloaderKind};
 pub use snapshot::{SNAPSHOT_DIR, write_snapshot};
 pub use system_info::{
     BootcStatus, BootedStatus, HostStatus, PendingTransactionStatus, SystemInfo,
@@ -28,6 +30,7 @@ pub struct PreflightReport {
     pub booted_image: Option<String>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
+    pub secure_boot: SecureBootFacts,
     pub nvram_writable: bool,
     pub esp_path: Option<String>,
     pub esp_free_space_bytes: u64,
@@ -85,6 +88,7 @@ mod tests {
             booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
+            secure_boot: SecureBootFacts::default(),
             nvram_writable: true,
             esp_path: Some("/boot/efi".into()),
             esp_free_space_bytes: 400 * 1024 * 1024,
@@ -108,7 +112,6 @@ mod tests {
     }
 
     // ---- Pending-transaction detection tests ----
-
     #[test]
     fn parse_clean_status() {
         let out = concat!(
