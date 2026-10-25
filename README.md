@@ -645,7 +645,7 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 
 The full matrix is authoritative in `.github/e2e-scenarios.yml`. The nightly
 schedule runs it. Each PR and push to `main` runs a round-robin slice of the
-gating cells (see [docs/testing.md](docs/testing.md)):
+gating cells (see the [test guide](docs/)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -724,6 +724,7 @@ Fedora, Ubuntu or Arch installation. `rebase` finds one by its rpm, dpkg or
 pacman database when `bootc status` names no deployment and the root has no
 ostree or composefs state. On such a system, `--target-backend auto` (the
 default) selects ostree. `PackageInstall` runs the target image's own `bootc
+
 install to-existing-root` against the live physical root after readiness and
 hardware gates pass. It snapshots the old kernels, initramfs, BLS entries, and
 GRUB configuration. Bootc then empties `/boot`. The `Previous system` entry
@@ -750,8 +751,8 @@ system services, kernel modules, and other packages. Suggestions first use a
 matching Flathub ID. They then use a known Homebrew formula, a toolbox or
 distrobox, or a derived image.
 
-The report lists third-party package repositories and enabled services that
-the target lacks. If the registry pass is incomplete, the report does not make
+The report shows third-party package repositories and enabled services that the
+target lacks. If the registry pass is incomplete, the report does not make
 absence claims. It does not treat missing evidence as an empty image.
 
 A non-dry package-host invocation writes the machine-readable report and its

@@ -104,7 +104,7 @@ complete #67 flow without adding another expensive matrix entry:
 4. The same ownership, target-default and sidecar checks run again after
    reboot.
 
-These assertions prevent two vacuous results that previously left #67 unproven.
+These assertions prevent two vacuous results that before left #67 unproven.
 One result is a scan that never evaluates `is_cross_base`. The other is a
 report without work from either filesystem pass. The assertions also cover
 the actual OSTree `/var` layout. Deployments share
@@ -117,7 +117,7 @@ failures. Current runs no longer get the earlier ghcr.io token-request 403.
 They receive the expected registry challenge. They scan the target and
 classify the Bluefin → Dakota pair as cross-base.
 
-`E2E_CROSS_BASE=1` can make a chosen ostree-rebase pair reach the cross-base
+`E2E_CROSS_BASE=1` can make an ostree-rebase pair reach the cross-base
 report. The normal gating cell no longer needs that flag. Its dry-run scan
 identifies a cross-base pair. The harness then runs all remap and policy
 checks for conflicts.
@@ -188,6 +188,7 @@ snapshot-restore path against firmware variables.
 The separate `bootloader-trial` cell covers #65/#382. It installs the
 standalone systemd-boot path on a GRUB2 Bluefin guest. OVMF does not honor
 `BootNext`, so the cell saves and swaps `BootOrder`. It reboots through the
+
 trial and calls the installed `kernel-install` resync hook for a second kernel
 version. It then tests `--promote` and `--undo`. The final check confirms the
 original firmware order and GRUB fallback. It also confirms restoration of
@@ -316,6 +317,7 @@ The summary contains the last phase banner, failed assertions, and log tails.
 `tests/drift-canary.sh` probes every image in `tests/canary-baseline.tsv`.
 It checks the cfs CLI generation. Exit 1 means drift and creates or updates a
 canary issue. Exit 2 means that probe infrastructure failed. The next run tries
+
 again without an alert. This catches breakage from #72.
 
 **A change from the pinned legacy builder to the new generation is the important

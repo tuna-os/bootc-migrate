@@ -110,7 +110,7 @@ the pipeline; it is a mode that omits `seal` and pins `bootloader=keep`.
 | E (hooks) | — | — | — | — | — | — | — |
 
 `migrate-bootloader` (B) keeps the one-phase bootloader-only shape.
-`migration::bootloader::live` implements its live operation. The shared
+`migration::bootloader::live` makes its live operation. The shared
 `StandaloneBootloaderConfig` controller routes it. The command stages a
 reversible trial. It does not change the persistent firmware order in the first step.
 
