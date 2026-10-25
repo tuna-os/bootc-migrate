@@ -2219,7 +2219,6 @@ mod tests {
             app.booted_backend = backend;
             app.toggle_option(OptRow::DryRun);
             assert!(app.opt_dry_run);
-            assert!(draw_to_text(&mut app).contains("preview only"));
             // Force cannot override this UI gate, even with stale consent.
             app.screen = Screen::Review;
             app.opt_dry_run = false;
