@@ -208,6 +208,7 @@ jobs:
             echo "E2E_ALLOWED_MISLABELED=${{ matrix.scenario.allowed_mislabeled || '' }}"
             echo "E2E_DE_FROM=${{ matrix.scenario.de_from || 'gnome' }}"
             echo "E2E_CONSOLE_JOURNAL=${{ matrix.scenario.console_journal && '1' || '0' }}"
+            echo "E2E_BOOT_TXN_FAULT=${{ matrix.scenario.boot_txn_fault || '' }}"
           } >> "$GITHUB_ENV"
 
       - name: Disk space before E2E

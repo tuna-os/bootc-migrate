@@ -192,9 +192,9 @@
   # OSTree deployment. The base is installed composefs-native
   # (to-disk --composefs-backend); bootc-rebase then runs the
   # target's own `bootc install to-existing-root` alongside,
-  # carries /etc and /var, restores the composefs ESP artifacts
-  # and puts GRUB first. Exploratory, non-gating: first execution
-  # of the route on a real host.
+  # carries /etc and /var, restores and verifies the composefs ESP artifacts,
+  # leaves that rollback first, and arms GRUB once with BootNext. Exploratory,
+  # non-gating: first execution of the route on a real host.
   #
   # The target must ship bootupd: bootc's ostree backend installs
   # its bootloader through it and refuses otherwise, and Dakota
@@ -207,13 +207,34 @@
   mode: composefs-to-ostree
   disk_size: 40G
   allow_failure: true
+- name: "dakota -> fedora-bootc boot transaction recovery after ESP wipe"
+  # #387: stop after bootc has wiped the ESP and created GRUB. The second
+  # invocation must classify the begun journal as needs-repair, restore and
+  # hash-verify the composefs ESP snapshot, restore fallback BootOrder, and
+  # prove a real reboot returns to composefs.
+  base: ghcr.io/projectbluefin/dakota:stable
+  target: quay.io/fedora/fedora-bootc:44
+  mode: composefs-to-ostree
+  boot_txn_fault: after-esp-wipe
+  disk_size: 40G
+  allow_failure: true
+- name: "dakota -> fedora-bootc boot transaction resume before BootNext"
+  # #387: stop after the report and prepared journal are durable but before
+  # arming. The second invocation must classify the transaction as resumable,
+  # observe the ESP and both firmware entries, arm BootNext, and continue.
+  base: ghcr.io/projectbluefin/dakota:stable
+  target: quay.io/fedora/fedora-bootc:44
+  mode: composefs-to-ostree
+  boot_txn_fault: before-arm
+  disk_size: 40G
+  allow_failure: true
 - name: "dakota -> utah (composefs -> ostree, OstreeInstall)"
   # #302: the pair a Dakota user migrates to. Utah (Bluefin on
   # Fedora Hummingbird) ships bootupd and GRUB, and its initramfs
   # has no composefs module, so OstreeInstall is its route. Same
-  # assertions as the fedora-bootc cell above (route, fixtures,
-  # GRUB first in BootOrder, "Linux Boot Manager" kept as
-  # rollback), plus the booted os-release ID and Utah's display
+  # transaction assertions as the fedora-bootc cell above (route, fixtures,
+  # rollback-first BootOrder, one-shot target BootNext, then target promotion
+  # after the observed boot), plus the booted os-release ID and Utah's display
   # manager. utah publishes only :testing (pre-alpha), about
   # 2.3 GB in 128 layers, so this cell is non-gating.
   base: ghcr.io/projectbluefin/dakota:stable

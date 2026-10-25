@@ -625,6 +625,16 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Some((txn, classification)) =
+        bootc_migrate_core::ostree_install::inspect_boot_transaction()?
+    {
+        eprintln!(
+            "[boot-txn] startup classification: {} (phase {:?}, target {})",
+            classification.as_str(),
+            txn.phase,
+            txn.target_image
+        );
+    }
 
     match cli.command {
         Some(Commands::Scan(ref scan_args)) => scan_command::run(scan_args),
