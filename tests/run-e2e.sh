@@ -120,6 +120,20 @@ WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 step() { printf '\033[1;36m[e2e %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 
+# The composefs image kernel argument. bootc wrote `composefs=<hex>`; newer
+# bootc writes `composefs.digest=v1-sha512-12:<hex>`. Both name the booted
+# image (crates/bootc-migrate-core/src/composefs_karg.rs). Anchored to a token
+# start, so `rd.composefs=` and `ostree.composefs=` do not match.
+CFS_KARG_RE='(^| )composefs(\.digest)?='
+# composefs_verity CMDLINE: the hex digest of the booted composefs image, in
+# either form, or nothing.
+composefs_verity() {
+    printf '%s\n' "$1" | tr ' ' '\n' | sed -n \
+        -e 's/^composefs=?\{0,1\}\(sha512:\)\{0,1\}\(..*\)/\2/p' \
+        -e 's/^composefs\.digest=.*:\(..*\)/\1/p' \
+        -e 's/^composefs\.digest=\([^:][^:]*\)$/\1/p' | head -1
+}
+
 # CI-friendly serial-console filter. The raw QEMU log dumps thousands of systemd
 # `[ OK ] Started …` lines per boot — readable on a TTY, useless in CI. Only
 # forward lines that carry actual signal (failures, sshd/login activity, BLS
@@ -1358,7 +1372,7 @@ fi
 for argument in "${command_line[@]}"; do
     case "$argument" in
         ostree=/*) printf '%s\n' "$argument"; collect readlink -e "/sysroot${argument#ostree=}" ;;
-        composefs=*) printf '%s\n' "$argument" ;;
+        composefs=* | composefs.digest=*) printf '%s\n' "$argument" ;;
     esac
 done
 echo '--- physical deployment directories ---'
@@ -2355,7 +2369,7 @@ if [ "$E2E_MODE" = "composefs-to-ostree" ]; then
     step "=== composefs-to-ostree: asserting the base booted composefs-native ==="
     BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $BASE_CMDLINE"
-    echo "$BASE_CMDLINE" | grep -qE '(^| )composefs=' || {
+    echo "$BASE_CMDLINE" | grep -qE "$CFS_KARG_RE" || {
         echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
         echo "      composefs-native install (bootc install to-disk --composefs-backend)."
         exit 1; }
@@ -2507,8 +2521,8 @@ REVSSH
     echo "  cmdline: $POST_CMDLINE"
     echo "$POST_CMDLINE" | grep -qE '(^| )ostree=' || {
         echo "FAIL: post-reboot cmdline has no ostree= — the OSTree deployment was not booted"; exit 1; }
-    if echo "$POST_CMDLINE" | grep -qE '(^| )composefs='; then
-        echo "FAIL: post-reboot cmdline still carries composefs="; exit 1
+    if echo "$POST_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
+        echo "FAIL: post-reboot cmdline still carries a composefs argument"; exit 1
     fi
     ssh $SSH_OPTS root@localhost "bootc status" || true
     BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.booted.image.image.image // empty')
@@ -2670,7 +2684,7 @@ if [ "$E2E_MODE" = "image-swap" ]; then
     step "=== image-swap: asserting the base booted composefs-native ==="
     BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $BASE_CMDLINE"
-    BASE_VERITY=$(echo "$BASE_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    BASE_VERITY=$(composefs_verity "$BASE_CMDLINE")
     [ -n "$BASE_VERITY" ] || {
         echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
         echo "      composefs-native install (bootc install to-disk --composefs-backend)."
@@ -2705,14 +2719,32 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    SWAP_FLAGS=""
+    if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+        # #256: a cross-family swap (for example Arch-based Marlin to
+        # Hummingbird-based Utah) must be refused until the operator opts in.
+        step "=== image-swap: asserting the cross-family gate refuses without opt-in ==="
+        if ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" \
+            > /tmp/rebase-refusal.log 2>&1; then
+            sed 's/^/[refusal] /' /tmp/rebase-refusal.log
+            echo "FAIL: a cross-family image swap ran without --accept-cross-base"; exit 1
+        fi
+        grep -q "Cross-family re-base detected" /tmp/rebase-refusal.log || {
+            sed 's/^/[refusal] /' /tmp/rebase-refusal.log
+            echo "FAIL: the refusal is not the cross-family gate"; exit 1; }
+        echo "OK: the cross-family gate refused the swap without opt-in."
+        SWAP_FLAGS="--accept-cross-base"
+    fi
+
     seed_ownership_fixture
     capture_health_baseline
-    step "=== image-swap: running bootc-rebase --target-backend composefs ==="
+    step "=== image-swap: running bootc-rebase --target-backend composefs ${SWAP_FLAGS} ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
     # long step of this mode, and a job that times out inside it must leave
     # the progress in the log.
     ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" 2>&1 \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs $SWAP_FLAGS" 2>&1 \
         | tee /tmp/rebase-out.log \
         | awk '{ print "[rebase] " $0; fflush() }'
     REBASE_RC=${PIPESTATUS[0]}
@@ -2866,9 +2898,9 @@ SWAPSSH
     step "=== image-swap: post-reboot assertions ==="
     POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $POST_CMDLINE"
-    POST_VERITY=$(echo "$POST_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    POST_VERITY=$(composefs_verity "$POST_CMDLINE")
     [ -n "$POST_VERITY" ] || {
-        echo "FAIL: post-reboot cmdline has no composefs= — a composefs deployment was not booted"; exit 1; }
+        echo "FAIL: post-reboot cmdline has no composefs argument — a composefs deployment was not booted"; exit 1; }
     [ "$POST_VERITY" != "$BASE_VERITY" ] || {
         echo "FAIL: rebooted into the base deployment ($BASE_VERITY), not the staged one"; exit 1; }
     ssh $SSH_OPTS root@localhost "bootc status" || true
@@ -3294,13 +3326,23 @@ if [ "$E2E_CROSS_FAMILY" = "1" ]; then
 
     ssh $SSH_OPTS root@localhost bash <<'CROSSCHECK'
 set -e
+# The modes that reach this point stage composefs: /sysroot/state is the
+# target, and /sysroot/ostree is the source the host still runs. Look in
+# /sysroot/ostree only when no composefs deployment was staged.
 DEPLOY=$(echo /sysroot/state/deploy/*)
-[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment under /sysroot/state/deploy"; exit 1; }
+if [ ! -d "$DEPLOY" ]; then
+    DEPLOY=$(find /sysroot/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 \
+        -type d -name '*.0' -print -quit 2>/dev/null || true)
+fi
+[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment found"; exit 1; }
 ETC="$DEPLOY/etc"
 echo "--- staged deployment: $DEPLOY ---"
-test -f "$DEPLOY/bootc-migrate-cross-family-report.json" \
-    || { echo "FAIL: cross-family report JSON missing"; exit 1; }
-head -c 2000 "$DEPLOY/bootc-migrate-cross-family-report.json"; echo
+REPORT="$DEPLOY/bootc-migrate-cross-family-report.json"
+if [ ! -f "$REPORT" ]; then
+    REPORT=/sysroot/ostree/deploy/default/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+fi
+test -f "$REPORT" || { echo "FAIL: cross-family report JSON missing"; exit 1; }
+head -c 2000 "$REPORT"; echo
 # Both families ship default/useradd: the target's copy, and our edit beside it.
 grep -q "e2e cross-family edit" "$ETC/default/useradd" \
     && { echo "FAIL: /etc/default/useradd still carries the source edit (target default did not win)"; exit 1; }
@@ -3348,8 +3390,14 @@ fi
 step "=== Re-injecting e2e-sshd into the staged deployment ==="
 ssh $SSH_OPTS root@localhost bash <<'CFS_POSTMERGEFIX'
 set -e
+# /sysroot/state is the staged target in the modes that get here; the
+# OSTree deployment is the source (see the cross-family check above).
 DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
-[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found (/sysroot/state/deploy/*/etc)"; exit 1; }
+if [ ! -d "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+        -type d -name etc -print -quit 2>/dev/null || true)
+fi
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found"; exit 1; }
 
 mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
 printf '%s\n' \
@@ -3411,10 +3459,16 @@ step "=== first-boot repair: sabotaging the canary tree (#309) ==="
 ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
 set -e
 CANARY_REL=home/realuser/repair-canary
-for V in /sysroot/state/os/default/var /var; do
+for V in /sysroot/state/os/default/var /sysroot/ostree/deploy/default/var /var; do
     [ -d "$V/$CANARY_REL" ] && break
 done
+# /sysroot/state is the staged target in the modes that get here; the
+# OSTree deployment is the source (see the cross-family check above).
 DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+if [ ! -d "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+        -type d -name etc -print -quit 2>/dev/null || true)
+fi
 test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
 test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
 test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
@@ -3848,8 +3902,8 @@ echo "  cmdline: $CFS_CMDLINE"
 # Anchored to a token boundary, matching backend_from_cmdline's whole-token
 # rule exactly: `-w` would also match `rd.composefs=`, which the parser rejects,
 # and a check looser than the code it guards is not a guard.
-echo "$CFS_CMDLINE" | grep -qE '(^| )composefs=' || {
-    echo "FAIL: booted cmdline has no composefs= parameter: $CFS_CMDLINE"; exit 1; }
+echo "$CFS_CMDLINE" | grep -qE "$CFS_KARG_RE" || {
+    echo "FAIL: booted cmdline has no composefs argument: $CFS_CMDLINE"; exit 1; }
 if echo "$CFS_CMDLINE" | grep -qE '(^| )ostree=' ; then
     echo "FAIL: composefs entry carries ostree= — backend detection is ambiguous"; exit 1
 fi
@@ -3924,7 +3978,7 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
         echo "FAIL: VM did not boot after undo"; tail -100 qemu.log; exit 1
     fi
     UNDO_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-    if echo "$UNDO_CMDLINE" | grep -q 'composefs='; then
+    if echo "$UNDO_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
         echo "FAIL: still booting composefs after undo (cmdline: $UNDO_CMDLINE)"; exit 1
     fi
     echo "$UNDO_CMDLINE" | grep -q 'ostree=' || {
@@ -3961,7 +4015,10 @@ elif [ -f /etc/dpkg/dpkg.cfg.rebase-old ]; then
 else
     echo "FAIL: expected a source-vendor-only .rebase-old sidecar in live /etc"; exit 1
 fi
-REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+REPORT=/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+if [ ! -f "$REPORT" ]; then
+    REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+fi
 test -f "$REPORT" || { echo "FAIL: cross-family report missing after reboot"; exit 1; }
 if grep -q '"firstboot_unit_installed": true' "$REPORT"; then
     if [ -e /etc/bootc-migrate/cross-family-firstboot ]; then
@@ -4055,7 +4112,7 @@ wait_for_ssh_with_msg "OSTree rollback boot SSH" 360 "vm-rollback" || {
 
 # Cmdline must show the *OSTree* path: composefs= absent, ostree= present.
 ROLLBACK_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-if echo "$ROLLBACK_CMDLINE" | grep -q 'composefs='; then
+if echo "$ROLLBACK_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
     echo "FAIL: VM booted into composefs instead of OSTree (cmdline: $ROLLBACK_CMDLINE)"
     exit 1
 fi
@@ -4095,7 +4152,7 @@ wait_for_ssh_with_msg "Return-to-composefs SSH" 300 "vm-return-cfs" || {
 }
 
 RETURN_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-if ! echo "$RETURN_CMDLINE" | grep -q 'composefs='; then
+if ! echo "$RETURN_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
     echo "FAIL: did not return to composefs (cmdline: $RETURN_CMDLINE)"; exit 1
 fi
 echo "OK: Returned to composefs cleanly via restored BootOrder."

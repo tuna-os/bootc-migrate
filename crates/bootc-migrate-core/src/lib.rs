@@ -33,6 +33,7 @@ pub mod app_mapping;
 pub mod boot_audit;
 pub mod boot_cleanup;
 pub mod composefs;
+pub mod composefs_karg;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
 pub mod cross_base;
@@ -43,6 +44,7 @@ pub mod de_migrate;
 pub mod etc_conflict;
 pub mod firstboot_repair;
 pub mod firstboot_verify;
+pub mod flatpak_preinstall;
 pub mod hardware;
 pub mod mergetc;
 pub mod migration;

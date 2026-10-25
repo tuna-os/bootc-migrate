@@ -103,7 +103,7 @@ sudo systemctl reboot
 **5. Confirm, then make it permanent:**
 
 ```bash
-cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
+grep -oE 'composefs(\.digest)?=[^ ]*' /proc/cmdline   # confirms composefs boot
 sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 
@@ -140,8 +140,8 @@ sudo bootc-migrate tui
 
 The image picker fetches the latest CI-published catalog, then uses a cached
 or bundled JSON snapshot if offline. It lists published Bluefin, Universal
-Blue, TunaOS, and Zirconium images. Utah stays marked as coming soon until its
-registry tag appears. You see the selected image reference and backend before
+Blue, TunaOS, Zirconium, and Utah images. Utah is pre-alpha, so the picker
+offers only its `:testing` tag. You see the selected image reference and backend before
 you continue. OSTree targets use `bootc-rebase`, which you must install
 alongside `bootc-migrate`; ComposeFS targets use the normal migrate path. The
 tool does not support a return from ComposeFS to OSTree.
@@ -487,11 +487,14 @@ instead:
 - When the target enforces an SELinux policy that the source did not, a
   one-shot unit relabels `/etc` and `/var` on first boot.
 
-The tool prints the report and writes it to
+The tool prints the report and keeps it across the reboot. A composefs
+deployment stores it at
 `/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
-This route is exploratory: one non-gating E2E cell exercises it. See
-[ROADMAP.md](ROADMAP.md) and
-[#256](https://github.com/tuna-os/bootc-migrate/issues/256).
+The composefs → OSTree route stores it in the new stateroot's
+`/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json`, because an
+OSTree deployment root is immutable after installation. This route is
+exploratory: one non-gating E2E cell exercises it. See [ROADMAP.md](ROADMAP.md)
+and [#256](https://github.com/tuna-os/bootc-migrate/issues/256).
 
 ### Move system Steam into Flatpak Steam
 

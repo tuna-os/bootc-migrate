@@ -24,7 +24,7 @@ pub fn verify_rollback_prerequisites() -> Result<()> {
 
     // 3. Booted state check: must currently be booted into composefs deployment
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if !cmdline.contains("composefs=") {
+    if !crate::composefs_karg::present(&cmdline) {
         bail!("already booted on OSTree — nothing to rollback.");
     }
 
