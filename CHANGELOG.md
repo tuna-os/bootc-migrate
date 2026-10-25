@@ -25,6 +25,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- `bootc-rebase scan` host overview on a package-managed source (#371,
+  completes the #370 acceptance criteria started by #384): distribution and
+  package-manager family, installed package count, root/`/home`/`/boot`/`/var`
+  filesystem layout with LUKS/LVM, boot mode, Secure Boot, and SELinux — what
+  the `package → ostree` migration will see, independent of the target image
+  `scan` also probes. `--json` nests it under `host`.
+
 - The TUI catalog lists Utah as "Utah (pre-alpha)" with
   `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
   composefs host, where its routes have E2E coverage.

@@ -46,6 +46,7 @@ pub mod firstboot_repair;
 pub mod firstboot_verify;
 pub mod flatpak_preinstall;
 pub mod hardware;
+pub mod host_overview;
 pub mod mergetc;
 pub mod migration;
 pub mod motd;
