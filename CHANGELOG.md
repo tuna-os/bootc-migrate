@@ -29,6 +29,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
   composefs host, where its routes have E2E coverage.
 
+- Guided package-host commit (#378): `bootc-rebase commit` recognizes a
+  package-install report, requires the reported OSTree deployment and a clean
+  first-boot verdict, lists every old-root path and allocated size, and removes
+  only verified carried data, disposable package state, and managed rollback
+  artifacts. Plain-directory homes remain protected unless `--move-home`
+  requests a same-filesystem rename into `/var/home`.
+
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
   issuers with the firmware's `db` CA generations. It refuses known mismatches

@@ -394,7 +394,25 @@ assert_package_install() {
         | jq -r '.status.booted.image.image.image // empty')
     echo "$FINAL_IMG" | grep -qF "$TARGET_REPO_TAG" || {
         echo "FAIL: return boot did not select target image (got: $FINAL_IMG)"; exit 1; }
-    echo "OK: package source, target, fixtures, software report, and Previous system round-trip passed."
+    step "=== package-install: guided commit and reclaimed-space accounting ==="
+    PACKAGE_COMMIT_DRY=$(ssh $SSH_OPTS root@localhost "bootc-rebase commit")
+    echo "$PACKAGE_COMMIT_DRY" | sed 's/^/  /'
+    PLANNED_BYTES=$(printf '%s\n' "$PACKAGE_COMMIT_DRY" \
+        | sed -n 's/.*total (\([0-9][0-9]*\) bytes planned).*/\1/p' | tail -1)
+    [ -n "$PLANNED_BYTES" ] || {
+        echo "FAIL: package commit dry-run did not report exact planned bytes"; exit 1; }
+    ssh $SSH_OPTS root@localhost "bootc-rebase commit --apply --yes --move-home"
+    RECLAIMED_BYTES=$(ssh $SSH_OPTS root@localhost \
+        "jq -r .reclaimed_bytes /var/lib/bootc-rebase/package-install-commit.json")
+    [ "$RECLAIMED_BYTES" = "$PLANNED_BYTES" ] || {
+        echo "FAIL: commit reclaimed $RECLAIMED_BYTES bytes; dry-run planned $PLANNED_BYTES"; exit 1; }
+    ssh $SSH_OPTS root@localhost "test ! -e /sysroot/usr && ! grep -il 'previous system' /boot/loader/entries/*.conf /boot/efi/loader/entries/*.conf /efi/loader/entries/*.conf 2>/dev/null" || {
+        echo "FAIL: package commit left the old /usr or Previous system entry"; exit 1; }
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "post-commit target SSH" 240
+    assert_system_healthy "package-install committed target"
+    echo "OK: package source, target, fixtures, rollback round-trip, commit, and reclaimed-space accounting passed."
 }
 
 
