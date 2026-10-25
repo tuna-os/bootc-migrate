@@ -10,6 +10,7 @@
 //! table is tested without a machine. [`PackageHostFacts::gather`] reads the
 //! live system.
 
+use serde::Serialize;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -45,7 +46,8 @@ pub fn required_free_bytes(compressed_image_bytes: u64) -> u64 {
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SelinuxMode {
     Disabled,
     Permissive,
@@ -53,7 +55,7 @@ pub enum SelinuxMode {
 }
 
 /// One mounted filesystem the checks look at.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct MountFacts {
     pub fs_type: String,
     pub source: String,
@@ -67,15 +69,21 @@ pub struct MountFacts {
 
 /// What the preflight knows about the host. Every field is plain data so
 /// tests can build any machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackageHostFacts {
     pub package_db: Option<PackageDb>,
     pub uefi: bool,
+    /// `Some(true)`/`Some(false)`: the Secure Boot efivar's state. `None`:
+    /// BIOS, or the efivar is unavailable or malformed
+    /// (`preflight::secure_boot`).
+    pub secure_boot: Option<bool>,
     pub root: Option<MountFacts>,
     /// `None`: `/home` is a directory on the root filesystem.
     pub home: Option<MountFacts>,
     /// `None`: `/boot` is a directory on the root filesystem.
     pub boot: Option<MountFacts>,
+    /// `None`: `/var` is a directory on the root filesystem.
+    pub var: Option<MountFacts>,
     pub root_read_only: bool,
     pub free_root_bytes: Option<u64>,
     /// Running package managers, as `name (pid N)`.
@@ -506,12 +514,27 @@ impl PackageHostFacts {
             Ok(_) => SelinuxMode::Permissive,
             Err(_) => SelinuxMode::Disabled,
         };
+        let uefi = Path::new("/sys/firmware/efi").exists();
+        // Secure Boot is a UEFI concept; on BIOS the efivar simply does not
+        // exist, so only probe it when UEFI, rather than reporting a BIOS
+        // host as "efivar unavailable" indistinguishably from a UEFI one
+        // whose firmware actually hides it.
+        let secure_boot = uefi
+            .then(|| {
+                crate::preflight::secure_boot::read_from_efivars(Path::new(
+                    "/sys/firmware/efi/efivars",
+                ))
+                .enabled
+            })
+            .flatten();
         PackageHostFacts {
             package_db,
-            uefi: Path::new("/sys/firmware/efi").exists(),
+            uefi,
+            secure_boot,
             root: root_line.map(|m| mount_facts(sys, m)),
             home: separate("/home"),
             boot: separate("/boot"),
+            var: separate("/var"),
             root_read_only: root_line.is_some_and(|m| m.options.split(',').any(|o| o == "ro")),
             free_root_bytes: crate::preflight::system_info::get_free_space("/").ok(),
             package_managers_running: running_package_managers(Path::new("/proc")),
@@ -539,6 +562,7 @@ mod tests {
         PackageHostFacts {
             package_db: Some(PackageDb::Rpm),
             uefi: true,
+            secure_boot: Some(true),
             root: Some(MountFacts {
                 btrfs_subvol: Some("root".into()),
                 ..mount("btrfs", "/dev/nvme0n1p3")
@@ -548,6 +572,7 @@ mod tests {
                 ..mount("btrfs", "/dev/nvme0n1p3")
             }),
             boot: Some(mount("ext4", "/dev/nvme0n1p2")),
+            var: None,
             root_read_only: false,
             free_root_bytes: Some(200 * GIB),
             package_managers_running: vec![],

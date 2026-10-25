@@ -102,6 +102,9 @@ pub struct MissingService {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SoftwareReport {
     pub target_image: String,
+    /// How many packages [`build`] found installed on the host, independent
+    /// of the comparison outcome below (bootc-migrate#371).
+    pub installed_package_count: usize,
     pub target_package_db: Option<String>,
     pub comparison_complete: bool,
     pub missing_packages: Vec<MissingPackage>,
@@ -127,6 +130,11 @@ impl SoftwareReport {
             } else {
                 "incomplete — see warnings"
             }
+        );
+        let _ = writeln!(
+            out,
+            "Installed packages: **{}**\n",
+            self.installed_package_count
         );
 
         for kind in [
@@ -240,6 +248,7 @@ impl SoftwareReport {
 /// suppresses absence claims: a gap in the registry scan is not evidence that a
 /// package or service is missing.
 pub fn build(host: HostInventory, target: &TargetInventory, target_image: &str) -> SoftwareReport {
+    let installed_package_count = host.packages.len();
     let mut warnings = host.warnings;
     if let Some(warning) = &target.warning {
         warnings.push(warning.clone());
@@ -285,6 +294,7 @@ pub fn build(host: HostInventory, target: &TargetInventory, target_image: &str) 
 
     SoftwareReport {
         target_image: target_image.to_string(),
+        installed_package_count,
         target_package_db: target.package_db.map(|package_db| package_db.to_string()),
         comparison_complete: target.complete && host.enabled_services_complete,
         missing_packages,
@@ -1402,6 +1412,7 @@ mod tests {
         for (package_db, expected) in cases {
             let report = SoftwareReport {
                 target_image: "example.invalid/image:latest".to_string(),
+                installed_package_count: 1,
                 target_package_db: Some(package_db.to_string()),
                 comparison_complete: true,
                 missing_packages: vec![MissingPackage {
@@ -1427,6 +1438,7 @@ mod tests {
         let report = SoftwareReport {
             target_package_db: Some("rpm".to_string()),
             target_image: "example.invalid/image:latest".to_string(),
+            installed_package_count: 0,
             comparison_complete: true,
             missing_packages: Vec::new(),
             repositories: Vec::new(),
