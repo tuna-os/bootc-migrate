@@ -723,12 +723,13 @@ A **package** source is a system that is not a bootc deployment: a regular
 Fedora, Ubuntu or Arch installation. `rebase` finds one by its rpm, dpkg or
 pacman database when `bootc status` names no deployment and the root has no
 ostree or composefs state. On such a system, `--target-backend auto` (the
-default) selects ostree. `PackageInstall` runs the target image's own `bootc
+default) selects ostree.
 
-install to-existing-root` against the live physical root after readiness and
-hardware gates pass. It snapshots the old kernels, initramfs, BLS entries, and
-GRUB configuration. Bootc then empties `/boot`. The `Previous system` entry
-and guided package-host commit remain tracked by #374 and #378.
+`PackageInstall` runs the target image's own `bootc install to-existing-root`
+against the live physical root after readiness and hardware gates pass. It
+snapshots the old kernels, initramfs, BLS entries, and GRUB configuration.
+Bootc then empties `/boot`. The `Previous system` entry and guided
+package-host commit remain tracked by #374 and #378.
 
 `--dry-run` on a package host also prints a readiness report and the
 hardware report. The report refuses these systems and gives the reason for
