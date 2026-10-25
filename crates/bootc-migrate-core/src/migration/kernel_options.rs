@@ -119,6 +119,11 @@ fn should_filter(word: &str) -> bool {
     if word.starts_with("ostree.") {
         return true;
     }
+    // The caller appends the new image's composefs argument; a carried-over
+    // one, in either form, would name a different image.
+    if crate::composefs_karg::is_arg(word) {
+        return true;
+    }
     false
 }
 
@@ -279,6 +284,15 @@ mod tests {
         assert!(result.contains("rd.luks.uuid=1234-5678"));
         assert!(result.contains("rd.luks.options=discard"));
         assert!(result.contains("rd.luks.key=/keys/luks.key"));
+    }
+
+    #[test]
+    fn filters_a_carried_over_composefs_argument_in_either_form() {
+        let result = build_options(
+            "rw composefs=old composefs.digest=v1-sha512-12:old quiet",
+            "ab01cd23ef45",
+        );
+        assert_eq!(result, "rw quiet composefs=ab01cd23ef45");
     }
 
     #[test]

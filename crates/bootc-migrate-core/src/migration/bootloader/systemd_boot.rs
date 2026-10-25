@@ -2,11 +2,9 @@
 //!
 //! Home for the standalone `migrate-bootloader` subcommand's (issue #65)
 //! pure, backend-agnostic logic: kernel-argument carry-over, entry-token
-//! derivation, and BLS entry assembly. This is deliberately just the pure
-//! core — no filesystem I/O, no ESP/NVRAM mutation, no resync hook. Per the
-//! spec on #65, the live mutation and the kernel-install resync hook are
-//! the load-bearing (and riskiest) part of that feature and are not
-//! implemented yet; nothing in this module is wired into any CLI command.
+//! derivation, and BLS entry assembly. Live ESP/NVRAM mutation and the
+//! kernel-install resync hook are implemented in the sibling `live` module,
+//! which the CLI routes through `rebase_controller`.
 //!
 //! The composefs migrator's own systemd-boot setup is unrelated and
 //! untouched: it lives in `migration::phase5_setup_bootloader`.
@@ -61,7 +59,7 @@ pub fn build_migrate_bootloader_entry(
     sort_key: &str,
 ) -> BlsEntry {
     let (linux, initrd) = esp_kernel_paths(entry_token, version);
-    let options = carry_over_kargs(cmdline, &["composefs="]);
+    let options = carry_over_kargs(cmdline, crate::composefs_karg::PREFIXES);
     BlsEntry {
         title: title.to_string(),
         version: version.to_string(),

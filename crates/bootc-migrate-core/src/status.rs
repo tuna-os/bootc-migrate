@@ -145,7 +145,7 @@ pub fn gather_from(p: &StatusPaths) -> StatusState {
     let (route, target_image) = read_route(p);
     let verify = read_verify(p);
     let booted_composefs = std::fs::read_to_string(&p.cmdline)
-        .map(|c| c.contains("composefs="))
+        .map(|c| crate::composefs_karg::present(&c))
         .unwrap_or(false);
     let legacy_present = legacy_ostree_content(&p.ostree_dir);
     let commit = match (&route, booted_composefs, legacy_present) {

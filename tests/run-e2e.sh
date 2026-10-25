@@ -28,20 +28,36 @@ FILESYSTEM="${FILESYSTEM:-btrfs}"
 # lands (#64). "tui-migrate" is the composefs pipeline with the human at
 # the controls simulated: the interactive Config Drift Review checklist
 # (#15) and then the whole migration are driven through the TUI wizard by
-# tests/tui-e2e-driver.py on the VM, and every downstream assertion of
-# the default mode runs unchanged — this is the cell that proves the
+# tests/tui-e2e-driver.py on the VM, and every downstream assertion of the
+# default mode runs unchanged — this is the cell that proves the
 # terminal event loops CI could previously only compile (ROADMAP M5).
 # "composefs-to-ostree" (#260) installs the BASE image composefs-native,
 # then runs bootc-rebase --target-backend ostree: the target's own bootc
 # builds an OSTree deployment beside the composefs root (`bootc install
-# to-existing-root`), /etc and /var are carried over, the composefs entry
-# is kept as rollback, and the reboot must land in the OSTree deployment.
+# to-existing-root`), /etc and /var are carried over, the composefs entry is
+# kept as rollback, and the reboot must land in the OSTree deployment.
 # "image-swap" installs the BASE image composefs-native and runs bootc-rebase
 # --target-backend composefs against a different composefs-capable image:
 # the ImageSwap route stages the target with the host's own `bootc switch`
 # and the reboot must land in the target's deployment with the base kept
 # as rollback. The matrix pair is dakota -> utah (Fedora Hummingbird).
+# "bootloader-trial" installs the encrypted GRUB2 source path, then runs
+# standalone `migrate-bootloader` through the shared rebase controller. It
+# swaps OVMF BootOrder around the one-boot trial, reboots, exercises the
+# kernel-install resync hook, promotes, undoes, and reboots back to GRUB.
+# "package-install" boots an official cloud image with cloud-init, creates
+# package-managed fixtures, and runs bootc-rebase's package -> OSTree route.
 E2E_MODE="${E2E_MODE:-composefs-migrate}"
+E2E_PACKAGE_BASE="${E2E_PACKAGE_BASE:-}"
+E2E_PACKAGE_CROSS_FAMILY="${E2E_PACKAGE_CROSS_FAMILY:-0}"
+IS_PACKAGE_INSTALL=false
+if [ "$E2E_MODE" = "package-install" ]; then
+    IS_PACKAGE_INSTALL=true
+    case "$E2E_PACKAGE_BASE" in
+        fedora-cloud|fedora-workstation|ubuntu-cloud) ;;
+        *) echo "ERROR: E2E_PACKAGE_BASE must be fedora-cloud, fedora-workstation, or ubuntu-cloud"; exit 1 ;;
+    esac
+fi
 # Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
 # patching, skipping host-side SSH injection); the lvm variant additionally
@@ -103,6 +119,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 step() { printf '\033[1;36m[e2e %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+# The composefs image kernel argument. bootc wrote `composefs=<hex>`; newer
+# bootc writes `composefs.digest=v1-sha512-12:<hex>`. Both name the booted
+# image (crates/bootc-migrate-core/src/composefs_karg.rs). Anchored to a token
+# start, so `rd.composefs=` and `ostree.composefs=` do not match.
+CFS_KARG_RE='(^| )composefs(\.digest)?='
+# composefs_verity CMDLINE: the hex digest of the booted composefs image, in
+# either form, or nothing.
+composefs_verity() {
+    printf '%s\n' "$1" | tr ' ' '\n' | sed -n \
+        -e 's/^composefs=?\{0,1\}\(sha512:\)\{0,1\}\(..*\)/\2/p' \
+        -e 's/^composefs\.digest=.*:\(..*\)/\1/p' \
+        -e 's/^composefs\.digest=\([^:][^:]*\)$/\1/p' | head -1
+}
 
 # CI-friendly serial-console filter. The raw QEMU log dumps thousands of systemd
 # `[ OK ] Started …` lines per boot — readable on a TTY, useless in CI. Only
@@ -228,6 +258,145 @@ heartbeat() {
             "$(date +%H:%M:%S)" "$label" "$((SECONDS - started))"
     done
 }
+# Package-install cells use an official cloud image instead of bootc
+# to-disk. The cloud-init seed installs the same root SSH socket used by the
+# other cells, so the package assertions can exercise the real VM lifecycle.
+wait_for_package_ssh() {
+    local label="$1"
+    local max="${2:-240}"
+    local start=$SECONDS
+    local attempt=1
+
+    while [ $((SECONDS - start)) -le "$max" ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "$label after $((SECONDS - start))s."
+            return 0
+        fi
+        if [ $((attempt % 10)) -eq 0 ]; then
+            step "still waiting for $label ($((SECONDS - start))s elapsed, max ${max}s)"
+        fi
+        sleep 3
+        attempt=$((attempt + 1))
+    done
+    echo "ERROR: $label timeout ($((SECONDS - start))s)" >&2
+    serial_failure_lines | tail -80 || true
+    tail -100 qemu.log || true
+    return 1
+}
+
+assert_package_install() {
+    step "=== package-install: target status and package fixtures ==="
+    STATUS_OUT=$(ssh $SSH_OPTS root@localhost "bootc status")
+    echo "$STATUS_OUT" | sed 's/^/  /'
+    BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" \
+        | jq -r '.status.booted.image.image.image // empty')
+    [ -n "$BOOTED_IMG" ] || { echo "FAIL: package target has no booted image"; exit 1; }
+    echo "  booted image: $BOOTED_IMG"
+    echo "$BOOTED_IMG" | grep -qF "$TARGET_REPO_TAG" || {
+        echo "FAIL: booted image is '$BOOTED_IMG', expected $VM_TARGET_IMAGE"; exit 1; }
+    BOOTED_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    if [ -n "$E2E_EXPECT_OS_ID" ] && [ "$BOOTED_ID" != "$E2E_EXPECT_OS_ID" ]; then
+        echo "FAIL: booted os-release ID is '$BOOTED_ID', expected '$E2E_EXPECT_OS_ID'"
+        exit 1
+    fi
+
+    # The package route must emit its route and software inventory before the
+    # reboot. This guards against a successful no-op that merely leaves the
+    # cloud image running.
+    grep -Eiq 'package[[:space:]]*(->|install)|PackageInstall' /tmp/e2e-migrate.log || {
+        echo "FAIL: migration output did not identify the package-install route"; exit 1; }
+    SOFTWARE_REPORT=$(ssh $SSH_OPTS root@localhost \
+        "for report in /var/lib/bootc-rebase/software-report.json /var/lib/bootc-rebase/software-report.md; do [ -f \"\$report\" ] && { printf '%s' \"\$report\"; break; }; done")
+    [ -n "$SOFTWARE_REPORT" ] || { echo "FAIL: software report was not written"; exit 1; }
+    ssh $SSH_OPTS root@localhost "grep -qi 'cowsay' '$SOFTWARE_REPORT'" || {
+        echo "FAIL: software report does not list the package-only cowsay CLI"; exit 1; }
+
+    HOME_MARKER=$(ssh $SSH_OPTS root@localhost \
+        "for p in /var/home/realuser/home-package-marker /home/realuser/home-package-marker; do [ -f \"\$p\" ] && { cat \"\$p\"; break; }; done")
+    [ "$HOME_MARKER" = "package-home-data" ] || {
+        echo "FAIL: /home fixture was not carried to /var/home (got: $HOME_MARKER)"; exit 1; }
+    VAR_MARKER=$(ssh $SSH_OPTS root@localhost "cat /var/rebase-test/marker.txt 2>/dev/null || true")
+    [ "$VAR_MARKER" = "var-rebase-value" ] || { echo "FAIL: /var fixture was not carried"; exit 1; }
+    REALUSER=$(ssh $SSH_OPTS root@localhost "getent passwd realuser || true")
+    [ -n "$REALUSER" ] || { echo "FAIL: realuser was not carried"; exit 1; }
+    PASS_STATE=$(ssh $SSH_OPTS root@localhost "passwd -S realuser | awk '{print \$2}'")
+    case "$PASS_STATE" in
+        P|PS) ;;
+        *) echo "FAIL: realuser password is not usable (passwd state: $PASS_STATE)"; exit 1 ;;
+    esac
+    USER_HOME=$(ssh $SSH_OPTS root@localhost "getent passwd realuser | cut -d: -f6")
+    USER_UID=$(ssh $SSH_OPTS root@localhost "id -u realuser")
+    ssh $SSH_OPTS root@localhost \
+        "grep -qF \"$(cat ./test_key.pub)\" '$USER_HOME/.ssh/authorized_keys'" || {
+        echo "FAIL: realuser SSH key was not carried"; exit 1; }
+
+    ssh $SSH_OPTS root@localhost "test -f /etc/e2e-package/unpackaged.conf" || {
+        echo "FAIL: unpackaged /etc fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /etc/NetworkManager/system-connections/e2e-package.nmconnection" || {
+        echo "FAIL: NetworkManager connection fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /var/lib/flatpak/app/com.example.SystemApp/current/active/metadata" || {
+        echo "FAIL: system Flatpak fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /var/home/realuser/.local/share/flatpak/app/org.gnome.Calculator/current/active/metadata" || {
+        echo "FAIL: user Flatpak fixture was not carried"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "install -d -m700 -o realuser -g realuser /run/user/$USER_UID && runuser -u realuser -- env HOME='$USER_HOME' XDG_RUNTIME_DIR=/run/user/$USER_UID podman image exists docker.io/library/alpine:3.22" || {
+        echo "FAIL: rootless Podman image fixture was not carried"; exit 1; }
+
+    # The target vendor file wins, while the source edit remains auditable in
+    # a sidecar. The exact vendor path differs between dnf and apt sources.
+    TARGET_MANAGER_CONFIG=$(ssh $SSH_OPTS root@localhost \
+        "if [ -f /etc/dnf/dnf.conf ]; then cat /etc/dnf/dnf.conf; elif [ -f /etc/apt/apt.conf.d/99-e2e-package ]; then cat /etc/apt/apt.conf.d/99-e2e-package; fi")
+    if echo "$TARGET_MANAGER_CONFIG" | grep -q 'e2e-package-manager-edit'; then
+        echo "FAIL: target vendor package-manager config was overwritten by the source edit"
+        exit 1
+    fi
+    PACKAGE_SIDECAR=$(ssh $SSH_OPTS root@localhost \
+        "find /etc -type f \\( -name 'dnf.conf.rebase-old' -o -name 'dnf.conf.rebase-new' -o -name '99-e2e-package.rebase-old' -o -name '99-e2e-package.rebase-new' \\) -print -quit")
+    [ -n "$PACKAGE_SIDECAR" ] || { echo "FAIL: source package-manager edit has no /etc sidecar"; exit 1; }
+    ssh $SSH_OPTS root@localhost "grep -q 'e2e-package-manager-edit' '$PACKAGE_SIDECAR'" || {
+        echo "FAIL: package-manager sidecar does not contain the source edit"; exit 1; }
+    ssh $SSH_OPTS root@localhost "test -f /etc/nsswitch.conf" || {
+        echo "FAIL: target nsswitch.conf is missing"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /etc/pam.d/system-auth || test -f /etc/pam.d/common-auth" || {
+        echo "FAIL: target PAM configuration is missing"; exit 1; }
+
+    assert_system_healthy "package-install target"
+
+    step "=== package-install: booting Previous system with fixtures ==="
+    PREVIOUS_ENTRY=$(ssh $SSH_OPTS root@localhost \
+        "grep -il 'previous system' /boot/loader/entries/*.conf /boot/efi/loader/entries/*.conf /efi/loader/entries/*.conf 2>/dev/null | head -1")
+    [ -n "$PREVIOUS_ENTRY" ] || { echo "FAIL: no 'Previous system' boot entry was generated"; exit 1; }
+    PREVIOUS_ID=$(basename "$PREVIOUS_ENTRY" .conf)
+    ssh $SSH_OPTS root@localhost \
+        "if command -v bootctl >/dev/null 2>&1 && bootctl set-oneshot '$PREVIOUS_ID' 2>/dev/null; then :; elif command -v grub2-reboot >/dev/null 2>&1; then grub2-reboot '$PREVIOUS_ID'; elif command -v grub-reboot >/dev/null 2>&1; then grub-reboot '$PREVIOUS_ID'; else echo 'no bootloader one-shot selector' >&2; exit 1; fi"
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "Previous system SSH" 240
+    SOURCE_ID=$(ssh $SSH_OPTS root@localhost ". /etc/os-release && echo \"\$ID\"")
+    case "$E2E_PACKAGE_BASE" in
+        ubuntu-cloud) [ "$SOURCE_ID" = ubuntu ] || {
+            echo "FAIL: Previous system ID is '$SOURCE_ID', expected ubuntu"; exit 1; } ;;
+        *) [ "$SOURCE_ID" = fedora ] || {
+            echo "FAIL: Previous system ID is '$SOURCE_ID', expected fedora"; exit 1; } ;;
+    esac
+    OLD_HOME_MARKER=$(ssh $SSH_OPTS root@localhost \
+        "cat /var/home/realuser/home-package-marker /home/realuser/home-package-marker 2>/dev/null | head -1")
+    [ "$OLD_HOME_MARKER" = "package-home-data" ] || {
+        echo "FAIL: Previous system did not retain the user home fixture"; exit 1; }
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "target return SSH" 240
+    FINAL_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" \
+        | jq -r '.status.booted.image.image.image // empty')
+    echo "$FINAL_IMG" | grep -qF "$TARGET_REPO_TAG" || {
+        echo "FAIL: return boot did not select target image (got: $FINAL_IMG)"; exit 1; }
+    echo "OK: package source, target, fixtures, software report, and Previous system round-trip passed."
+}
+
 
 # Kill any stray QEMU/tail processes from a previous interrupted run so this
 # invocation isn't competing for SSH_PORT or polluting qemu.log with stale tails.
@@ -261,6 +430,7 @@ rm -f "$WORKSPACE_DIR"/disk.raw "$WORKSPACE_DIR"/qemu.log "$WORKSPACE_DIR"/test_
 step "=== E2E Test Configuration ==="
 echo "Base Image (OSTree):   $BASE_IMAGE"
 echo "Target Image (Cfs):    $TARGET_IMAGE"
+echo "Package Base:         ${E2E_PACKAGE_BASE:-n/a}"
 echo "Disk Size:             $DISK_SIZE"
 echo "Workspace:             $WORKSPACE_DIR"
 
@@ -323,6 +493,24 @@ step "=== Generating SSH test key ==="
 rm -f ./test_key ./test_key.pub
 ssh-keygen -t rsa -N "" -f ./test_key
 
+declare -a PACKAGE_QEMU_ARGS=()
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== Preparing official package-managed base image ==="
+    PACKAGE_CLOUD_INIT_ISO="$WORKSPACE_DIR/package-cloud-init.iso"
+    PACKAGE_IMAGE_CACHE="${E2E_PACKAGE_CACHE:-$WORKSPACE_DIR/.e2e-package-images}"
+    PACKAGE_QEMU_ARGS=(
+        -drive "file=$PACKAGE_CLOUD_INIT_ISO,format=raw,if=virtio,readonly=on"
+    )
+    sudo env \
+        E2E_PACKAGE_BASE="$E2E_PACKAGE_BASE" \
+        E2E_PACKAGE_DISK="$WORKSPACE_DIR/disk.raw" \
+        E2E_PACKAGE_SEED="$PACKAGE_CLOUD_INIT_ISO" \
+        E2E_PACKAGE_DISK_SIZE="$DISK_SIZE" \
+        E2E_PACKAGE_CACHE="$PACKAGE_IMAGE_CACHE" \
+        E2E_SSH_PUBLIC_KEY="$(cat ./test_key.pub)" \
+        "$SCRIPT_DIR/package-base.sh"
+    INSTALL_IMAGE=""
+else
 # 4. Prepare bootable image with sshd enabled (some OSTree images like Bluefin disable sshd by default)
 step "=== Preparing bootable image with sshd ==="
 MODIFIED_IMAGE="localhost/e2e-bluefin-ssh:latest"
@@ -360,6 +548,15 @@ RUN mkdir -p /etc/ssh && \
     echo 'Port 22' >> /etc/ssh/sshd_config
 # Disable firewalld / ufw / SuSEfirewall (CentOS Stream 10 / Ubuntu block SSH by default)
 RUN systemctl disable firewalld ufw SuSEfirewall2 2>/dev/null || true
+# The socket-activated sshd can receive the harness's first probe before
+# Fedora's host-key generators finish. Make all key instances members of
+# sshd-keygen.target; each e2e-sshd@.service waits for that target before
+# starting sshd.
+RUN mkdir -p /etc/systemd/system/sshd-keygen.target.wants && \
+    for key in rsa ecdsa ed25519; do \
+        ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
+            "/etc/systemd/system/sshd-keygen.target.wants/sshd-keygen@${key}.service"; \
+    done
 # e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
 RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
@@ -374,6 +571,8 @@ RUN mkdir -p /etc/systemd/system && \
     printf '%s\n' \
         '[Unit]' \
         'Description=E2E SSH per-connection service' \
+        'Wants=sshd-keygen.target' \
+        'After=sshd-keygen.target' \
         '[Service]' \
         'ExecStart=-/usr/sbin/sshd -i' \
         'StandardInput=socket' \
@@ -405,11 +604,15 @@ echo "Using install image: $INSTALL_IMAGE"
 # harmless deviation on the target image is out of scope for the E2E's sshd
 # setup: post-merge injection (below, mirroring the ostree-rebase path) covers
 # it without touching what the migration actually pulls.
+fi
 
 # 5. Create and initialize disk image (or restore checkpoint)
 # LUKS: checkpoint has plain partition layout, not LUKS — always full setup.
 CHECKPOINT="$WORKSPACE_DIR/disk.raw.pre-migration"
-if [ "$IS_LUKS" = true ]; then
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    echo "Package mode: using cloud-init-prepared disk; skipping bootc install and checkpoint restore"
+    SKIP_SETUP=true
+elif [ "$IS_LUKS" = true ]; then
     echo "LUKS mode: skipping pre-migration checkpoint (needs fresh LUKS setup)"
     SKIP_SETUP=false
 elif [ -f "$CHECKPOINT" ]; then
@@ -495,6 +698,7 @@ cleanup() {
     exec 9>&- 2>/dev/null || true
     rm -f /tmp/e2e-qemu-stdin 2>/dev/null || true
     rm -f ./test_key ./test_key.pub
+    rm -f "${PACKAGE_CLOUD_INIT_ISO:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -710,23 +914,30 @@ else
 fi
 fi
 
-# Force kernel to reread partition table by detaching and re-attaching
-if [ "$IS_LUKS" = true ]; then
-    echo "LUKS mode: skipping loop cycle and SSH injection (root is encrypted)"
-    # LUKS root is inaccessible from host; SSH key was injected by
-    # bootc install to-disk --root-ssh-authorized-keys
-    # Skip injection/fixtures/BLS steps: jump to OVMF setup
-fi
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    echo "Package mode: disk already prepared from a cloud image; skipping loop cycle"
+    LOOP_DEV=""
+else
+    # Force kernel to reread partition table by detaching and re-attaching
+    if [ "$IS_LUKS" = true ]; then
+        echo "LUKS mode: skipping loop cycle and SSH injection (root is encrypted)"
+        # LUKS root is inaccessible from host; SSH key was injected by
+        # bootc install to-disk --root-ssh-authorized-keys
+        # Skip injection/fixtures/BLS steps: jump to OVMF setup
+    fi
 
-if [ "$IS_LUKS" != true ]; then
-    echo "Cycling loop device to refresh partitions..."
+    if [ "$IS_LUKS" != true ]; then
+        echo "Cycling loop device to refresh partitions..."
+    fi
+    sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
+    LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
+    echo "Re-attached loop device: $LOOP_DEV"
 fi
-sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
-LOOP_DEV=$(sudo losetup --show -f -P disk.raw)
-echo "Re-attached loop device: $LOOP_DEV"
 
 # 5. Inject SSH keys and configuration (skip for LUKS — root is encrypted)
-if [ "$IS_LUKS" = true ]; then
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    echo "Package mode: cloud-init supplied SSH credentials and the e2e socket"
+elif [ "$IS_LUKS" = true ]; then
     echo "LUKS mode: SSH key already injected by bootc install, skipping host-side injection"
 else
 step "=== Injecting SSH credentials to disk image ==="
@@ -781,12 +992,17 @@ SSHD_CONFIG_DIR="$STATEROOT_VAR/etc/ssh"
 sudo mkdir -p "$SSHD_CONFIG_DIR/sshd_config.d"
 echo "PermitRootLogin yes" | sudo tee "$SSHD_CONFIG_DIR/sshd_config.d/90-e2e.conf" >/dev/null 2>&1 || true
 
-# Add e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local + vsock).
-# Written to the live /etc so it's in `cur` but NOT in the OSTree factory `old`.
-# This ensures the ComposeFS 3-way merge treats it as a user-created file and
-# preserves it across migration.
+# Add e2e-sshd.socket for TCP 22 (Bluefin's sshd only binds Unix-local and
+# vsock). The per-connection service waits for host-key generation below.
+# Written to the live /etc so it's in `cur` but NOT in the OSTree factory
+# `old`. This ensures the ComposeFS 3-way merge treats it as a user-created
+# file and preserves it across migration.
 ETC_SYSTEMD="$STATEROOT_VAR/etc/systemd/system"
-sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants" "$ETC_SYSTEMD/emergency.target.wants" "$ETC_SYSTEMD/rescue.target.wants"
+sudo mkdir -p "$ETC_SYSTEMD/sockets.target.wants" "$ETC_SYSTEMD/sshd-keygen.target.wants" "$ETC_SYSTEMD/emergency.target.wants" "$ETC_SYSTEMD/rescue.target.wants"
+for key in rsa ecdsa ed25519; do
+    sudo ln -sf /usr/lib/systemd/system/sshd-keygen@.service \
+        "$ETC_SYSTEMD/sshd-keygen.target.wants/sshd-keygen@${key}.service"
+done
 sudo tee "$ETC_SYSTEMD/e2e-sshd.socket" >/dev/null <<'SOCKETEOF'
 [Unit]
 Description=E2E SSH TCP Socket (port 22)
@@ -799,6 +1015,8 @@ SOCKETEOF
 sudo tee "$ETC_SYSTEMD/e2e-sshd@.service" >/dev/null <<'SERVICEEOF'
 [Unit]
 Description=E2E SSH per-connection service
+Wants=sshd-keygen.target
+After=sshd-keygen.target
 [Service]
 ExecStart=-/usr/sbin/sshd -i
 StandardInput=socket
@@ -833,6 +1051,7 @@ fi
 
 MNT_DIR="${MNT_DIR:-/tmp/mnt-e2e-disk}"
 
+if [ "$IS_PACKAGE_INSTALL" != true ]; then
 # Inject console=ttyS0 into BLS entries so the kernel logs to serial (visible
 # in qemu.log). Without this, desktop-flavored images like Bluefin send kernel
 # output only to the graphical console and we have zero visibility post-GRUB.
@@ -882,6 +1101,7 @@ LOOP_DEV=""
 echo "Disk image initialized and customized."
 # Save checkpoint for faster re-runs (skip disk creation + install).
 cp disk.raw "$CHECKPOINT"
+fi
 
 # 6. Launch QEMU VM
 step "=== Booting VM under QEMU ==="
@@ -998,6 +1218,7 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_PATH" \
     -drive if=pflash,format=raw,file="$OVMF_VARS" \
     -drive file=disk.raw,format=raw,if=virtio \
+    "${PACKAGE_QEMU_ARGS[@]}" \
     -netdev user,id=n1,hostfwd=tcp::"$SSH_PORT"-:22 \
     -device virtio-net-pci,netdev=n1 \
     ${SWTPM_QEMU_ARGS:-} < "$QEMU_STDIN" > qemu.log 2>&1 &
@@ -1005,7 +1226,11 @@ QEMU_PID=$!
 
 # 7. Wait for SSH to be available
 echo "Waiting for VM to boot and SSH to become available on port $SSH_PORT..."
-MAX_ATTEMPTS=60
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    MAX_ATTEMPTS=120
+else
+    MAX_ATTEMPTS=60
+fi
 ATTEMPT=1
 SSH_OPTS="-i ./test_key -p $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 SCP_OPTS="-i ./test_key -P $SSH_PORT -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
@@ -1035,6 +1260,24 @@ if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     step "=== QEMU logs ==="
     cat qemu.log || true
     exit 1
+fi
+
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== Waiting for package base cloud-init ==="
+    CLOUD_INIT_DONE=false
+    for _ in $(seq 1 120); do
+        CLOUD_INIT_STATUS=$(ssh $SSH_OPTS root@localhost "cloud-init status 2>/dev/null || true")
+        if echo "$CLOUD_INIT_STATUS" | grep -q 'status: done'; then
+            CLOUD_INIT_DONE=true
+            break
+        fi
+        sleep 5
+    done
+    if [ "$CLOUD_INIT_DONE" != true ]; then
+        echo "FAIL: package base cloud-init did not finish"
+        ssh $SSH_OPTS root@localhost "cloud-init status --long; journalctl -u cloud-final --no-pager -n 100" || true
+        exit 1
+    fi
 fi
 
 # 8. The migration pulls the target image directly from its upstream registry
@@ -1069,6 +1312,315 @@ if [ "$E2E_MODE" = "ostree-rebase-plan" ]; then
     exit 0
 fi
 
+if [ "$E2E_MODE" = "bootloader-trial" ]; then
+    # Keep the executables across reboot without writing immutable /usr/local.
+    # A private root-owned directory prevents other guest users swapping files.
+    TRIAL_BIN_DIR=$(ssh $SSH_OPTS root@localhost 'umask 077; mktemp -d /var/tmp/bootc-trial.XXXXXXXX')
+    [[ "$TRIAL_BIN_DIR" =~ ^/var/tmp/bootc-trial\.[a-zA-Z0-9]{8}$ ]] || {
+        echo "FAIL: invalid bootloader-trial staging directory"; exit 1;
+    }
+    scp $SCP_OPTS target/release/bootc-rebase "root@localhost:$TRIAL_BIN_DIR/bootc-rebase"
+    scp $SCP_OPTS target/release/bootc-migrate "root@localhost:$TRIAL_BIN_DIR/bootc-migrate"
+    ssh $SSH_OPTS root@localhost bash -s -- "$TRIAL_BIN_DIR" <<'TRIAL_BIN_SETUP'
+set -euo pipefail
+dir=$1
+[[ -d "$dir" && ! -L "$dir" && "$(stat -c '%u:%a' "$dir")" = 0:700 ]]
+for binary in "$dir/bootc-rebase" "$dir/bootc-migrate"; do
+    [[ -f "$binary" && ! -L "$binary" && "$(stat -c '%u' "$binary")" = 0 ]]
+    chmod 0755 "$binary"
+    test -x "$binary"
+done
+test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg
+TRIAL_BIN_SETUP
+
+    ORIGINAL_EFIBOOTMGR=$(ssh $SSH_OPTS root@localhost "efibootmgr -v")
+    ORIGINAL_ORDER=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
+        | sed -n 's/^BootOrder: *//p')
+    ORIGINAL_FIRST=$(printf '%s\n' "$ORIGINAL_ORDER" \
+        | sed 's/,.*//')
+    ORIGINAL_FIRST_LINE=$(printf '%s\n' "$ORIGINAL_EFIBOOTMGR" \
+        | grep "^Boot${ORIGINAL_FIRST}" | head -1 || true)
+    [ -n "$ORIGINAL_ORDER" ] || { echo "FAIL: no initial BootOrder"; exit 1; }
+    [ -n "$ORIGINAL_FIRST_LINE" ] || {
+        echo "FAIL: initial BootOrder entry $ORIGINAL_FIRST has no firmware record"
+        exit 1
+    }
+    echo "  original BootOrder: $ORIGINAL_ORDER"
+    echo "  original first entry: $ORIGINAL_FIRST_LINE"
+
+    step "=== bootloader-trial: staging the systemd-boot trial through rebase_controller ==="
+    if ! ssh $SSH_OPTS root@localhost \
+        "$TRIAL_BIN_DIR/bootc-rebase migrate-bootloader --to systemd-boot --from-image '$VM_TARGET_IMAGE'" \
+        > /tmp/bootloader-trial-stage.log 2>&1; then
+        sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
+        echo "FAIL: migrate-bootloader staging failed"
+        # Read-only layout evidence for discovery failures; retain the stage failure.
+        if ! ssh $SSH_OPTS root@localhost bash -s <<'TRIAL_DISCOVERY_DIAGNOSTICS'
+set -uo pipefail
+diagnostic_status=0
+collect() {
+    if ! "$@"; then
+        diagnostic_status=1
+    fi
+}
+echo '--- deployment identities ---'
+collect ostree admin status
+command_line=()
+if ! read -r -a command_line < /proc/cmdline; then
+    diagnostic_status=1
+fi
+for argument in "${command_line[@]}"; do
+    case "$argument" in
+        ostree=/*) printf '%s\n' "$argument"; collect readlink -e "/sysroot${argument#ostree=}" ;;
+        composefs=* | composefs.digest=*) printf '%s\n' "$argument" ;;
+    esac
+done
+echo '--- physical deployment directories ---'
+if ! find /sysroot/ostree/deploy -maxdepth 3 -type d | head -80; then
+    diagnostic_status=1
+fi
+echo '--- running kernel files ---'
+collect uname -r
+if ! find /usr/lib/modules -maxdepth 2 \( -name 'vmlinuz*' -o -name 'initramfs*' \) -ls | head -40; then
+    diagnostic_status=1
+fi
+echo '--- deployed kernel files ---'
+for modules in /sysroot/ostree/deploy/*/deploy/*/usr/lib/modules/*; do
+    [ -d "$modules" ] || continue
+    collect ls -ld "$modules" "$modules/vmlinuz" "$modules/initramfs.img"
+done
+echo '--- boot kernel files and BLS entries ---'
+if ! find /boot/ostree -maxdepth 2 \( -type f -o -type l \) -ls | head -80; then
+    diagnostic_status=1
+fi
+for entry in /boot/loader/entries/*.conf; do
+    [ -f "$entry" ] || continue
+    echo "--- $entry ---"
+    collect cat "$entry"
+done
+exit "$diagnostic_status"
+TRIAL_DISCOVERY_DIAGNOSTICS
+        then
+            echo "WARN: could not collect all deployment discovery diagnostics"
+        fi
+        exit 1
+    fi
+    sed 's/^/[bootloader-stage] /' /tmp/bootloader-trial-stage.log
+
+    TRIAL_ID=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"boot_id\": \"\\([0-9A-Fa-f]\\{4\\}\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json")
+    ESP_PATH=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"esp_path\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json")
+    ENTRY_TOKEN=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"entry_token\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json")
+    FIRST_KVER=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"kernel_version\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json" \
+        | head -1)
+    FIRST_ENTRY=$(ssh $SSH_OPTS root@localhost \
+        "sed -n 's/.*\"bls_filename\": \"\\([^\"]*\\)\".*/\\1/p' /var/lib/bootc-migrate/migrate-bootloader-state.json" \
+        | head -1)
+    [ -n "$TRIAL_ID" ] && [ -n "$ESP_PATH" ] && [ -n "$ENTRY_TOKEN" ] \
+        && [ -n "$FIRST_KVER" ] && [ -n "$FIRST_ENTRY" ] || {
+        echo "FAIL: migration state did not contain trial identifiers"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost \
+        "efibootmgr -v | grep -F 'Boot${TRIAL_ID}' | grep -F 'bootc-migrate trial'"
+    ssh $SSH_OPTS root@localhost \
+        "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
+         test -f '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux' && \
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install"
+    # The hook must run its own copy of the binary by absolute path: the
+    # staging directory is not on PATH and /usr/local is read-only here.
+    ssh $SSH_OPTS root@localhost \
+        "grep -qF \"exec '/var/lib/bootc-migrate/bin/bootc-rebase' migrate-bootloader --resync\" \
+             /etc/kernel/install.d/95-bootc-migrate-esp-sync.install && \
+         test -x /var/lib/bootc-migrate/bin/bootc-rebase" || {
+        echo "FAIL: the resync hook does not run /var/lib/bootc-migrate/bin/bootc-rebase"
+        exit 1
+    }
+
+    # OVMF does not honor BootNext consistently in this path. Deliberately
+    # make the trial first in BootOrder so the reboot proves the same
+    # firmware selection that real hardware performs after an operator's
+    # trial, while keeping the pre-migration order for --undo.
+    TRIAL_REST=$(printf '%s\n' "$ORIGINAL_ORDER" \
+        | tr ',' '\n' | { grep -vi "^${TRIAL_ID}$" || true; } | paste -sd, -)
+    TRIAL_ORDER="$TRIAL_ID"
+    [ -z "$TRIAL_REST" ] || TRIAL_ORDER="$TRIAL_ORDER,$TRIAL_REST"
+    step "=== bootloader-trial: swapping OVMF BootOrder to the trial ==="
+    ssh $SSH_OPTS root@localhost "efibootmgr --bootorder '$TRIAL_ORDER'"
+    SWAPPED_ORDER=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootOrder: *//p'")
+    [ "${SWAPPED_ORDER%%,*}" = "$TRIAL_ID" ] || {
+        echo "FAIL: OVMF BootOrder did not put trial Boot${TRIAL_ID} first"
+        exit 1
+    }
+
+    step "=== bootloader-trial: rebooting into the trial ==="
+    vm_tail bootloader-trial &
+    TAIL_PID=$!
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "VM accessible via systemd-boot trial after $((SECONDS - WAIT_START))s."
+            kill "$TAIL_PID" 2>/dev/null || true
+            TAIL_PID=""
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for trial SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "FAIL: SSH did not answer after the systemd-boot trial reboot"
+        serial_failure_lines | tail -40 || true
+        exit 1
+    fi
+    CURRENT_TRIAL=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootCurrent: *//p'")
+    [ "$CURRENT_TRIAL" = "$TRIAL_ID" ] || {
+        echo "FAIL: BootCurrent=$CURRENT_TRIAL, expected trial Boot$TRIAL_ID"
+        exit 1
+    }
+    # The staging run recorded a private ESP mount under /run; it did not
+    # survive the reboot. Mount the ESP at a path the harness owns and check
+    # the trial there, so the checks never pass against an empty directory.
+    ESP_PATH=$(ssh $SSH_OPTS root@localhost bash <<'TRIAL_ESP_MOUNT'
+set -euo pipefail
+dir=/run/e2e-esp
+mkdir -p "$dir"
+if ! mountpoint -q "$dir"; then
+    dev=$(lsblk -lnpo PATH,PARTTYPE \
+        | awk '$2 == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+    [ -n "$dev" ] || { echo "no ESP partition found" >&2; exit 1; }
+    mount "$dev" "$dir"
+fi
+echo "$dir"
+TRIAL_ESP_MOUNT
+    ) || { echo "FAIL: could not mount the ESP after the trial reboot"; exit 1; }
+    ssh $SSH_OPTS root@localhost \
+        "test -f '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
+         test -f /etc/kernel/install.d/95-bootc-migrate-esp-sync.install" || {
+        echo "FAIL: the trial entry or the resync hook is missing after the reboot"
+        exit 1
+    }
+
+    step "=== bootloader-trial: invoking the kernel-install resync hook ==="
+    ssh $SSH_OPTS root@localhost bash <<'TRIAL_RESYNC'
+set -euo pipefail
+# No bootc-rebase on PATH: the hook has to find its own copy.
+export PATH=/usr/bin:/bin
+STATE=/var/lib/bootc-migrate/migrate-bootloader-state.json
+TOKEN=$(sed -n 's/.*"entry_token": "\([^"]*\)".*/\1/p' "$STATE")
+KVER=$(uname -r)
+KERNEL=$(readlink -f "/usr/lib/modules/$KVER/vmlinuz" 2>/dev/null || true)
+if [ -z "$KERNEL" ] || [ ! -f "$KERNEL" ]; then
+    KERNEL=$(find "/usr/lib/modules/$KVER" -maxdepth 1 -type f -name 'vmlinuz*' -print -quit)
+fi
+INITRD=$(find "/usr/lib/modules/$KVER" -maxdepth 1 -type f \
+    -name 'initramfs*' ! -name '*kdump*' -print | sort | head -1)
+[ -f "$KERNEL" ] || { echo "no kernel image for $KVER"; exit 1; }
+[ -f "$INITRD" ] || { echo "no initramfs image for $KVER"; exit 1; }
+NEW_VERSION="${KVER}-e2e-resync"
+cp "$KERNEL" /var/tmp/e2e-resync-vmlinuz
+cp "$INITRD" /var/tmp/e2e-resync-initrd
+/etc/kernel/install.d/95-bootc-migrate-esp-sync.install \
+    add "$NEW_VERSION" "$TOKEN" \
+    /var/tmp/e2e-resync-vmlinuz /var/tmp/e2e-resync-initrd
+# The hook records the ESP it wrote to; it must be a live mount, not the
+# private /run directory that the staging run left behind.
+ESP=$(sed -n 's/.*"esp_path": "\([^"]*\)".*/\1/p' "$STATE")
+mountpoint -q "$ESP" || { echo "resync wrote to $ESP, which is not a mount point"; exit 1; }
+test -f "$ESP/$TOKEN/$NEW_VERSION/linux"
+test -f "$ESP/loader/entries/bootc-migrate-$TOKEN-$NEW_VERSION.conf"
+test "$(sed -n 's/^default //p' "$ESP/loader/loader.conf")" \
+    = "bootc-migrate-$TOKEN-$NEW_VERSION"
+echo "resync staged kernel version $NEW_VERSION"
+TRIAL_RESYNC
+
+    step "=== bootloader-trial: promoting the tested trial ==="
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --promote
+    PROMOTED_ORDER=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootOrder: *//p'")
+    [ "${PROMOTED_ORDER%%,*}" = "$TRIAL_ID" ] || {
+        echo "FAIL: --promote did not keep trial Boot${TRIAL_ID} first"
+        exit 1
+    }
+    if ssh $SSH_OPTS root@localhost "efibootmgr | grep -q '^BootNext: *${TRIAL_ID}$'"; then
+        echo "FAIL: --promote left BootNext pointing at the trial"
+        exit 1
+    fi
+
+    step "=== bootloader-trial: undoing the promoted migration ==="
+    ssh $SSH_OPTS root@localhost "$TRIAL_BIN_DIR/bootc-rebase" migrate-bootloader --undo
+    RESTORED_ORDER=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootOrder: *//p'")
+    [ "$RESTORED_ORDER" = "$ORIGINAL_ORDER" ] || {
+        echo "FAIL: --undo restored '$RESTORED_ORDER', expected '$ORIGINAL_ORDER'"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost bash <<'TRIAL_UNDO_CHECK'
+set -euo pipefail
+! efibootmgr -v | grep -Fq 'bootc-migrate trial'
+! test -e /var/lib/bootc-migrate/migrate-bootloader-state.json
+! test -e /etc/kernel/install.d/95-bootc-migrate-esp-sync.install
+! test -e /var/lib/bootc-migrate/bin
+TRIAL_UNDO_CHECK
+ssh $SSH_OPTS root@localhost \
+    "test ! -e '$ESP_PATH/loader/entries/$FIRST_ENTRY' && \
+     test ! -e '$ESP_PATH/$ENTRY_TOKEN/$FIRST_KVER/linux'"
+
+    step "=== bootloader-trial: rebooting back through restored GRUB ==="
+    vm_tail bootloader-trial-undo &
+    TAIL_PID=$!
+    ssh $SSH_OPTS root@localhost "reboot" || true
+    sleep 5
+    ATTEMPT=1
+    WAIT_START=$SECONDS
+    while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        if ssh $SSH_OPTS root@localhost true 2>/dev/null; then
+            step "VM accessible after restored-GRUB reboot ($((SECONDS - WAIT_START))s)."
+            kill "$TAIL_PID" 2>/dev/null || true
+            TAIL_PID=""
+            break
+        fi
+        if [ $((ATTEMPT % 5)) -eq 0 ]; then
+            step "still waiting for restored-GRUB SSH ($((SECONDS - WAIT_START))s elapsed, attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        fi
+        sleep 3
+        ATTEMPT=$((ATTEMPT + 1))
+    done
+    if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+        echo "FAIL: SSH did not answer after the restored-GRUB reboot"
+        serial_failure_lines | tail -40 || true
+        exit 1
+    fi
+    FINAL_CURRENT=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr | sed -n 's/^BootCurrent: *//p'")
+    [ "$FINAL_CURRENT" = "$ORIGINAL_FIRST" ] || {
+        echo "FAIL: final BootCurrent=$FINAL_CURRENT, expected GRUB Boot$ORIGINAL_FIRST"
+        exit 1
+    }
+    FINAL_LINE=$(ssh $SSH_OPTS root@localhost \
+        "efibootmgr -v | grep '^Boot${FINAL_CURRENT}' | head -1" || true)
+    [ "$FINAL_LINE" = "$ORIGINAL_FIRST_LINE" ] || {
+        echo "FAIL: restored firmware entry differs from the original"
+        echo "  before: $ORIGINAL_FIRST_LINE"
+        echo "  after:  $FINAL_LINE"
+        exit 1
+    }
+    ssh $SSH_OPTS root@localhost \
+        "test -f /boot/grub2/grub.cfg || test -f /boot/grub/grub.cfg"
+    step "=== bootloader-trial PASSED: trial, resync, promote, undo, GRUB fallback ==="
+    exit 0
+fi
+
 # Full ostree→ostree re-base mode (#63/#64): stage the target as a plain
 # OSTree deployment via Strategy::OstreeDeploy, reboot into it, and assert
 # the image switched while /etc edits and /var data survived (OSTree's
@@ -1087,20 +1639,14 @@ mkdir -p /var/rebase-test
 echo "var-rebase-value" > /var/rebase-test/marker.txt
 REBASEFIX
 
-    # The guest cannot reach ghcr.io for the target-image SCAN (#191) — bootc
-    # switch pulls fine, the scan path does not — so gate_cross_base returns
-    # Unknown here. Since #191 that is a refusal rather than a silent
-    # proceed, which is the whole point: a gate that cannot see must not wave
-    # things through.
+    # The gate depends on scanning the target image before `bootc switch`.
+    # Prove it refuses before opting in. A clean scan should identify the
+    # Bluefin -> Dakota/Aurora pairs as cross-base; an infrastructure
+    # regression may instead produce the fail-closed Unknown verdict (#191).
     #
-    # Prove it fires before opting out of it. The refusal happens before any
-    # staging work, so this costs seconds, and it is the only live coverage
-    # that the gate actually gates — the unit tests cover the policy, not the
-    # wiring.
-    # The scan path (curl -> ghcr.io) has failed inside the guest while
-    # `bootc switch` pulled fine moments later, which blocked both #187 and
-    # #188 without ever naming a cause. Probe it here so the run reports the
-    # truth rather than leaving it to be inferred from a downstream warning.
+    # Probe the same guest path first so a scan failure is classified as
+    # registry/token infrastructure rather than mistaken for a same-lineage
+    # result or an unexercised code path.
     step "=== ostree-rebase: probing the guest's registry reachability (#187) ==="
     ssh $SSH_OPTS root@localhost '
         echo "curl binary: $(command -v curl || echo MISSING)"
@@ -1157,9 +1703,44 @@ REBASEFIX
         exit 1
     fi
 
-    # These image pairs are same-lineage Fedora (bluefin:stable -> dakota /
-    # aurora), and the harness knows it, so it is the operator that opts in.
-    # That is what --accept-cross-base is for; it is not a way around the gate.
+    # A known cross-base result must exercise more than report rendering.
+    # Seed one file with the first reported old UID/GID so the apply pass has
+    # real work under /var, plus a deliberate all-three-differ /etc conflict.
+    # dconf/db/distro is present in both Bluefin and Dakota/Aurora and their
+    # vendor defaults differ; appending the marker makes the live value differ
+    # from both.
+    CROSS_BASE_ETC_MARKER="e2e-cross-base-conflict-marker"
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        REMAP_SPEC=$(echo "$GATE_OUT" | sed -nE \
+            's/^[[:space:]]*([^[:space:]]+)[[:space:]]+(uid|gid)[[:space:]]+([0-9]+)[[:space:]]+->[[:space:]]+([0-9]+)$/\1 \2 \3 \4/p' \
+            | head -1)
+        if [ -z "$REMAP_SPEC" ]; then
+            echo "FAIL: cross-base pair has no divergent system account to seed."
+            echo "      The remap apply path would remain untested."
+            exit 1
+        fi
+        read -r REMAP_NAME REMAP_KIND REMAP_OLD REMAP_NEW <<<"$REMAP_SPEC"
+        step "=== ostree-rebase: seeding remap + /etc conflict fixtures (#187) ==="
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_KIND='$REMAP_KIND' REMAP_OLD='$REMAP_OLD' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASEFIX'
+set -e
+test -f /etc/dconf/db/distro || {
+    echo "FAIL: /etc/dconf/db/distro is absent; cross-base conflict fixture cannot be seeded"; exit 1; }
+printf '\n# %s\n' "$ETC_MARKER" >> /etc/dconf/db/distro
+echo "cross-base-remap-fixture" > /var/rebase-test/remap-owned.txt
+case "$REMAP_KIND" in
+    uid) chown "$REMAP_OLD" /var/rebase-test/remap-owned.txt ;;
+    gid) chgrp "$REMAP_OLD" /var/rebase-test/remap-owned.txt ;;
+    *) echo "FAIL: unsupported remap kind $REMAP_KIND"; exit 1 ;;
+esac
+CROSSBASEFIX
+    fi
+
+    # Every ostree-rebase run proves the gate before opting in. The gating
+    # Bluefin -> Dakota pair is currently a known cross-base pair; same-lineage
+    # desktop-ring cells pass the dry-run gate without needing the opt-in, but
+    # accepting here is harmless and also covers an Unknown scan fail-closed.
     REBASE_FLAGS="--accept-cross-base"
 
     # #188: on the cross-DE cell, also ask for desktop migration. Without
@@ -1208,20 +1789,49 @@ REBASEFIX
     fi
     sed 's/^/[rebase] /' /tmp/rebase-out.log
 
-    # The gate above already proved this pair is cross-base by scanning it, so
-    # the opted-in re-base must show the remap running. This is #187's actual
-    # deliverable — the cross-base code path executing under assertion — and it
-    # is available on this existing cell, without a dedicated matrix entry,
-    # now that the target scan works (the token-scope fix).
+    # A clean cross-base finding must execute both #67 apply paths, not merely
+    # print their plans. The seeded ownership and all-three-differ fixtures
+    # make each pass produce an observable staged result.
     if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
-        step "=== ostree-rebase: asserting the cross-base remap ran after opt-in (#187) ==="
-        if ! grep -q "Cross-base UID/GID remap report" /tmp/rebase-out.log; then
-            echo "FAIL: the gate identified this pair as cross-base, but the"
-            echo "      opted-in re-base printed no remap report. The refusal"
-            echo "      path ran and the apply path did not."
-            exit 1
-        fi
-        echo "OK: cross-base remap report emitted during the opted-in re-base."
+        step "=== ostree-rebase: asserting remap + /etc policy applied (#187) ==="
+        for needle in "Cross-base UID/GID remap report" \
+                      "Cross-base /etc conflict report" \
+                      "/etc/dconf/db/distro"; do
+            if ! grep -qF "$needle" /tmp/rebase-out.log; then
+                echo "FAIL: cross-base output lacks '$needle'."
+                exit 1
+            fi
+        done
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_NAME='$REMAP_NAME' REMAP_KIND='$REMAP_KIND' REMAP_NEW='$REMAP_NEW' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASECHECK'
+set -e
+DEPLOY_LINE=$(ostree admin status | grep -v '^\*' | grep -v '^ *$' | head -1)
+STATEROOT=$(echo "$DEPLOY_LINE" | awk '{print $1}')
+CKSUM_SERIAL=$(echo "$DEPLOY_LINE" | awk '{print $2}')
+DEPLOY_ROOT="/ostree/deploy/${STATEROOT}/deploy/${CKSUM_SERIAL}"
+test -f "$DEPLOY_ROOT/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: cross-base remap JSON report missing"; exit 1; }
+grep -qF "\"name\": \"$REMAP_NAME\"" "$DEPLOY_ROOT/bootc-migrate-remap-report.json" \
+    || { echo "FAIL: remap JSON does not name $REMAP_NAME"; exit 1; }
+case "$REMAP_KIND" in
+    uid) actual=$(stat -c %u /var/rebase-test/remap-owned.txt) ;;
+    gid) actual=$(stat -c %g /var/rebase-test/remap-owned.txt) ;;
+esac
+[ "$actual" = "$REMAP_NEW" ] || {
+    echo "FAIL: /var remap fixture still has $REMAP_KIND $actual, expected $REMAP_NEW"; exit 1; }
+test -f "$DEPLOY_ROOT/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: cross-base /etc conflict JSON report missing"; exit 1; }
+grep -qF '"path": "dconf/db/distro"' "$DEPLOY_ROOT/bootc-migrate-etc-conflict-report.json" \
+    || { echo "FAIL: /etc conflict JSON does not name dconf/db/distro"; exit 1; }
+grep -qF "$ETC_MARKER" "$DEPLOY_ROOT/etc/dconf/db/distro.rebase-old" \
+    || { echo "FAIL: displaced /etc value is absent from .rebase-old sidecar"; exit 1; }
+! grep -qF "$ETC_MARKER" "$DEPLOY_ROOT/etc/dconf/db/distro" \
+    || { echo "FAIL: staged /etc kept the displaced source value"; exit 1; }
+cmp -s "$DEPLOY_ROOT/etc/dconf/db/distro" "$DEPLOY_ROOT/usr/etc/dconf/db/distro" \
+    || { echo "FAIL: staged /etc did not take the target's dconf default"; exit 1; }
+CROSSBASECHECK
+        echo "OK: /var ownership remapped and /etc target default + sidecar staged."
     fi
 
     if [ "${E2E_CROSS_BASE:-0}" = "1" ]; then
@@ -1326,9 +1936,9 @@ REBASEFIX
         # The apply/undo round trip is what proves the executor and its
         # snapshot restore actually work against real firmware variables.
         #
-        # Scope note: #189 also names #65's live bootloader flip. That is NOT
-        # covered here and cannot be — `migrate-bootloader` currently bails
-        # with "not implemented yet (issue #65)", so there is no flip to test.
+        # Scope note: this cell keeps boot-entry cleanup separate. The
+        # standalone #65/#382 live flip is covered by the dedicated
+        # bootloader-trial cell above, including its OVMF order swap.
         step "=== boot-entries: audit is read-only and machine-readable (#31) ==="
         if ! ssh $SSH_OPTS root@localhost \
             "/var/tmp/bootc-rebase boot-entries --json" > /tmp/be-audit.json 2>/tmp/be-audit.err; then
@@ -1703,6 +2313,28 @@ loginctl list-sessions >/dev/null 2>&1 || { echo "FAIL: systemd-logind (via dbus
 echo "OK: dbus/logind healthy post-rebase (#80 identity-DB regression check)"
 REBASECHECK
 
+    if [ "${CROSS_BASE_EXECUTED:-0}" = "1" ]; then
+        step "=== ostree-rebase: cross-base results survived reboot (#187) ==="
+        ssh $SSH_OPTS root@localhost \
+            "REMAP_KIND='$REMAP_KIND' REMAP_NEW='$REMAP_NEW' ETC_MARKER='$CROSS_BASE_ETC_MARKER' bash -s" \
+            <<'CROSSBASEPOST'
+set -e
+case "$REMAP_KIND" in
+    uid) actual=$(stat -c %u /var/rebase-test/remap-owned.txt) ;;
+    gid) actual=$(stat -c %g /var/rebase-test/remap-owned.txt) ;;
+esac
+[ "$actual" = "$REMAP_NEW" ] || {
+    echo "FAIL: rebooted /var fixture has $REMAP_KIND $actual, expected $REMAP_NEW"; exit 1; }
+grep -qF "$ETC_MARKER" /etc/dconf/db/distro.rebase-old \
+    || { echo "FAIL: rebooted deployment lost the .rebase-old sidecar"; exit 1; }
+! grep -qF "$ETC_MARKER" /etc/dconf/db/distro \
+    || { echo "FAIL: rebooted deployment restored the displaced source value"; exit 1; }
+cmp -s /etc/dconf/db/distro /usr/etc/dconf/db/distro \
+    || { echo "FAIL: rebooted /etc does not hold the target's dconf default"; exit 1; }
+echo "OK: remapped ownership, target default and sidecar survived reboot."
+CROSSBASEPOST
+    fi
+
     if [ "${E2E_DE_MIGRATE:-0}" = "1" ]; then
         # #68's other half: the stash is only useful if switching back
         # brings the config home. Emulate the return trip on the booted
@@ -1737,7 +2369,7 @@ if [ "$E2E_MODE" = "composefs-to-ostree" ]; then
     step "=== composefs-to-ostree: asserting the base booted composefs-native ==="
     BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $BASE_CMDLINE"
-    echo "$BASE_CMDLINE" | grep -qE '(^| )composefs=' || {
+    echo "$BASE_CMDLINE" | grep -qE "$CFS_KARG_RE" || {
         echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
         echo "      composefs-native install (bootc install to-disk --composefs-backend)."
         exit 1; }
@@ -1820,6 +2452,12 @@ REVDIAG
     step "=== composefs-to-ostree: re-injecting e2e-sshd into the OSTree deployment ==="
     ssh $SSH_OPTS root@localhost bash <<'REVSSH'
 set -e
+# bootc-rebase puts the /sysroot mount back to read-only when it finishes.
+# These are test-only edits, so lift that one flag (bind: not the
+# filesystem under it) for them.
+if grep -qE '^[^ ]+ /sysroot [^ ]+ ro[, ]' /proc/mounts; then
+    mount -o remount,bind,rw /sysroot
+fi
 DEPLOY_ETC=$(ls -d /sysroot/ostree/deploy/default/deploy/*.0 | head -1)/etc
 [ -d "$DEPLOY_ETC" ] || { echo "FAIL: deployment etc dir not found"; exit 1; }
 mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
@@ -1883,8 +2521,8 @@ REVSSH
     echo "  cmdline: $POST_CMDLINE"
     echo "$POST_CMDLINE" | grep -qE '(^| )ostree=' || {
         echo "FAIL: post-reboot cmdline has no ostree= — the OSTree deployment was not booted"; exit 1; }
-    if echo "$POST_CMDLINE" | grep -qE '(^| )composefs='; then
-        echo "FAIL: post-reboot cmdline still carries composefs="; exit 1
+    if echo "$POST_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
+        echo "FAIL: post-reboot cmdline still carries a composefs argument"; exit 1
     fi
     ssh $SSH_OPTS root@localhost "bootc status" || true
     BOOTED_IMG=$(ssh $SSH_OPTS root@localhost "bootc status --json" | jq -r '.status.booted.image.image.image // empty')
@@ -2046,7 +2684,7 @@ if [ "$E2E_MODE" = "image-swap" ]; then
     step "=== image-swap: asserting the base booted composefs-native ==="
     BASE_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $BASE_CMDLINE"
-    BASE_VERITY=$(echo "$BASE_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    BASE_VERITY=$(composefs_verity "$BASE_CMDLINE")
     [ -n "$BASE_VERITY" ] || {
         echo "FAIL: the base did not boot from a composefs deployment; this mode needs a"
         echo "      composefs-native install (bootc install to-disk --composefs-backend)."
@@ -2081,14 +2719,32 @@ SWAPFIX
     echo "$PLAN_OUT" | grep -q 'Route: composefs -> composefs via ImageSwap (implemented)' || {
         echo "FAIL: expected 'Route: composefs -> composefs via ImageSwap (implemented)'"; exit 1; }
 
+    SWAP_FLAGS=""
+    if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+        # #256: a cross-family swap (for example Arch-based Marlin to
+        # Hummingbird-based Utah) must be refused until the operator opts in.
+        step "=== image-swap: asserting the cross-family gate refuses without opt-in ==="
+        if ssh $SSH_OPTS root@localhost \
+            "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" \
+            > /tmp/rebase-refusal.log 2>&1; then
+            sed 's/^/[refusal] /' /tmp/rebase-refusal.log
+            echo "FAIL: a cross-family image swap ran without --accept-cross-base"; exit 1
+        fi
+        grep -q "Cross-family re-base detected" /tmp/rebase-refusal.log || {
+            sed 's/^/[refusal] /' /tmp/rebase-refusal.log
+            echo "FAIL: the refusal is not the cross-family gate"; exit 1; }
+        echo "OK: the cross-family gate refused the swap without opt-in."
+        SWAP_FLAGS="--accept-cross-base"
+    fi
+
     seed_ownership_fixture
     capture_health_baseline
-    step "=== image-swap: running bootc-rebase --target-backend composefs ==="
+    step "=== image-swap: running bootc-rebase --target-backend composefs ${SWAP_FLAGS} ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
     # long step of this mode, and a job that times out inside it must leave
     # the progress in the log.
     ssh $SSH_OPTS root@localhost \
-        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs" 2>&1 \
+        "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend composefs $SWAP_FLAGS" 2>&1 \
         | tee /tmp/rebase-out.log \
         | awk '{ print "[rebase] " $0; fflush() }'
     REBASE_RC=${PIPESTATUS[0]}
@@ -2242,9 +2898,9 @@ SWAPSSH
     step "=== image-swap: post-reboot assertions ==="
     POST_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
     echo "  cmdline: $POST_CMDLINE"
-    POST_VERITY=$(echo "$POST_CMDLINE" | tr ' ' '\n' | sed -n 's/^composefs=//p' | head -1)
+    POST_VERITY=$(composefs_verity "$POST_CMDLINE")
     [ -n "$POST_VERITY" ] || {
-        echo "FAIL: post-reboot cmdline has no composefs= — a composefs deployment was not booted"; exit 1; }
+        echo "FAIL: post-reboot cmdline has no composefs argument — a composefs deployment was not booted"; exit 1; }
     [ "$POST_VERITY" != "$BASE_VERITY" ] || {
         echo "FAIL: rebooted into the base deployment ($BASE_VERITY), not the staged one"; exit 1; }
     ssh $SSH_OPTS root@localhost "bootc status" || true
@@ -2297,11 +2953,16 @@ SWAPSSH
     exit 0
 fi
 
-step "=== Copying migration utility to VM ==="
-scp $SCP_OPTS target/debug/bootc-migrate root@localhost:/var/tmp/bootc-migrate
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== Copying bootc-rebase to VM ==="
+    scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+else
+    step "=== Copying migration utility to VM ==="
+    scp $SCP_OPTS target/debug/bootc-migrate root@localhost:/var/tmp/bootc-migrate
+fi
 
 step "=== Injecting /etc fixtures (live, copied by migration) ==="
-ssh $SSH_OPTS root@localhost bash <<'ETCFIX'
+ssh $SSH_OPTS root@localhost "E2E_PACKAGE_BASE='$E2E_PACKAGE_BASE' bash -s" <<'ETCFIX'
 set -e
 # Custom config file in /etc to verify /etc state is preserved through migration
 mkdir -p /etc/migration-test
@@ -2317,6 +2978,18 @@ useradd -m -U realuser 2>/dev/null || true
 mkdir -p /var/home/realuser
 echo "real-home-data" > /var/home/realuser/home-marker.txt
 chown -R realuser:realuser /var/home/realuser
+if [ -n "${E2E_PACKAGE_BASE:-}" ]; then
+    # Package bases must exercise a real password and key-bearing human
+    # account, not only an OSTree-style passwd entry.
+    printf 'realuser:e2e-package-password\n' | chpasswd
+    echo "package-home-data" > /home/realuser/home-package-marker
+    mkdir -p /home/realuser/.ssh
+    cp /root/.ssh/authorized_keys /home/realuser/.ssh/authorized_keys
+    chmod 700 /home/realuser/.ssh
+    chmod 600 /home/realuser/.ssh/authorized_keys
+    chown -R realuser:realuser /home/realuser
+fi
+
 # #309 sabotage canary: a tree with a known owner and an old mtime. The
 # migration records it in the identity manifest; a step after staging
 # breaks it, and the first-boot repair must put it back.
@@ -2413,6 +3086,53 @@ ln -sf current /var/lib/alternatives/default 2>/dev/null || true
 
 mkdir -p /var/cache/.hidden-dir
 echo "hidden-file-content" > /var/cache/.hidden-dir/secret
+if [ -n "${E2E_PACKAGE_BASE:-}" ]; then
+    # A package-manager edit must be classified as source state, while this
+    # unpackaged file and the NetworkManager profile are ordinary /etc state.
+    mkdir -p /etc/e2e-package /etc/NetworkManager/system-connections
+    echo "unpackaged-package-config" > /etc/e2e-package/unpackaged.conf
+    cat > /etc/NetworkManager/system-connections/e2e-package.nmconnection <<'NMEOF'
+[connection]
+id=e2e-package
+type=ethernet
+interface-name=e2e0
+autoconnect=false
+[ipv4]
+method=disabled
+[ipv6]
+method=ignore
+NMEOF
+    chmod 600 /etc/NetworkManager/system-connections/e2e-package.nmconnection
+    if command -v dnf >/dev/null 2>&1; then
+        echo "# e2e-package-manager-edit" >> /etc/dnf/dnf.conf
+        dnf -y install cowsay
+    elif command -v apt-get >/dev/null 2>&1; then
+        mkdir -p /etc/apt/apt.conf.d
+        echo '## e2e-package-manager-edit' > /etc/apt/apt.conf.d/99-e2e-package
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y cowsay
+    else
+        echo "FAIL: package base has neither dnf nor apt-get" >&2
+        exit 1
+    fi
+    mkdir -p /var/lib/bootc-migrate
+    printf 'cowsay\n' > /var/lib/bootc-migrate/e2e-package-tool
+
+    # Pull one real image into rootless storage. This proves /var/lib and the
+    # user's rootless container store survive rather than just a marker file.
+    usermod --add-subuids 100000-165535 realuser 2>/dev/null || true
+    usermod --add-subgids 100000-165535 realuser 2>/dev/null || true
+    user_uid=$(id -u realuser)
+    user_home=$(getent passwd realuser | cut -d: -f6)
+    mkdir -p "/run/user/$user_uid"
+    chown realuser:realuser "/run/user/$user_uid"
+    chmod 700 "/run/user/$user_uid"
+    runuser -u realuser -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$user_uid" \
+        podman pull --quiet docker.io/library/alpine:3.22
+    runuser -u realuser -- env HOME="$user_home" XDG_RUNTIME_DIR="/run/user/$user_uid" \
+        podman image exists docker.io/library/alpine:3.22
+fi
+
 ETCFIX
 
 # #256: fixtures that only the cross-family policy can get right. One file
@@ -2420,7 +3140,7 @@ ETCFIX
 # a sidecar) and one only the source's vendor ships (must be dropped, the
 # edit must survive as a sidecar). Both would be kept verbatim by the
 # same-lineage merge — which is the bug.
-if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+if [ "$E2E_CROSS_FAMILY" = "1" ] && [ "$IS_PACKAGE_INSTALL" != true ]; then
     step "=== cross-family: injecting family-specific /etc fixtures (#256) ==="
     ssh $SSH_OPTS root@localhost bash <<'CROSSFIX'
 set -e
@@ -2443,7 +3163,9 @@ seed_ownership_fixture
 capture_health_baseline
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
-ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
+if [ "$IS_PACKAGE_INSTALL" != true ]; then
+    ssh $SSH_OPTS root@localhost "rm -rf /sysroot/composefs /sysroot/state && mkdir -p /sysroot/composefs" 2>/dev/null || true
+fi
 
 # TUI mode: same migration, but a simulated human drives it. Upload the
 # pty driver, prove the interactive Config Drift Review checklist first
@@ -2486,7 +3208,12 @@ fi
 # pty instead (custom image typed in, dry-run off, skip-import + force
 # toggled on — the exact configuration of the CLI invocation), so the
 # `[migrate]` stream carries the driver's screen-by-screen progress.
-if [ "$E2E_MODE" = "tui-migrate" ]; then
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    MIGRATE_CMD="CI=true /var/tmp/bootc-rebase --source-backend package --target-backend ostree --target-image '$VM_TARGET_IMAGE' --force"
+    if [ "$E2E_PACKAGE_CROSS_FAMILY" = "1" ]; then
+        MIGRATE_CMD="$MIGRATE_CMD --accept-cross-base"
+    fi
+elif [ "$E2E_MODE" = "tui-migrate" ]; then
     MIGRATE_CMD="CI=true python3 /var/tmp/tui-e2e-driver.py --mode wizard --binary /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --transcript /var/tmp/tui-wizard-transcript.txt --record /var/tmp/tui-migrate.cast --snapshot-dir /var/tmp/tui-snapshots"
 else
     MIGRATE_CMD="CI=true /var/tmp/bootc-migrate --target-image $VM_TARGET_IMAGE --force --skip-import"
@@ -2498,7 +3225,7 @@ fi
 # the pair; when it cannot, it warns and Phase 4 refuses from the pulled
 # image instead (a --dry-run stops before that). Proceeding silently past
 # a scanned cross-family pair is the bug this cell exists to catch.
-if [ "$E2E_CROSS_FAMILY" = "1" ]; then
+if [ "$E2E_CROSS_FAMILY" = "1" ] && [ "$IS_PACKAGE_INSTALL" != true ]; then
     step "=== cross-family: asserting the gate refuses without --accept-cross-base (#256) ==="
     GATE_OUT=$(ssh $SSH_OPTS root@localhost "$MIGRATE_CMD --dry-run" 2>&1 || true)
     if echo "$GATE_OUT" | grep -q "Cross-family re-base detected"; then
@@ -2574,6 +3301,15 @@ if [ "$E2E_MODE" = "tui-migrate" ]; then
     fetch_tui_artifacts
 fi
 
+if [ "$IS_PACKAGE_INSTALL" = true ]; then
+    step "=== package-install: rebooting into the staged target ==="
+    ssh $SSH_OPTS root@localhost "systemctl reboot" || true
+    sleep 5
+    wait_for_package_ssh "package target SSH" 300
+    assert_package_install
+    exit 0
+fi
+
 # #256: the policy must have RUN, and the staged /etc must show its shape
 # before the reboot — the point where a wrong outcome is still cheap.
 if [ "$E2E_CROSS_FAMILY" = "1" ]; then
@@ -2590,13 +3326,23 @@ if [ "$E2E_CROSS_FAMILY" = "1" ]; then
 
     ssh $SSH_OPTS root@localhost bash <<'CROSSCHECK'
 set -e
+# The modes that reach this point stage composefs: /sysroot/state is the
+# target, and /sysroot/ostree is the source the host still runs. Look in
+# /sysroot/ostree only when no composefs deployment was staged.
 DEPLOY=$(echo /sysroot/state/deploy/*)
-[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment under /sysroot/state/deploy"; exit 1; }
+if [ ! -d "$DEPLOY" ]; then
+    DEPLOY=$(find /sysroot/ostree/deploy/default/deploy -mindepth 1 -maxdepth 1 \
+        -type d -name '*.0' -print -quit 2>/dev/null || true)
+fi
+[ -d "$DEPLOY" ] || { echo "FAIL: no staged deployment found"; exit 1; }
 ETC="$DEPLOY/etc"
 echo "--- staged deployment: $DEPLOY ---"
-test -f "$DEPLOY/bootc-migrate-cross-family-report.json" \
-    || { echo "FAIL: cross-family report JSON missing"; exit 1; }
-head -c 2000 "$DEPLOY/bootc-migrate-cross-family-report.json"; echo
+REPORT="$DEPLOY/bootc-migrate-cross-family-report.json"
+if [ ! -f "$REPORT" ]; then
+    REPORT=/sysroot/ostree/deploy/default/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+fi
+test -f "$REPORT" || { echo "FAIL: cross-family report JSON missing"; exit 1; }
+head -c 2000 "$REPORT"; echo
 # Both families ship default/useradd: the target's copy, and our edit beside it.
 grep -q "e2e cross-family edit" "$ETC/default/useradd" \
     && { echo "FAIL: /etc/default/useradd still carries the source edit (target default did not win)"; exit 1; }
@@ -2644,8 +3390,14 @@ fi
 step "=== Re-injecting e2e-sshd into the staged deployment ==="
 ssh $SSH_OPTS root@localhost bash <<'CFS_POSTMERGEFIX'
 set -e
+# /sysroot/state is the staged target in the modes that get here; the
+# OSTree deployment is the source (see the cross-family check above).
 DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
-[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found (/sysroot/state/deploy/*/etc)"; exit 1; }
+if [ ! -d "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+        -type d -name etc -print -quit 2>/dev/null || true)
+fi
+[ -d "$DEPLOY_ETC" ] || { echo "FAIL: staged deployment etc dir not found"; exit 1; }
 
 mkdir -p "$DEPLOY_ETC/systemd/system/sockets.target.wants" "$DEPLOY_ETC/systemd/system/emergency.target.wants" "$DEPLOY_ETC/systemd/system/rescue.target.wants"
 printf '%s\n' \
@@ -2707,10 +3459,16 @@ step "=== first-boot repair: sabotaging the canary tree (#309) ==="
 ssh $SSH_OPTS root@localhost bash <<'REPAIR_SABOTAGE'
 set -e
 CANARY_REL=home/realuser/repair-canary
-for V in /sysroot/state/os/default/var /var; do
+for V in /sysroot/state/os/default/var /sysroot/ostree/deploy/default/var /var; do
     [ -d "$V/$CANARY_REL" ] && break
 done
+# /sysroot/state is the staged target in the modes that get here; the
+# OSTree deployment is the source (see the cross-family check above).
 DEPLOY_ETC=$(echo /sysroot/state/deploy/*/etc)
+if [ ! -d "$DEPLOY_ETC" ]; then
+    DEPLOY_ETC=$(find /sysroot/ostree/deploy/default/deploy -mindepth 2 -maxdepth 2 \
+        -type d -name etc -print -quit 2>/dev/null || true)
+fi
 test -x "$DEPLOY_ETC/bootc-migrate/bootc-migrate-repair" || { echo "FAIL: repair binary not staged in $DEPLOY_ETC"; exit 1; }
 test -f "$DEPLOY_ETC/bootc-migrate/repair-firstboot" || { echo "FAIL: repair marker not staged"; exit 1; }
 test -L "$DEPLOY_ETC/systemd/system/multi-user.target.wants/bootc-migrate-repair-firstboot.service" || { echo "FAIL: repair unit not enabled"; exit 1; }
@@ -3144,8 +3902,8 @@ echo "  cmdline: $CFS_CMDLINE"
 # Anchored to a token boundary, matching backend_from_cmdline's whole-token
 # rule exactly: `-w` would also match `rd.composefs=`, which the parser rejects,
 # and a check looser than the code it guards is not a guard.
-echo "$CFS_CMDLINE" | grep -qE '(^| )composefs=' || {
-    echo "FAIL: booted cmdline has no composefs= parameter: $CFS_CMDLINE"; exit 1; }
+echo "$CFS_CMDLINE" | grep -qE "$CFS_KARG_RE" || {
+    echo "FAIL: booted cmdline has no composefs argument: $CFS_CMDLINE"; exit 1; }
 if echo "$CFS_CMDLINE" | grep -qE '(^| )ostree=' ; then
     echo "FAIL: composefs entry carries ostree= — backend detection is ambiguous"; exit 1
 fi
@@ -3220,7 +3978,7 @@ if [ "$E2E_TEST_MODE" = "undo" ]; then
         echo "FAIL: VM did not boot after undo"; tail -100 qemu.log; exit 1
     fi
     UNDO_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-    if echo "$UNDO_CMDLINE" | grep -q 'composefs='; then
+    if echo "$UNDO_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
         echo "FAIL: still booting composefs after undo (cmdline: $UNDO_CMDLINE)"; exit 1
     fi
     echo "$UNDO_CMDLINE" | grep -q 'ostree=' || {
@@ -3257,7 +4015,10 @@ elif [ -f /etc/dpkg/dpkg.cfg.rebase-old ]; then
 else
     echo "FAIL: expected a source-vendor-only .rebase-old sidecar in live /etc"; exit 1
 fi
-REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+REPORT=/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json
+if [ ! -f "$REPORT" ]; then
+    REPORT=$(echo /sysroot/state/deploy/*/bootc-migrate-cross-family-report.json)
+fi
 test -f "$REPORT" || { echo "FAIL: cross-family report missing after reboot"; exit 1; }
 if grep -q '"firstboot_unit_installed": true' "$REPORT"; then
     if [ -e /etc/bootc-migrate/cross-family-firstboot ]; then
@@ -3351,7 +4112,7 @@ wait_for_ssh_with_msg "OSTree rollback boot SSH" 360 "vm-rollback" || {
 
 # Cmdline must show the *OSTree* path: composefs= absent, ostree= present.
 ROLLBACK_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-if echo "$ROLLBACK_CMDLINE" | grep -q 'composefs='; then
+if echo "$ROLLBACK_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
     echo "FAIL: VM booted into composefs instead of OSTree (cmdline: $ROLLBACK_CMDLINE)"
     exit 1
 fi
@@ -3391,7 +4152,7 @@ wait_for_ssh_with_msg "Return-to-composefs SSH" 300 "vm-return-cfs" || {
 }
 
 RETURN_CMDLINE=$(ssh $SSH_OPTS root@localhost "cat /proc/cmdline")
-if ! echo "$RETURN_CMDLINE" | grep -q 'composefs='; then
+if ! echo "$RETURN_CMDLINE" | grep -qE "$CFS_KARG_RE"; then
     echo "FAIL: did not return to composefs (cmdline: $RETURN_CMDLINE)"; exit 1
 fi
 echo "OK: Returned to composefs cleanly via restored BootOrder."
