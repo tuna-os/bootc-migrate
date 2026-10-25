@@ -54,6 +54,7 @@ pub mod ostree_install;
 pub mod ostree_install_commit;
 pub mod package_data;
 pub mod package_host;
+pub mod package_install_commit;
 pub mod preflight;
 pub mod rebase_controller;
 pub mod rebase_plan;

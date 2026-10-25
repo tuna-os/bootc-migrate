@@ -172,19 +172,22 @@ It checks UEFI boot, the root filesystem and subvolume layout, LUKS/LVM, `/boot`
 `/home`, free space, active package transactions, and SELinux.
 The [support matrix](docs/support-matrix.md#package-based-source-hosts) records evidence for each source distribution, filesystem, and boot mode.
 
-The completed route will use this contract:
+The package route uses this contract:
 
-- The bootc deployment carries user accounts, home directories, application data, and user-modified `/etc` files.
+- The bootc deployment carries user accounts, home directories, selected application data, and user-modified `/etc` files.
   It uses the target image's default for unmodified package-owned configuration.
 - Host packages do **not** carry.
-  The software report ([#377](https://github.com/tuna-os/bootc-migrate/issues/377)) lists missing packages, third-party repositories, services, and kernel modules.
+  The software report lists missing packages, third-party repositories, services, and kernel modules.
   It also lists Flatpak, Homebrew, toolbox/distrobox, or derived-image replacements.
 - The old package OS stays bootable as **Previous system** until commit.
-  [#374](https://github.com/tuna-os/bootc-migrate/issues/374) tracks creation and removal of that rollback entry.
-- Use a separate one-way commit. After you verify the new deployment,
-  [#378](https://github.com/tuna-os/bootc-migrate/issues/378) guides commit and reclaims the old OS.
-  The existing `bootc-rebase commit` supports only composefs → OSTree.
-  Do not use it for the package-host route.
+  The rollback-entry staging work remains tracked by [#374](https://github.com/tuna-os/bootc-migrate/issues/374).
+- After the new deployment's first-boot verification reports healthy, preview the
+  one-way cleanup with `sudo bootc-rebase commit`. The dry run lists each old-root
+  path and its allocated size. Apply it with `sudo bootc-rebase commit --apply`;
+  type the displayed confirmation to remove the old package OS, its rollback
+  entry, and kernel snapshot. A plain-directory `/home` remains protected unless
+  `--move-home` is also passed; that option renames it into `/var/home` on the
+  same filesystem and removes the temporary bind.
 
 ## Architecture
 
@@ -721,7 +724,7 @@ cargo build --release -p bootc-rebase
 | `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). On the composefs routes `--accept-cross-base` also accepts a cross-*family* target and, on the conversion route, selects the cross-family `/etc` policy (#256) |
 | `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
 | `boot-entries [--json] [--interactive] [--rename-branding] [--apply] [--undo]` | Enumerate and classify UEFI boot entries: dead (loader path missing), generic-label, duplicate, firmware-managed, plus which are protected and why. **Dry-run by default** — a bare invocation is the read-only audit. `--interactive` opens a checklist (protected entries are unselectable), `--rename-branding` proposes renaming the booted entry to `PRETTY_NAME`, `--apply` writes the result to NVRAM after a typed confirmation and a restorable snapshot, and `--undo` replays that snapshot. | Audit and the cleanup **planner** are unit-tested (protections, the last-bootable-entry guard, and the "every entry looks dead ⇒ the ESP is wrong" refusal). The gating OSTree re-base E2E cell also renames a live OVMF NVRAM entry, applies the plan, undoes it, and asserts byte-identical `efibootmgr -v` output. This covers the executor and snapshot restore; it does **not** cover the separate, unimplemented GRUB2→systemd-boot flip ([#31](https://github.com/tuna-os/bootc-migrate/issues/31), [#189](https://github.com/tuna-os/bootc-migrate/issues/189)) |
-| `commit [--apply] [--yes] [--force]` | After a composefs → ostree re-base has booted, remove the composefs state it kept as rollback (#315). **Dry run by default**: checks that the system booted the OSTree deployment the install report names, that the ESP snapshot and a shim/GRUB firmware entry exist, and that every path of the old `/var` is present in the live `/var`. It then lists every path it would delete, with sizes. `--apply` deletes after a typed confirmation. First it copies the install report and ESP snapshot into the live `/var/lib/bootc-rebase`. Then it removes the old `/var`, the composefs store and the composefs deployments. It never touches the OSTree repo, `/boot`, the ESP or NVRAM. `--force` accepts failed checks. It never accepts a composefs boot or a filesystem mounted inside a path to delete. | Unit-tested against a fixture physical root. The non-gating composefs → ostree cell runs the dry run, then `--apply`, then reboots and checks system health |
+| `commit [--apply] [--yes] [--move-home] [--force]` | Permanently remove the rollback side after either composefs → OSTree (#315) or package → OSTree (#378). **Dry run by default:** route-specific hard checks prove the reported OSTree deployment booted; package hosts additionally require a clean first-boot verdict, a managed `Previous system` entry, carried copies of data selected for deletion, and no mount below any target. Every path and allocated size is printed before `--apply` asks for typed confirmation. Package cleanup removes the old `/usr`, `/etc`, verified carried `/var` trees, package state, and managed rollback artifacts; unknown `/var/lib`, `/root`, `/srv`, `/ostree`, and `/boot` content stay. `--move-home` opts a plain-directory home into a same-filesystem rename. `--force` never overrides package-host safety checks. | Both route planners and executors are fixture-tested. The composefs → OSTree cell exercises its commit live; the exploratory package cells contain commit/reboot/reclaimed-byte assertions that become runnable after #374–#376 and #379 land. |
 | `de-migrate stash\|restore` | Move a user's desktop-environment config (GNOME dconf/gnome-shell, KDE kdeglobals/plasma, COSMIC, niri, XFCE) into or out of a stash directory around a cross-DE re-base — union of paths per issue [#68](https://github.com/tuna-os/bootc-migrate/issues/68), never deletes. `--run-hooks` executes `pre-switch.d`/`post-switch.d` scripts with `REBASE_FROM_DE`/`REBASE_TO_DE`/`REBASE_STASH_DIR`/`REBASE_HOME` set. `--dry-run` previews without touching anything. | Done. Also runs automatically inside `rebase --de-migrate`; this subcommand remains the manual escape hatch for images shipping several desktops (which detection refuses to guess between) |
 | `rebase --de-migrate` | Detects the desktop environment the target image ships (registry-streamed session files, session binaries, and display-manager default session — no `podman pull`) and the one this host runs. When they differ, stashes every human account's outgoing DE config before staging and re-exposes any stash a previous re-base in the other direction left behind, running the `pre-switch.d`/`post-switch.d` hooks around each. | Done, unit-tested; **off by default** — a re-base never touches per-user desktop state unless asked to. The non-gating Bluefin→Aurora E2E cell passes `--de-migrate`, seeds GNOME config, and asserts that the cross-DE plan and stash are created. Because target desktop detection uses the registry scan, this evidence depends on that exploratory cell completing successfully ([#68](https://github.com/tuna-os/bootc-migrate/issues/68), [#188](https://github.com/tuna-os/bootc-migrate/issues/188)) |
 | `migrate-bootloader --to systemd-boot [--promote\|--undo] [--from-image <image>]` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Implemented** — stages every existing deployment on the ESP, installs systemd-boot, creates a one-boot `BootNext` trial without changing `BootOrder`, and installs a `kernel-install` resync hook. If the host does not ship `systemd-bootx64.efi`, `--from-image <image>` supplies a registry-reachable image to extract it from. `--promote` requires that the running system booted from the trial before making it persistent; `--undo` restores the prior firmware order and removes only the migration-owned files. The `bootloader-trial` QEMU cell covers the OVMF BootOrder swap, reboot, resync, promotion, and undo path. |
@@ -742,8 +745,9 @@ ostree or composefs state. On such a system, `--target-backend auto` (the
 default) selects ostree. `PackageInstall` runs the target image's own `bootc
 install to-existing-root` against the live physical root after readiness and
 hardware gates pass. It snapshots the old kernels, initramfs, BLS entries and
-GRUB configuration before bootc empties `/boot`; the `Previous system` entry
-and guided package-host commit remain tracked by #374 and #378.
+GRUB configuration before bootc empties `/boot`. `bootc-rebase commit` recognizes
+the package-install report, requires the reported deployment and a clean
+first-boot verdict, and previews the old-root cleanup before any deletion.
 
 `--dry-run` on a package host also prints a readiness report and the
 hardware report. The report refuses these systems and gives the reason for

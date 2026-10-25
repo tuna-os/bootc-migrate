@@ -68,12 +68,10 @@ enum Commands {
     /// deliberately refuses to guess at (an image shipping several desktops,
     /// or one this tool does not recognize).
     DeMigrate(DeMigrateArgs),
-    /// Remove the composefs state a composefs -> ostree re-base left behind
-    /// (issue #315), once the OSTree deployment has booted and rollback is
-    /// no longer wanted. A bare invocation is a dry run: it checks the
-    /// preconditions, verifies the old /var against the live one, and lists
-    /// every path it would delete with its size. `--apply` deletes, after a
-    /// typed confirmation.
+    /// Permanently remove the rollback side of a completed re-base (issues
+    /// #315 and #378). A bare invocation is a dry run: it checks that the new
+    /// deployment booted and is healthy, then lists every path and its size.
+    /// `--apply` deletes after a typed confirmation.
     Commit(CommitArgs),
     /// First-boot repair of known migration breakage (L3, issue #309).
     /// The staged unit runs `repair --firstboot` once on the new system;
@@ -92,11 +90,13 @@ struct CommitArgs {
     #[arg(long)]
     yes: bool,
 
-    /// Proceed past failed soft checks: paths of the old /var missing from
-    /// the live /var, a booted deployment other than the one the install
-    /// report names, a missing report or ESP snapshot, or no shim/GRUB
-    /// firmware entry. Never overrides booting from composefs or a
-    /// filesystem mounted inside a path to delete.
+    /// On a package-migrated host whose /home is a directory on the old root,
+    /// rename it into the target /var/home and remove the temporary bind.
+    #[arg(long)]
+    move_home: bool,
+
+    /// Proceed past failed soft checks on composefs-source commits. Package
+    /// host safety checks are hard and cannot be overridden.
     #[arg(long)]
     force: bool,
 }
@@ -1019,12 +1019,24 @@ mod tests {
             Some(Commands::Commit(args)) => {
                 assert!(!args.apply);
                 assert!(!args.yes);
+                assert!(!args.move_home);
                 assert!(!args.force);
             }
             other => panic!("expected Commands::Commit, got {other:?}"),
         }
-        match Cli::parse_from(["bootc-rebase", "commit", "--apply", "--yes", "--force"]).command {
-            Some(Commands::Commit(args)) => assert!(args.apply && args.yes && args.force),
+        match Cli::parse_from([
+            "bootc-rebase",
+            "commit",
+            "--apply",
+            "--yes",
+            "--move-home",
+            "--force",
+        ])
+        .command
+        {
+            Some(Commands::Commit(args)) => {
+                assert!(args.apply && args.yes && args.move_home && args.force)
+            }
             other => panic!("expected Commands::Commit, got {other:?}"),
         }
     }
