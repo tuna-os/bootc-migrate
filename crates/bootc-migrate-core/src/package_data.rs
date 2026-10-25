@@ -71,7 +71,7 @@ impl HomeLayout {
 }
 
 /// Decode mountinfo's octal path escapes (`\\040`, `\\011`, `\\134`).
-fn decode_mountinfo_path(value: &str) -> String {
+pub(crate) fn decode_mountinfo_path(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

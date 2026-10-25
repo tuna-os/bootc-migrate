@@ -5,6 +5,7 @@
 //! OSTree transactions). Direction-specific judgments live in
 //! [`super::validate`].
 
+use super::secure_boot::SecureBootFacts;
 use crate::rebase_plan::Backend;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -304,7 +305,7 @@ pub(crate) fn backend_from_cmdline(cmdline: &str) -> Option<Backend> {
         let key = token.split_once('=').map(|(k, _)| k).unwrap_or(token);
         match key {
             "ostree" => return Some(Backend::Ostree),
-            "composefs" => composefs = true,
+            "composefs" | "composefs.digest" => composefs = true,
             _ => {}
         }
     }
@@ -325,6 +326,7 @@ pub struct SystemInfo {
     pub booted_image: Option<String>,
     pub pending_transaction: PendingTransactionStatus,
     pub is_uefi: bool,
+    pub secure_boot: SecureBootFacts,
     pub nvram_writable: bool,
     pub esp_path: Option<String>,
     pub esp_free_space_bytes: u64,
@@ -384,8 +386,9 @@ impl SystemInfo {
 
         // 2. Check UEFI mode
         let is_uefi = Path::new("/sys/firmware/efi").exists();
+        let secure_boot =
+            super::secure_boot::read_from_efivars(Path::new("/sys/firmware/efi/efivars"));
         let nvram_writable = Path::new("/sys/firmware/efi/efivars").exists();
-
         // 3. Locate ESP — check mounted first, then try to find by partition GUID
         let mut esp_path = None;
         let mut esp_free_space_bytes = 0u64;
@@ -528,6 +531,7 @@ impl SystemInfo {
             booted_image,
             pending_transaction,
             is_uefi,
+            secure_boot,
             nvram_writable,
             esp_path,
             esp_free_space_bytes,
@@ -876,6 +880,11 @@ mod tests {
     /// value that happens to contain the word is not a key at all.
     #[test]
     fn only_whole_tokens_count() {
+        // Newer bootc writes the image digest as composefs.digest=.
+        assert_eq!(
+            backend_from_cmdline("rw composefs.digest=v1-sha512-12:6f8e2a1b lockdown=integrity"),
+            Some(Backend::Composefs)
+        );
         assert_eq!(backend_from_cmdline("rd.composefs=1 root=UUID=1234"), None);
         assert_eq!(
             backend_from_cmdline("root=UUID=1234 init=/usr/lib/composefs=x"),

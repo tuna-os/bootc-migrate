@@ -25,6 +25,15 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- The TUI catalog lists Utah as "Utah (pre-alpha)" with
+  `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
+  composefs host, where its routes have E2E coverage.
+
+- Secure Boot / UEFI CA preflight (#386): the preflight checks the target
+  `systemd-boot` and bootupd shim payloads. It compares their Authenticode
+  issuers with the firmware's `db` CA generations. It refuses known mismatches
+  before migration changes the ESP or boot order.
+
 - Package-based base-image E2E coverage (#380): `package-install` boots
   checksum-pinned Fedora Cloud, Fedora Workstation, and Ubuntu Cloud disks
   through cloud-init, creates package/home/desktop fixtures, runs the package
@@ -35,6 +44,20 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   (#258, #259). It runs after native finalization, keeps target defaults,
   remaps identities, preserves sidecars, and schedules first-boot repairs.
   A non-gating `OstreeDeploy` E2E cell covers it.
+
+- ComposeFS migrations now run a post-seal integrity pass. The native
+  composefs-rs backend runs `fsck` on the store. Both backends read and verify
+  every object. The check reports fs-verity storage failures before reboot,
+  not later as EIO.
+- OSTree imports now use object IDs from the store's SHA-512 fs-verity digest.
+  They enable fs-verity before they pull the target image. The imported
+  objects then match the integrity check.
+
+- A versioned application replacement catalog shared with wootc maps Windows
+  display names and rpm, deb, and pacman package names to Flatpak IDs and
+  portability guidance. The typed core reader validates and bundles the table
+  for the package-host software report, while the catalog workflow publishes
+  `apps.json` beside the image feed (#388).
 
 - TUI route selection on composefs hosts (#312). On an ostree host the
   wizard flow is unchanged (the conversion route); on a composefs host the
@@ -69,6 +92,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   the btrfs subvolume layout, `/boot` and `/home`, free space against the
   target image's size, running package managers and SELinux. It prints a
   reason for each refusal, then the hardware report.
+- Package-host software report (#377): `bootc-rebase scan` and package-host
+  `--dry-run` compare rpm, dpkg or pacman package databases with target image.
+  They classify packages absent from image. They suggest Flatpak, Homebrew,
+  toolbox/distrobox or derived-image replacements. The report also records
+  third-party repositories, enabled services absent from image, and DKMS/akmods
+  packages. Non-dry commands write the report to JSON and Markdown files under
+  `/var/lib/bootc-rebase`.
 - `bootc-rebase` detects a package-managed source (rpm, dpkg or pacman
   database, no ostree or composefs state) as `Backend::Package` and executes
   the `package -> ostree` route through `PackageInstall`. The shared
@@ -152,6 +182,76 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Fixed
 
+- The E2E checks after an OSTree → composefs migration look for the staged
+  deployment in `/sysroot/state` first again. A lookup added for
+  `OstreeInstall` put `/sysroot/ostree` first. That is the source system in
+  these modes, so the TUI cell looked for the staged repair tool in the
+  old deployment and failed.
+
+- The E2E cells that migrate OSTree to composefs on a 40G disk use 60G.
+  Since #440 the free-space check counts the target image, and Bluefin →
+  Dakota needs about 33 GB free where a 40G disk has 32.7 GB. The
+  migration refused before it changed anything, so `main` went red.
+
+- A cross-family re-base keeps the flatpak apps the old OS preinstalled.
+  `flatpak preinstall` records each app it installs in the `xa.preinstalled`
+  key of `/var/lib/flatpak/repo/config`. On a later run it uninstalls every
+  recorded app that the OS's `preinstall.d` no longer lists. The record came
+  across with `/var`, so Utah's first-boot `flatpak-preinstall.service`
+  removed Firefox and Extension Manager from a migrated tunaOS Marlin host.
+  The re-base now removes the key from the carried `/var`, and the
+  cross-family report lists the apps it kept.
+
+- The `OstreeInstall` SELinux step also labels the physical root's `/boot`
+  with the target's policy when `/boot` is on the root filesystem.
+  `bootc install` writes GRUB and `bootupd-state.json` there. A host that
+  ran without SELinux (tunaOS Marlin) left them unlabeled, and Utah denied
+  `systemd-logind` access to `/boot/efi`. A failure on `/boot` is a
+  warning, not an error.
+
+- `bootc-rebase commit` no longer refuses when only flatpak metadata
+  caches are missing from the live `/var`: `lib/flatpak/appstream` and
+  ostree's scratch directory `lib/flatpak/repo/tmp`. A metadata refresh on
+  either system replaces the appstream checkout, so the check refused every
+  Marlin → Utah commit. Installed apps and runtimes stay checked.
+
+- `OstreeInstall` no longer tries the host's `efibootmgr` when the host has
+  none. It goes straight to the target image's `efibootmgr`, without the
+  "failed to invoke efibootmgr" warning.
+
+- A cross-family `OstreeInstall` writes its cross-family report to the new
+  stateroot's `/var/lib/bootc-rebase`. It used to write the report to the
+  OSTree deployment root. That directory is immutable after `bootc install`,
+  so the route failed with `Operation not permitted` at the end, after all
+  the work was done.
+
+- The composefs → OSTree route (`OstreeInstall`) no longer needs
+  `efibootmgr` on the host. When the host has none, it runs the target
+  image's `efibootmgr` through podman. TunaOS Marlin ships no `efibootmgr`,
+  so the route used to refuse there before it changed anything.
+
+- `bootc-rebase scan` and the other registry readers decode zstd layers
+  themselves. They used to pass them to `tar -a`, which needs an external
+  `zstd` program. On a host without one, every zstd layer read as empty, and
+  `scan` reported bootc images such as Marlin and Utah as "not an
+  ostree/bootc image".
+
+- Every check for a composefs boot accepts both forms of the kernel
+  argument: `composefs=<hex>` and `composefs.digest=v1-sha512-12:<hex>`,
+  which newer bootc writes. Current Dakota images boot with the new form.
+  Before, preflight found no backend on such a host. The composefs → OSTree
+  and image-swap routes, `commit`, `rollback` and `status` refused it or saw
+  an OSTree boot. The OSTree fallback entries could also keep the argument.
+
+- Phase 0 now includes two expanded copies of the target image and 5 GiB of
+  initrd-rebuild headroom in its free-space estimate. XFS migrations that use
+  both the ext4 ComposeFS loopback and podman fallback storage now stop before
+  image pulls instead of filling the root during Phase 5 (#390).
+
+- The E2E SSH service now waits for all Fedora host-key generators before it
+  starts `sshd -i`. The socket stays available while the system creates host
+  keys. This avoids the earlier host-key race (#383).
+
 - Cross-base OstreeDeploy now remaps ownership in the stateroot's physical,
   shared `/var` instead of looking for a nonexistent `var` inside the staged
   deployment. The gating Bluefin → Dakota E2E cell seeds a divergent
@@ -189,12 +289,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 - `bootc-rebase commit` no longer tells a /boot-on-LUKS host to remove the
   boot entry it boots from. Since #328 such a host boots its OSTree
   deployment through systemd-boot ("Linux Boot Manager") and an
-  ESP-resident entry. The commit step still checked for a shim/GRUB
-  firmware entry, said the systemd-boot and loader entries no longer boot
-  anything, and suggested removing "Linux Boot Manager" with
-  `boot-entries --apply`, which would leave the host unbootable. When the
-  install report names an ESP-resident entry, the commit step now checks
-  for the systemd-boot entry and says to keep both.
+  ESP-resident entry. The commit step still checked for a shim/GRUB firmware
+  entry. It said that the systemd-boot and loader entries no longer booted
+  anything. It suggested `boot-entries --apply` to delete "Linux Boot
+  Manager". That action would leave the host unbootable.
+  When the install report names an ESP-resident entry, the commit step now
+  checks for the systemd-boot entry. It says to keep both.
 
 - The preflight reflink check no longer risks making the running system
   read-only. To probe reflink support it remounts `/sysroot` read-write and

@@ -132,6 +132,7 @@ mod tests {
             booted_image: Some("ghcr.io/ublue-os/bluefin:gts".into()),
             pending_transaction: PendingTransactionStatus::Clean,
             is_uefi: true,
+            secure_boot: super::super::SecureBootFacts::default(),
             nvram_writable: true,
             esp_path: Some("/boot/efi".into()),
             esp_free_space_bytes: 400 * 1024 * 1024,

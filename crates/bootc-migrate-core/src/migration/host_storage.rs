@@ -20,6 +20,14 @@ use std::process::Command;
 use super::MountGuard;
 use crate::preflight::PreflightReport;
 
+const GIB: u64 = 1024 * 1024 * 1024;
+/// Two expanded copies of the target image: the ComposeFS store and podman
+/// storage used by the Phase 4/5 fallback. Each is about 2.5× the compressed
+/// registry size.
+const TARGET_STORAGE_MULTIPLIER: u64 = 5;
+/// Temporary room for dracut and other boot-artifact work under `/var/tmp`.
+const INITRD_HEADROOM_BYTES: u64 = 5 * GIB;
+
 /// Whether this root filesystem needs the ext4 loopback store.
 ///
 /// btrfs and ext4 support fs-verity, which `cfs pull` requires; XFS does not
@@ -50,16 +58,25 @@ pub fn loopback_size_gb(ostree_repo_bytes: u64, composefs_free_bytes: u64) -> u6
     desired_gb.clamp(30, max_gb)
 }
 
-/// Bytes of free space the object import needs, given reflink availability.
+/// Bytes of free space the migration needs on the root filesystem.
 ///
-/// With reflink the copies are CoW clones and barely grow the store; without
-/// it every object is duplicated, hence the larger multiplier.
-pub fn required_free_bytes(ostree_repo_bytes: u64, reflink_available: bool) -> u64 {
-    let multiplier: f64 = if reflink_available { 1.1 } else { 1.5 };
-    (ostree_repo_bytes as f64 * multiplier) as u64
+/// The source repository contribution depends on whether Phase 1 can reflink
+/// its objects. The target contributes two expanded copies: one in the
+/// ComposeFS store and one in podman storage for the Phase 4/5 fallback.
+/// Finally, keep fixed headroom for the initrd rebuild under `/var/tmp`.
+pub fn required_free_bytes(
+    ostree_repo_bytes: u64,
+    target_compressed_bytes: u64,
+    reflink_available: bool,
+) -> u64 {
+    let source_multiplier: f64 = if reflink_available { 1.1 } else { 1.5 };
+    let source_bytes = (ostree_repo_bytes as f64 * source_multiplier) as u64;
+    source_bytes
+        .saturating_add(target_compressed_bytes.saturating_mul(TARGET_STORAGE_MULTIPLIER))
+        .saturating_add(INITRD_HEADROOM_BYTES)
 }
 
-pub fn check_free_space(reflink_available: bool) -> Result<()> {
+pub fn check_free_space(reflink_available: bool, target_image: &str) -> Result<()> {
     let ostree_repo = "/sysroot/ostree/repo";
     if !Path::new(ostree_repo).exists() {
         return Ok(());
@@ -76,13 +93,16 @@ pub fn check_free_space(reflink_available: bool) -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    let target_size = crate::registry::image_compressed_size(target_image)
+        .with_context(|| format!("failed to determine the size of target image {target_image}"))?;
     let free = crate::preflight::get_free_space("/sysroot/composefs")
         .or_else(|_| crate::preflight::get_free_space("/sysroot"))?;
-    let needed = required_free_bytes(ostree_size, reflink_available);
+    let needed = required_free_bytes(ostree_size, target_size, reflink_available);
 
     println!(
-        "Free space check: ostree repo = {:.2} GB, free = {:.2} GB, needed ≈ {:.2} GB (reflink: {})",
+        "Free space check: ostree repo = {:.2} GB, target image = {:.2} GB compressed, free = {:.2} GB, needed ≈ {:.2} GB (reflink: {})",
         ostree_size as f64 / 1e9,
+        target_size as f64 / 1e9,
         free as f64 / 1e9,
         needed as f64 / 1e9,
         reflink_available,
@@ -242,16 +262,31 @@ mod tests {
     }
 
     #[test]
-    fn free_space_requirement_reflects_reflink_availability() {
+    fn free_space_requirement_counts_target_copies_and_initrd_headroom() {
         const GB: u64 = 1_000_000_000;
-        // Reflink clones are CoW: the store barely grows.
-        assert_eq!(required_free_bytes(100 * GB, true), 110 * GB);
-        // Without it every object is duplicated.
-        assert_eq!(required_free_bytes(100 * GB, false), 150 * GB);
+
+        let cases = [
+            // Reflink clones make the source contribution 1.1×.
+            ("reflink", 100 * GB, 4 * GB, true, 130 * GB + 5 * GIB),
+            // A full source copy raises only the source contribution to 1.5×.
+            ("full copy", 100 * GB, 4 * GB, false, 170 * GB + 5 * GIB),
+            // Even without a source import, the two target copies and dracut
+            // headroom remain.
+            ("target only", 0, 4 * GB, true, 20 * GB + 5 * GIB),
+        ];
+
+        for (name, source, target, reflink, expected) in cases {
+            assert_eq!(
+                required_free_bytes(source, target, reflink),
+                expected,
+                "{name}"
+            );
+        }
+
         assert!(
-            required_free_bytes(100 * GB, false) > required_free_bytes(100 * GB, true),
+            required_free_bytes(100 * GB, 4 * GB, false)
+                > required_free_bytes(100 * GB, 4 * GB, true),
             "no-reflink must always need more room"
         );
-        assert_eq!(required_free_bytes(0, false), 0);
     }
 }

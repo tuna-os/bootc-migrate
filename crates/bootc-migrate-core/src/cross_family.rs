@@ -866,9 +866,8 @@ pub enum StagedVar<'a> {
     PreviouslyStaged,
 }
 
-/// The record of everything the cross-family steps did, written beside
-/// the deployment as `bootc-migrate-cross-family-report.json` so it
-/// survives the reboot.
+/// The record of everything the cross-family steps did, written as
+/// `bootc-migrate-cross-family-report.json` where it survives the reboot.
 #[derive(Debug, Clone, Serialize)]
 pub struct CrossFamilyReport {
     pub host: BaseInfo,
@@ -881,9 +880,13 @@ pub struct CrossFamilyReport {
     pub var_remap_deferred: bool,
     pub relabel_scheduled: bool,
     pub firstboot_unit_installed: bool,
+    /// Flatpak refs the old OS preinstalled, dropped from flatpak's
+    /// preinstall record so the target's `flatpak preinstall` keeps them
+    /// (see [`crate::flatpak_preinstall`]).
+    pub flatpak_preinstalls_kept: Vec<String>,
 }
 
-/// The report's file name inside the deployment directory.
+/// The report's file name inside [`PostMergeInputs::report_dir`].
 pub const REPORT_FILE: &str = "bootc-migrate-cross-family-report.json";
 
 /// Everything the post-merge steps need, gathered by the Phase 4
@@ -891,7 +894,10 @@ pub const REPORT_FILE: &str = "bootc-migrate-cross-family-report.json";
 #[derive(Debug)]
 pub struct PostMergeInputs<'a> {
     pub etc_outcome: &'a CrossFamilyEtcOutcome,
-    pub deploy_dir: &'a Path,
+    /// Where the report goes. It must be writable now and survive the
+    /// reboot: a composefs deployment directory, or the new OSTree
+    /// stateroot's `/var` (an OSTree deployment root is immutable).
+    pub report_dir: &'a Path,
     pub etc_dir: &'a Path,
     pub staged_var: StagedVar<'a>,
     /// The host's live `/etc/selinux/config`, if any.
@@ -941,6 +947,25 @@ pub fn apply_post_merge(inputs: &PostMergeInputs<'_>) -> Result<CrossFamilyRepor
         );
     }
 
+    let flatpak_var = match inputs.staged_var {
+        StagedVar::Copied(var) => Some(var),
+        StagedVar::InPlace => Some(Path::new("/var")),
+        StagedVar::PreviouslyStaged => None,
+    };
+    let flatpak_preinstalls_kept = match flatpak_var {
+        Some(var) => crate::flatpak_preinstall::forget_preinstalled(var)
+            .context("failed to clear flatpak's preinstall record")?,
+        None => Vec::new(),
+    };
+    if !flatpak_preinstalls_kept.is_empty() {
+        println!(
+            "[phase4] flatpak: {} app(s) the old OS preinstalled stay installed (the target's \
+             `flatpak preinstall` would remove them): {}",
+            flatpak_preinstalls_kept.len(),
+            flatpak_preinstalls_kept.join(", ")
+        );
+    }
+
     let relabel_scheduled = relabel_needed(
         inputs.host_selinux.as_ref(),
         outcome.target_selinux.as_ref(),
@@ -973,8 +998,11 @@ pub fn apply_post_merge(inputs: &PostMergeInputs<'_>) -> Result<CrossFamilyRepor
         var_remap_deferred,
         relabel_scheduled,
         firstboot_unit_installed,
+        flatpak_preinstalls_kept,
     };
-    let report_path = inputs.deploy_dir.join(REPORT_FILE);
+    fs::create_dir_all(inputs.report_dir)
+        .with_context(|| format!("failed to create {}", inputs.report_dir.display()))?;
+    let report_path = inputs.report_dir.join(REPORT_FILE);
     fs::write(
         &report_path,
         serde_json::to_string_pretty(&report).expect("CrossFamilyReport serialization cannot fail"),
@@ -1787,6 +1815,7 @@ mod tests {
             systemd_boot_payload: false,
             bootc_present: true,
             bootupd_present: true,
+            target_bootloaders: vec![],
             desktops: vec![],
             base,
             sysusers: vec![],
@@ -1797,6 +1826,7 @@ mod tests {
             filesystem_expectation: None,
             kernel_version: None,
             kernel: None,
+            software: Default::default(),
         }
     }
 

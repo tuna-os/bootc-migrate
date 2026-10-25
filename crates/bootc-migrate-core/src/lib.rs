@@ -4,6 +4,7 @@
 //! `bootc-migrate` binary so other tools (e.g. a universal
 //! bootc re-base engine) can compose their own migration pipelines:
 //!
+//! - [`app_mapping`] — shared package and Windows application names to Flatpak replacements
 //! - [`boot_audit`] — UEFI boot-entry enumeration + dead/generic/duplicate/firmware classification
 //! - [`boot_cleanup`] — the destructive half of that audit: a pure planner for
 //!   entry removal/branding-rename, and the `efibootmgr` executor it authorizes
@@ -28,9 +29,11 @@
 //! - [`transaction`] — two-phase apply: `commit` / `undo` of a staged migration
 //! - [`types`] — shared types such as [`VerityDigest`]
 
+pub mod app_mapping;
 pub mod boot_audit;
 pub mod boot_cleanup;
 pub mod composefs;
+pub mod composefs_karg;
 #[cfg(feature = "composefs-native")]
 pub mod composefs_native;
 pub mod cross_base;
@@ -41,6 +44,7 @@ pub mod de_migrate;
 pub mod etc_conflict;
 pub mod firstboot_repair;
 pub mod firstboot_verify;
+pub mod flatpak_preinstall;
 pub mod hardware;
 pub mod mergetc;
 pub mod migration;
@@ -58,6 +62,7 @@ pub mod registry;
 pub mod remap;
 pub mod scan;
 pub mod selinux;
+pub mod software_report;
 pub mod source_host;
 pub mod status;
 pub mod steam_flatpak;

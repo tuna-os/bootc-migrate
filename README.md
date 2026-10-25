@@ -101,7 +101,7 @@ sudo systemctl reboot
 **5. Confirm, then make it permanent:**
 
 ```bash
-cat /proc/cmdline | grep -o 'composefs=[0-9a-f]*'   # confirms composefs boot
+grep -oE 'composefs(\.digest)?=[^ ]*' /proc/cmdline   # confirms composefs boot
 sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 
@@ -138,8 +138,8 @@ sudo bootc-migrate tui
 
 The image picker fetches the latest CI-published catalog, then uses a cached
 or bundled JSON snapshot if offline. It lists published Bluefin, Universal
-Blue, TunaOS, and Zirconium images. Utah stays marked as coming soon until its
-registry tag appears. You see the selected image reference and backend before
+Blue, TunaOS, Zirconium, and Utah images. Utah is pre-alpha, so the picker
+offers only its `:testing` tag. You see the selected image reference and backend before
 you continue. OSTree targets use `bootc-rebase`, which you must install
 alongside `bootc-migrate`; ComposeFS targets use the normal migrate path. The
 tool does not support a return from ComposeFS to OSTree.
@@ -332,10 +332,11 @@ Things to confirm in the report:
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
   target image onto the ESP.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
-- `ComposeFS free space: ≥ 1.1 × ostree_repo_size` — the composefs object
-  store is built by reflinking your existing OSTree objects.
+- `ComposeFS free space` includes the source OSTree import, two expanded
+  copies of the target image (ComposeFS and podman fallback storage), and 5 GiB
+  of temporary headroom for the initrd rebuild.
 
-Optionally, preview what Phase 4's `/etc` merge will see before running it:
+Optionally, preview what Phase 4's `/etc` merge will see before you run it:
 
 ```bash
 sudo bootc-migrate etc-drift
@@ -477,9 +478,13 @@ apply this policy:
 If the staged image is cross-family without `--accept-cross-base`, the route
 leaves it staged and unfinalized. Remove it before retrying. Do not reboot.
 
-The tool writes `bootc-migrate-cross-family-report.json` inside the staged
-deployment. Non-gating E2E cells cover conversion and `OstreeDeploy`.
-See [ROADMAP.md](ROADMAP.md) and issues
+The tool prints the report and keeps it across the reboot. A composefs
+deployment stores it at
+`/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
+The composefs → OSTree route stores it in the new stateroot's
+`/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json`, because an
+OSTree deployment root is immutable after installation. Non-gating E2E cells
+cover conversion and `OstreeDeploy`. See [ROADMAP.md](ROADMAP.md) and issues
 [#258](https://github.com/tuna-os/bootc-migrate/issues/258),
 [#256](https://github.com/tuna-os/bootc-migrate/issues/256), and
 [#259](https://github.com/tuna-os/bootc-migrate/issues/259).
@@ -595,7 +600,7 @@ What's intentionally *not* carried forward:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Phase 0 refuses with "System is not booted into a bootc deployment" | Neither an ostree nor a composefs deployment is booted | Nothing to migrate from; check `bootc status` |
-| Phase 2 fails with ENOSPC mid-pull | `/sysroot/composefs` is tight on the 1.1× heuristic | Free space or grow the partition, then rerun |
+| Phase 0 refuses with insufficient free space | The root cannot hold the source import, ComposeFS target, podman fallback copy, and initrd rebuild headroom | Free space or grow the partition, then rerun |
 | Post-reboot `cat /proc/cmdline` shows `ostree=` not `composefs=` | Firmware ignored the new NVRAM entry, or OVMF loaded `Fedora\shim` instead | Use firmware boot menu to pick `Linux Boot Manager`; if that fails, fall back to OSTree and report the firmware quirk |
 | `bootc status` says "No manifest_digest in origin" | You're on an old build of this tool | Update to `main` — version info is on the first line of the migration log |
 | SSH key auth broken post-migration | Permissions changed during /var copy | Boot OSTree fallback and `chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` |
@@ -707,7 +712,7 @@ cargo build --release -p bootc-rebase
 
 | Subcommand | What it does | Status |
 |---|---|---|
-| `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. `--json` for machine output. | Done |
+| `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. On a package host it also compares installed software with the target image. `--json` includes the software report for machine consumers. | Done |
 | `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). `--accept-cross-base` also accepts a cross-family target on all three migration routes and selects the cross-family `/etc` policy (#256/#259) |
 | `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
 | `boot-entries [--json] [--interactive] [--rename-branding] [--apply] [--undo]` | Enumerate and classify UEFI boot entries: dead (loader path missing), generic-label, duplicate, firmware-managed, plus which are protected and why. **Dry-run by default** — a bare invocation is the read-only audit. `--interactive` opens a checklist (protected entries are unselectable), `--rename-branding` proposes renaming the booted entry to `PRETTY_NAME`, `--apply` writes the result to NVRAM after a typed confirmation and a restorable snapshot, and `--undo` replays that snapshot. | Audit and the cleanup **planner** are unit-tested (protections, the last-bootable-entry guard, and the "every entry looks dead ⇒ the ESP is wrong" refusal). The gating OSTree re-base E2E cell also renames a live OVMF NVRAM entry, applies the plan, undoes it, and asserts byte-identical `efibootmgr -v` output. This covers the executor and snapshot restore; it does **not** cover the separate, unimplemented GRUB2→systemd-boot flip ([#31](https://github.com/tuna-os/bootc-migrate/issues/31), [#189](https://github.com/tuna-os/bootc-migrate/issues/189)) |
@@ -748,6 +753,20 @@ each refusal:
 
 SELinux disabled on the host gives a warning, because the first boot then
 relabels all carried files.
+
+The same registry pass extracts the target's rpm, dpkg or pacman inventory.
+`scan` and package-host `--dry-run` compare it with the live host and group
+packages the image lacks into desktop applications, CLI tools, system services,
+kernel modules and other packages. Suggestions prefer a matching Flathub ID,
+then a known Homebrew formula, a toolbox/distrobox, or a derived image.
+Third-party package repositories and enabled services absent from the target are
+listed separately. An incomplete registry pass suppresses absence claims rather
+than treating missing evidence as an empty image.
+
+A non-dry package-host invocation writes the machine-readable report and its
+Markdown twin to `/var/lib/bootc-rebase/software-report.json` and
+`/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report
+without changing the host.
 
 ## Roadmap
 
