@@ -650,6 +650,7 @@ fn apply_cross_family_image_swap_policy(
             var_remap_deferred,
             relabel_scheduled,
             firstboot_unit_installed,
+            flatpak_preinstalls_kept: Vec::new(),
         },
     )
 }
@@ -707,6 +708,7 @@ fn apply_cross_family_ostree_policy(
             var_remap_deferred: false,
             relabel_scheduled,
             firstboot_unit_installed: false,
+            flatpak_preinstalls_kept: Vec::new(),
         },
     )
 }
