@@ -29,14 +29,21 @@ Organized by the milestone it feeds (see ROADMAP.md).
   one-boot trial design.
 - **openSUSE sdbootutil** —
   <https://en.opensuse.org/Systemd-boot>,
-  <https://microos.opensuse.org/blog/2023-12-20-sdboot-fde/>. Complete GRUB to
-  sd-boot tool. The `bootctl` wrapper manages kernels and initrd files per snapshot.
-  It handles FDE with TPM2 policies and in-place migration. In 2025, GRUB2-BLS
-  became the Tumbleweed default (<https://news.opensuse.org/2025/11/13/tw-grub2-bls/>).
-  GRUB2 with BLS does not have ESP sync issues. For #65, consider `grub2-bls` where
-  sd-boot fails.
-- **kernel-install / BLS specification** — tools use type-1 Boot Loader
-  Specification entries. Our resync hook will use a `kernel-install` drop-in first.
+  <https://microos.opensuse.org/blog/2023-12-20-sdboot-fde/>. The most
+  complete production GRUB→sd-boot migration in the wild: bootctl wrapper
+  managing kernel/cmdline/initrd bookkeeping per snapshot, FDE with
+  TPM2 policy prediction (systemd-pcrlock / pcr-oracle), and a documented
+  in-place migration (`zypper rm grub2-common; zypper in sdbootutil
+  systemd-boot`). Note their 2025 pivot: **GRUB2-BLS became Tumbleweed's
+  default** (<https://news.opensuse.org/2025/11/13/tw-grub2-bls/>) — a
+  BLS-native GRUB2 is an alternative endpoint that avoids the ESP-resync
+  problem entirely. *For #65: consider `grub2-bls` as a cheaper interim
+  target on systems where sd-boot is blocked (NVRAM ro, weird ESPs).*
+- **kernel-install / BLS spec** — sdbootutil and Fedora both anchor on
+  Boot Loader Specification type-1 entries. The standalone path installs
+  `/etc/kernel/install.d/95-bootc-migrate-esp-sync.install` as the resync
+  drop-in; a path-unit fallback is not needed because the hook receives the
+  kernel and initramfs paths directly from `kernel-install`.
 
 ## M4 — Native store & generation matrix (#13, #72)
 

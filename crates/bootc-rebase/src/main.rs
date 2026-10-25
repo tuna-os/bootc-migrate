@@ -10,11 +10,11 @@ use anyhow::{Result, bail};
 
 use bootc_migrate_core::preflight;
 use bootc_migrate_core::rebase_controller::{
-    CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig,
+    CoreMigrationConfig, ImageSwapConfig, OstreeDeployConfig, StandaloneBootloaderConfig,
 };
 use bootc_migrate_core::source_host;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod boot_entries;
 mod boot_entry_review;
@@ -22,7 +22,7 @@ mod commit_command;
 mod de_migrate_command;
 mod scan_command;
 
-use bootc_migrate_core::rebase_plan::{Backend, Strategy, bootloader_plan, plan, route};
+use bootc_migrate_core::rebase_plan::{Backend, Strategy, plan, route};
 
 #[derive(Parser, Debug)]
 #[command(name = "bootc-rebase")]
@@ -43,13 +43,11 @@ enum Commands {
     Rebase(Args),
     /// Return to the previous OSTree deployment (re-order UEFI BootOrder to OSTree/GRUB)
     Rollback(RollbackArgs),
-    /// GRUB2 -> systemd-boot bootloader migration (issue #65). NOT YET
-    /// IMPLEMENTED: the ESP/NVRAM mutation and the kernel-install resync
-    /// hook (without which a flipped system would silently boot stale
-    /// kernels after the next update) don't exist yet. This subcommand
-    /// exists so the CLI shape and pure BLS-entry/karg-carry-over/
-    /// entry-token logic (`bootc_migrate_core::migration::bootloader::systemd_boot`)
-    /// can be reviewed ahead of the live mutation work.
+    /// GRUB2 -> systemd-boot bootloader migration (issue #65). Stages a
+    /// one-boot `BootNext` trial while preserving the existing BootOrder;
+    /// `--promote` makes it persistent after a successful trial and
+    /// `--undo` removes the staged artifacts. The installed kernel-install
+    /// hook keeps the ESP copy current.
     MigrateBootloader(MigrateBootloaderArgs),
     /// Audit and clean up UEFI boot entries (issue #31). A bare invocation
     /// is read-only: it reports which entries look
@@ -210,17 +208,53 @@ struct BootEntriesArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 struct MigrateBootloaderArgs {
-    /// Target bootloader (only "systemd-boot" is planned)
+    /// Target bootloader (only "systemd-boot" is supported).
     #[arg(long, default_value = "systemd-boot")]
     to: String,
 
-    /// Dry-run: print every action without executing
+    /// Dry-run: print every action without executing.
     #[arg(long)]
     dry_run: bool,
 
-    /// Undo a previous migrate-bootloader run
+    /// Force migration even if readiness checks fail.
+    #[arg(short, long)]
+    force: bool,
+
+    /// Undo a previous systemd-boot trial or promotion.
     #[arg(long)]
     undo: bool,
+
+    /// Promote a successfully tested trial to the persistent BootOrder.
+    #[arg(long)]
+    promote: bool,
+
+    /// Internal kernel-install entry point.
+    #[arg(long, hide = true)]
+    resync: bool,
+
+    /// Entry token supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    entry_token: Option<String>,
+
+    /// Kernel version supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    kernel_version: Option<String>,
+
+    /// Kernel image supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    kernel_image: Option<String>,
+
+    /// Initramfs image supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    initrd: Option<String>,
+
+    /// BLS title supplied by the installed kernel-install hook.
+    #[arg(long, hide = true)]
+    title: Option<String>,
+
+    /// OCI image to extract systemd-boot from when the host lacks it.
+    #[arg(long)]
+    from_image: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -318,21 +352,24 @@ struct Args {
     de_migrate: bool,
 }
 
-/// Stub (issue #65): the pure BLS-entry/karg-carry-over/entry-token core
-/// lives in `bootc_migrate_core::migration::bootloader::systemd_boot` and is
-/// unit-tested, but the live ESP populate + NVRAM cutover + kernel-install
-/// resync hook aren't implemented — see the doc comment on
-/// `Commands::MigrateBootloader`. Refuses unconditionally so this can't be
-/// mistaken for a working migration.
-fn run_migrate_bootloader(_args: &MigrateBootloaderArgs) -> Result<()> {
-    let plan = bootloader_plan();
-    println!("Phases: {}", plan.phase_names());
-    println!("Bootloader policy: {:?}", plan.bootloader);
-    bail!(
-        "migrate-bootloader is not implemented yet (issue #65): the ESP/NVRAM mutation and \
-         kernel-install resync hook don't exist. See \
-         https://github.com/tuna-os/bootc-migrate/issues/65"
-    );
+/// Run the standalone bootloader action through the shared rebase controller.
+fn run_migrate_bootloader(args: &MigrateBootloaderArgs) -> Result<()> {
+    check_root_privilege()?;
+    StandaloneBootloaderConfig {
+        to: &args.to,
+        dry_run: args.dry_run,
+        force: args.force,
+        undo: args.undo,
+        promote: args.promote,
+        resync: args.resync,
+        entry_token: args.entry_token.as_deref(),
+        kernel_version: args.kernel_version.as_deref(),
+        kernel_image: args.kernel_image.as_deref().map(Path::new),
+        initrd: args.initrd.as_deref().map(Path::new),
+        title: args.title.as_deref(),
+        from_image: args.from_image.as_deref(),
+    }
+    .run()
 }
 
 fn parse_backend(s: &str) -> Result<Backend> {
@@ -500,9 +537,9 @@ fn execute_rebase(args: &Args) -> Result<()> {
     }
 }
 
-/// package -> ostree (#372): print the package-host readiness report and the
-/// hardware report, then the decision. The install step itself is #373, so a
-/// run that passes every check still stops here before changing anything.
+/// package -> ostree (#373, #377): print and enforce the package-host readiness
+/// report, print the software report, run the hardware gate, then execute the
+/// shared alongside-install engine with the live `/` bound at `/target`.
 fn run_package_install_preflight(args: &Args) -> Result<()> {
     use bootc_migrate_core::package_host::{self, Verdict};
     let image_size = match bootc_migrate_core::registry::image_compressed_size(&args.target_image) {
@@ -515,8 +552,29 @@ fn run_package_install_preflight(args: &Args) -> Result<()> {
             None
         }
     };
+    let target = bootc_migrate_core::scan::scan_target_image(&args.target_image)?;
+    let software =
+        bootc_migrate_core::software_report::gather_live(&target.software, &args.target_image)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "software report requires a positively detected package-managed source host"
+                )
+            })?;
     let checks = package_host::assess(&package_host::PackageHostFacts::gather(), image_size);
     print!("{}", package_host::render(&checks));
+    println!();
+    print!("{}", software.to_markdown());
+    if !args.dry_run {
+        let (json, markdown) = bootc_migrate_core::software_report::write_reports(
+            &software,
+            std::path::Path::new(bootc_migrate_core::software_report::STATE_DIR),
+        )?;
+        println!(
+            "Software reports written to {} and {}",
+            json.display(),
+            markdown.display()
+        );
+    }
     // The hardware gate prints its own decision and, on a real run, refuses
     // BLOCKING findings itself (unless --accept-hardware-gaps).
     bootc_migrate_core::hardware::check_and_gate(
@@ -531,17 +589,24 @@ fn run_package_install_preflight(args: &Args) -> Result<()> {
         Verdict::Ready => "ready",
     };
     println!("Package host decision: {verdict}");
-    if decision == Verdict::Refused && !args.dry_run {
+    if decision == Verdict::Refused {
+        if args.dry_run {
+            println!("Dry run: nothing was changed.");
+            return Ok(());
+        }
         bail!("this system is not ready for the package -> ostree migration (see above)");
     }
-    if args.dry_run {
-        println!("Dry run: nothing was changed.");
-        return Ok(());
+    if !args.dry_run {
+        check_root_privilege()?;
     }
-    bail!(
-        "the package -> ostree install step is not implemented yet; see \
-         https://github.com/tuna-os/bootc-migrate/issues/373"
-    )
+    bootc_migrate_core::ostree_install::PackageInstallConfig {
+        target_image: &args.target_image,
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_preflight: args.skip_preflight,
+        accept_cross_base: args.accept_cross_base,
+    }
+    .run()
 }
 
 fn main() {
@@ -965,13 +1030,16 @@ mod tests {
     }
 
     #[test]
-    fn migrate_bootloader_stub_always_refuses() {
-        let args = MigrateBootloaderArgs {
-            to: "systemd-boot".into(),
-            dry_run: false,
-            undo: false,
-        };
-        let err = run_migrate_bootloader(&args).unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+    fn migrate_bootloader_action_flags_parse() {
+        let cli = Cli::parse_from(["bootc-rebase", "migrate-bootloader", "--promote"]);
+        match cli.command {
+            Some(Commands::MigrateBootloader(args)) => {
+                assert!(args.promote);
+                assert!(!args.undo);
+                assert!(!args.resync);
+                assert_eq!(args.to, "systemd-boot");
+            }
+            other => panic!("expected Commands::MigrateBootloader, got {other:?}"),
+        }
     }
 }

@@ -6,6 +6,19 @@ Thank you for your interest in `bootc-migrate`.
 > Treat changes to the migration phases (`src/migration/`) with care.
 > Run the end-to-end test suite before you merge changes.
 
+<!-- hive-contribute-plea: donated-compute appeal, keep in sync across repos -->
+## Contribute compute — no code needed
+
+**[Donate time with your AI CLI](https://hub.tunaos.org/#contribute).**
+
+Your machine runs one task at a time using your signed-in AI coding CLI.
+The relay alternates between eligible **School** (OS) and **Reef** (apps)
+hives after each task. If one hive has no work, the other can continue.
+
+The guide covers prerequisites, verified `just` setup, credentials, provider
+costs, and how to stop with Ctrl+C. Your subscription quota or API charges apply.
+Never post account credentials or API keys in issues or pull requests.
+
 ## Development setup
 
 You need a stable Rust toolchain (edition 2024, `rust-version = 1.88.0`)

@@ -1,5 +1,6 @@
-//! composefs → ostree: `Strategy::OstreeInstall` (bootc-migrate#260, part of
-//! the any-base-to-any-base goal, #258).
+//! Shared alongside-install engine for composefs → ostree
+//! (`Strategy::OstreeInstall`, #260) and package → ostree
+//! (`Strategy::PackageInstall`, #373).
 //!
 //! # The problem
 //!
@@ -16,28 +17,29 @@
 //!
 //! The target image's *own* bootc, run in a privileged container against
 //! the physical root: `bootc install to-existing-root` ("alongside" mode).
-//! It initializes `/sysroot/ostree`, deploys the image, installs the
-//! bootloader through bootupd, and — because it writes the deployment's
-//! origin and BLS entry itself — leaves the target's bootc in charge of
-//! day-2 updates, which is the whole point of going back. Three facts about
-//! it shape everything below (read from upstream `install.rs`):
+//! It initializes the physical root's `ostree` repository, deploys the image,
+//! installs the bootloader through bootupd, and — because it writes the
+//! deployment's origin and BLS entry itself — leaves the target's bootc in
+//! charge of day-2 updates. Three facts about it shape everything below (read
+//! from upstream `install.rs`):
 //!
-//! 1. Without an explicit `/target` it bind-mounts PID 1's `/`, which on a
-//!    composefs host is the sealed overlay, not the block device. The
-//!    physical root is `/sysroot`, so that is what is bound to `/target`.
-//! 2. Alongside mode **empties the ESP** (`clean_boot_directories`), which
-//!    destroys the composefs deployment's kernel, initrd, BLS entry and
-//!    systemd-boot — the rollback path. So the composefs-owned ESP artifacts
-//!    are snapshotted first and restored afterwards, beside the shim/GRUB
-//!    that bootupd writes. Both loaders then coexist: GRUB through its NVRAM
-//!    entry, systemd-boot through "Linux Boot Manager".
+//! 1. The physical root is explicitly bound at `/target` with `rslave`
+//!    propagation. It is `/sysroot` for a composefs source and `/` for a
+//!    package source; the propagation makes `/boot` and ESP submounts visible.
+//! 2. Alongside mode **empties the boot directories**
+//!    (`clean_boot_directories`). Composefs-owned ESP artifacts are
+//!    snapshotted and restored. Package-host kernels, initramfs, BLS entries
+//!    and GRUB configuration are snapshotted for the "Previous system" entry
+//!    implemented by #374.
 //! 3. It carries nothing else: the new deployment's `/etc` is the factory
 //!    copy and its stateroot `/var` is empty. The `/etc` merge (same 3-way
 //!    rule as Phase 4, cross-family policy included) and the `/var` copy
 //!    are this module's.
 //!
-//! Planning helpers ([`install_command`], [`composefs_esp_paths`],
-//! [`newest_deployment`]) are pure; the I/O lives in [`OstreeInstallConfig::run`].
+//! Planning helpers ([`install_command`], [`package_install_command`],
+//! [`composefs_esp_paths`], [`package_boot_snapshot_paths`],
+//! [`newest_deployment`]) are pure; the I/O lives in the two public configs'
+//! `run` methods.
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,7 @@ use crate::preflight;
 use crate::rebase_controller::validate_target_image;
 use crate::registry;
 use crate::scan;
+use crate::sysroot::{SYSROOT, SysrootWritable};
 use crate::xattr;
 
 pub(crate) mod esp_resident;
@@ -60,18 +63,26 @@ pub(crate) mod esp_resident;
 /// The physical root of a composefs host (the block-device filesystem the
 /// composefs store and state live on).
 pub const PHYSICAL_ROOT: &str = "/sysroot";
+/// The physical root of a package-managed host.
+pub const PACKAGE_PHYSICAL_ROOT: &str = "/";
 /// Where the target's bootc sees the physical root inside its container —
 /// bootc's own `ALONGSIDE_ROOT_MOUNT`.
 pub const CONTAINER_TARGET: &str = "/target";
-/// Where the new OSTree deployments land (bootc's default stateroot).
+/// Where composefs-source OSTree deployments land.
 pub const OSTREE_DEPLOY_DIR: &str = "/sysroot/ostree/deploy/default/deploy";
-/// The new stateroot's `/var`.
+/// Where package-source OSTree deployments land.
+pub const PACKAGE_OSTREE_DEPLOY_DIR: &str = "/ostree/deploy/default/deploy";
+/// The composefs-source stateroot's `/var`.
 pub const OSTREE_STATEROOT_VAR: &str = "/sysroot/ostree/deploy/default/var";
-/// Where the ESP snapshot and the report are kept across the reboot.
+/// The package-source stateroot's `/var`.
+pub const PACKAGE_OSTREE_STATEROOT_VAR: &str = "/ostree/deploy/default/var";
+/// Where snapshots and reports are kept across the reboot.
 pub const STATE_DIR: &str = "/var/lib/bootc-rebase";
-/// The report's file name under [`STATE_DIR`].
+/// The composefs-source report's file name under [`STATE_DIR`].
 pub const REPORT_FILE: &str = "ostree-install-report.json";
-/// Numbered steps in [`OstreeInstallConfig::run`]: scan, pull, ESP
+/// The package-source report's file name under [`STATE_DIR`].
+pub const PACKAGE_REPORT_FILE: &str = "package-install-report.json";
+/// Numbered steps in the shared alongside-install engine: scan, pull,
 /// snapshot, deploy, /etc merge, /var carry, SELinux relabel, bootloader.
 const TOTAL_STEPS: u8 = 8;
 /// Where this route re-decides an unknown lineage: the /etc merge reads the
@@ -81,6 +92,50 @@ const TOTAL_STEPS: u8 = 8;
 const OSTREE_INSTALL_DECIDE_NOTE: &str = "The /etc merge below decides from the installed \
      deployment's own os-release; a cross-family target is refused there unless \
      --accept-cross-base was given.";
+
+/// Source-specific paths and policy for the shared alongside-install engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallSource {
+    Composefs,
+    Package,
+}
+
+impl InstallSource {
+    fn physical_root(self) -> &'static str {
+        match self {
+            Self::Composefs => PHYSICAL_ROOT,
+            Self::Package => PACKAGE_PHYSICAL_ROOT,
+        }
+    }
+
+    fn deploy_dir(self) -> &'static str {
+        match self {
+            Self::Composefs => OSTREE_DEPLOY_DIR,
+            Self::Package => PACKAGE_OSTREE_DEPLOY_DIR,
+        }
+    }
+
+    fn stateroot_var(self) -> &'static str {
+        match self {
+            Self::Composefs => OSTREE_STATEROOT_VAR,
+            Self::Package => PACKAGE_OSTREE_STATEROOT_VAR,
+        }
+    }
+
+    fn report_file(self) -> &'static str {
+        match self {
+            Self::Composefs => REPORT_FILE,
+            Self::Package => PACKAGE_REPORT_FILE,
+        }
+    }
+
+    fn route_name(self) -> &'static str {
+        match self {
+            Self::Composefs => "composefs -> ostree",
+            Self::Package => "package -> ostree",
+        }
+    }
+}
 
 /// A numbered step header: `=== Step 2/8 · Pull ===`.
 fn step(n: u8, total: u8, title: &str) -> String {
@@ -97,12 +152,14 @@ fn yes_no(b: bool) -> &'static str {
 /// the leftover of a failed attempt (undeploy or delete, then re-run) —
 /// a failed `bootc install` leaves an unregistered directory that `undeploy`
 /// cannot see, so both removals are spelled out.
-fn existing_deploy_refusal(existing: &[String]) -> String {
+fn existing_deploy_refusal(source: InstallSource, existing: &[String]) -> String {
+    let deploy_dir = source.deploy_dir();
+    let sysroot = source.physical_root();
     format!(
-        "an OSTree deployment already exists under {OSTREE_DEPLOY_DIR} ({}). If this \
+        "an OSTree deployment already exists under {deploy_dir} ({}). If this \
          host was migrated by bootc-migrate and never committed, `bootc-migrate \
          rollback` returns to it without reinstalling; if it is a leftover from a \
-         failed attempt, remove it (`ostree admin --sysroot=/sysroot undeploy \
+         failed attempt, remove it (`ostree admin --sysroot={sysroot} undeploy \
          <index>`, or delete the directory when `status` does not list it) and \
          re-run. Pass --force to install a fresh deployment alongside it anyway.",
         existing.join(", ")
@@ -112,23 +169,22 @@ fn existing_deploy_refusal(existing: &[String]) -> String {
 /// Refuse when an OSTree deployment already exists, unless forced. Checked
 /// twice per run: early for a fast failure, and again under the migration
 /// lock where a concurrent run can no longer slip between check and install.
-fn refuse_existing_deploy(force: bool) -> Result<()> {
-    if Path::new(OSTREE_DEPLOY_DIR).is_dir() && !force {
-        let existing = list_deployments()?;
+fn refuse_existing_deploy(source: InstallSource, force: bool) -> Result<()> {
+    if Path::new(source.deploy_dir()).is_dir() && !force {
+        let existing = list_deployments(source)?;
         if !existing.is_empty() {
-            bail!("{}", existing_deploy_refusal(&existing));
+            bail!("{}", existing_deploy_refusal(source, &existing));
         }
     }
     Ok(())
 }
 
 /// Where the run report is mirrored inside the new stateroot `/var`, so it
-/// survives the reboot onto the carried copy (post-boot
-/// `/var/lib/bootc-rebase/ostree-install-report.json`).
-fn carried_report_path() -> PathBuf {
-    Path::new(OSTREE_STATEROOT_VAR)
+/// survives the reboot onto the carried copy.
+fn carried_report_path(source: InstallSource) -> PathBuf {
+    Path::new(source.stateroot_var())
         .join("lib/bootc-rebase")
-        .join(REPORT_FILE)
+        .join(source.report_file())
 }
 
 /// True when `fstab` already mounts `mountpoint` (comments ignored).
@@ -222,23 +278,27 @@ pub struct OstreeInstallConfig<'a> {
     pub accept_cross_base: bool,
 }
 
+/// Everything the package → ostree strategy needs. It uses the same
+/// alongside-install engine with `/` as the physical root.
+#[derive(Debug, Clone, Copy)]
+pub struct PackageInstallConfig<'a> {
+    pub target_image: &'a str,
+    pub dry_run: bool,
+    pub force: bool,
+    pub skip_preflight: bool,
+    pub accept_cross_base: bool,
+}
+
 // ---- Pure planning -------------------------------------------------------
 
-/// The `podman run … bootc install to-existing-root` invocation, as argv.
-///
-/// - `--privileged --pid=host`, `/dev` and `/sys`: what `bootc install`
-///   needs to see block devices and firmware.
-/// - `--security-opt label=disable`: lets bootc write `security.selinux`
-///   xattrs onto the target (same as the E2E harness's own installs).
-/// - `/var/tmp` bound from the host: ostree writes multi-GB import blobs
-///   there, and the container's own `/var/tmp` is far too small.
-/// - `/var/lib/containers` bound so the already-pulled image is used, not
-///   re-fetched; `--skip-fetch-check` for the same reason.
-/// - `/sysroot` bound at `/target` with `rslave` propagation so the host's
-///   `/boot` and ESP mounts underneath are visible (see the module docs).
-/// - `--acknowledge-destructive`: we know it is the host root; the ESP is
-///   snapshotted before this runs.
-pub fn install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
+/// Build the `podman run … bootc install to-existing-root` invocation for a
+/// physical root. `rslave` keeps `/boot` and ESP submounts visible below
+/// `/target`.
+fn install_command_for_root(
+    target_image: &str,
+    kargs: &[String],
+    physical_root: &str,
+) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "podman".into(),
         "run".into(),
@@ -256,7 +316,7 @@ pub fn install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
         "-v".into(),
         "/var/lib/containers:/var/lib/containers".into(),
         "--mount".into(),
-        format!("type=bind,src={PHYSICAL_ROOT},dst={CONTAINER_TARGET},bind-propagation=rslave"),
+        format!("type=bind,src={physical_root},dst={CONTAINER_TARGET},bind-propagation=rslave"),
         target_image.into(),
         "bootc".into(),
         "install".into(),
@@ -272,6 +332,16 @@ pub fn install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
     argv
 }
 
+/// The composefs-source install invocation.
+pub fn install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
+    install_command_for_root(target_image, kargs, PHYSICAL_ROOT)
+}
+
+/// The package-source install invocation. The live `/` is the physical root.
+pub fn package_install_command(target_image: &str, kargs: &[String]) -> Vec<String> {
+    install_command_for_root(target_image, kargs, PACKAGE_PHYSICAL_ROOT)
+}
+
 /// Where [`seed_var_command`] mounts the stateroot `/var` inside the
 /// target image's container.
 const CONTAINER_VAR_TARGET: &str = "/target-var";
@@ -283,7 +353,7 @@ const CONTAINER_VAR_TARGET: &str = "/target-var";
 /// `/var` only, and a unit that expects a directory its package created at
 /// build time fails (fedora-bootc's chronyd: `/var/lib/chrony: No such file
 /// or directory`). Pure so it is table-tested.
-pub fn seed_var_command(target_image: &str) -> Vec<String> {
+fn seed_var_command_for(target_image: &str, stateroot_var: &str) -> Vec<String> {
     vec![
         "podman".into(),
         "run".into(),
@@ -292,7 +362,7 @@ pub fn seed_var_command(target_image: &str) -> Vec<String> {
         "--security-opt".into(),
         "label=disable".into(),
         "--mount".into(),
-        format!("type=bind,src={OSTREE_STATEROOT_VAR},dst={CONTAINER_VAR_TARGET}"),
+        format!("type=bind,src={stateroot_var},dst={CONTAINER_VAR_TARGET}"),
         target_image.into(),
         "cp".into(),
         "-a".into(),
@@ -300,6 +370,10 @@ pub fn seed_var_command(target_image: &str) -> Vec<String> {
         "/var/.".into(),
         format!("{CONTAINER_VAR_TARGET}/"),
     ]
+}
+
+pub fn seed_var_command(target_image: &str) -> Vec<String> {
+    seed_var_command_for(target_image, OSTREE_STATEROOT_VAR)
 }
 
 /// Whether an ESP-relative path (forward slashes) belongs to the composefs
@@ -329,6 +403,30 @@ pub fn composefs_esp_paths<'a>(listing: impl IntoIterator<Item = &'a str>) -> Ve
     v
 }
 
+/// Filter a `/boot` listing to the package host artifacts needed to construct
+/// the "Previous system" entry: kernels, initramfs images, BLS entries and the
+/// source GRUB configuration. The snapshot is created before alongside mode
+/// empties `/boot`; issue #374 consumes it.
+pub fn package_boot_snapshot_paths<'a>(listing: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut paths: Vec<String> = listing
+        .into_iter()
+        .map(|path| path.trim_start_matches('/'))
+        .filter(|path| {
+            let top_level = !path.contains('/');
+            (top_level
+                && (path.starts_with("vmlinuz-")
+                    || path.starts_with("initramfs-")
+                    || path.starts_with("initrd.img-")))
+                || (path.starts_with("loader/entries/") && path.ends_with(".conf"))
+                || matches!(*path, "grub/grub.cfg" | "grub2/grub.cfg")
+        })
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 /// Pick the deployment `bootc install` just created from the names under
 /// [`OSTREE_DEPLOY_DIR`]: `<checksum>.<serial>` entries, newest first by
 /// modification time is not available to a pure function, so the caller
@@ -342,22 +440,34 @@ pub fn newest_deployment(entries: &[(String, u64)]) -> Option<String> {
         .map(|(name, _)| name.clone())
 }
 
-/// Kernel arguments to carry from the composefs host's cmdline onto the
-/// new deployment's BLS entry beyond what bootc inherits itself (`root=`,
-/// `rootflags=`, `rd.*`): the console and LVM activation arguments, which
-/// the E2E harness and a dedicated-`/var` host both rely on. Backend
-/// locators (`composefs=`, `ostree=`) and loader internals are dropped.
-pub fn carry_over_kargs(cmdline: &str) -> Vec<String> {
+/// Kernel arguments to carry from the source host onto the new deployment's
+/// BLS entry. Composefs installs inherit the root locator from bootc, while a
+/// package install must explicitly preserve it because the new OSTree
+/// deployment still boots from the same physical root.
+fn filtered_kargs(cmdline: &str, include_root: bool) -> Vec<String> {
     cmdline
         .split_whitespace()
         .filter(|w| {
-            w.starts_with("console=")
+            (include_root && (w.starts_with("root=") || w.starts_with("rootflags=")))
+                || w.starts_with("console=")
                 || w.starts_with("rd.lvm.lv=")
                 || w.starts_with("rd.luks.")
                 || w.starts_with("systemd.log_level=")
         })
         .map(str::to_string)
         .collect()
+}
+
+/// Kernel arguments needed beyond those bootc inherits on a composefs host.
+pub fn carry_over_kargs(cmdline: &str) -> Vec<String> {
+    filtered_kargs(cmdline, false)
+}
+
+/// Kernel arguments needed to mount and diagnose a package host's old root.
+/// Kernel image paths, initrd paths and backend locators are deliberately
+/// excluded.
+pub fn package_carry_over_kargs(cmdline: &str) -> Vec<String> {
+    filtered_kargs(cmdline, true)
 }
 
 /// What the run did, written as JSON under [`STATE_DIR`] so it survives the
@@ -385,12 +495,64 @@ pub struct OstreeInstallReport {
     pub systemd_boot_entry: Option<String>,
 }
 
-// ---- I/O -----------------------------------------------------------------
+/// Package-source install report. The boot snapshot is intentionally retained
+/// for the rollback entry implemented by issue #374.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageInstallReport {
+    pub target_image: String,
+    pub deployment: String,
+    pub esp: String,
+    pub boot_snapshot_dir: String,
+    pub boot_snapshot_paths: Vec<String>,
+    pub etc_merge: String,
+    pub var_copied: bool,
+    pub cross_family: bool,
+    pub grub_boot_entry: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InstallConfig<'a> {
+    target_image: &'a str,
+    dry_run: bool,
+    force: bool,
+    skip_preflight: bool,
+    accept_cross_base: bool,
+    source: InstallSource,
+}
 
 impl OstreeInstallConfig<'_> {
-    /// Run the route: preflight, gate, pull, ESP snapshot, alongside
-    /// install, `/etc` merge, `/var` copy, ESP restore, NVRAM order, report.
     pub fn run(&self) -> Result<()> {
+        InstallConfig {
+            target_image: self.target_image,
+            dry_run: self.dry_run,
+            force: self.force,
+            skip_preflight: self.skip_preflight,
+            accept_cross_base: self.accept_cross_base,
+            source: InstallSource::Composefs,
+        }
+        .run()
+    }
+}
+
+impl PackageInstallConfig<'_> {
+    pub fn run(&self) -> Result<()> {
+        InstallConfig {
+            target_image: self.target_image,
+            dry_run: self.dry_run,
+            force: self.force,
+            skip_preflight: self.skip_preflight,
+            accept_cross_base: self.accept_cross_base,
+            source: InstallSource::Package,
+        }
+        .run()
+    }
+}
+
+// ---- I/O -----------------------------------------------------------------
+
+impl InstallConfig<'_> {
+    /// Run the shared alongside-install route.
+    fn run(&self) -> Result<()> {
         validate_target_image(self.target_image)?;
         if self.dry_run {
             println!("*** DRY RUN MODE — no changes will be made ***");
@@ -407,22 +569,35 @@ impl OstreeInstallConfig<'_> {
         println!("Checking system state...");
 
         let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-        if !cmdline.contains("composefs=") && !self.force {
+        if self.source == InstallSource::Composefs
+            && !crate::composefs_karg::present(&cmdline)
+            && !self.force
+        {
             bail!(
                 "System is not booted from a composefs deployment (/proc/cmdline has no \
-                 composefs= parameter); this route converts a composefs host back to the \
+                 composefs= or composefs.digest= parameter); this route converts a composefs host back to the \
                  OSTree backend. Use --force to override."
             );
         }
         if !Path::new("/sys/firmware/efi").exists() {
-            bail!("the composefs -> ostree route requires UEFI firmware (NVRAM boot entries).");
+            bail!(
+                "the {} route requires UEFI firmware (NVRAM boot entries).",
+                self.source.route_name()
+            );
         }
-        for tool in ["podman", "efibootmgr"] {
-            if which(tool).is_none() {
-                bail!("`{tool}` is required for the composefs -> ostree route and was not found");
-            }
+        if which("podman").is_none() {
+            bail!(
+                "`podman` is required for the {} route and was not found",
+                self.source.route_name()
+            );
         }
-        refuse_existing_deploy(self.force)?;
+        if which("efibootmgr").is_none() {
+            println!(
+                "Note: this host has no `efibootmgr`; the NVRAM steps run the target \
+                 image's own `efibootmgr` through podman."
+            );
+        }
+        refuse_existing_deploy(self.source, self.force)?;
 
         // One registry scan serves the lineage gate and the capability
         // checks below — previously each scanned the target again, which
@@ -449,6 +624,21 @@ impl OstreeInstallConfig<'_> {
                 yes_no(caps.bootupd_present),
                 yes_no(caps.ostree_capable),
             );
+        }
+
+        if !self.skip_preflight {
+            let secure_boot =
+                preflight::secure_boot::read_from_efivars(Path::new("/sys/firmware/efi/efivars"));
+            let loaders = caps
+                .as_ref()
+                .map(|caps| caps.target_bootloaders.as_slice())
+                .unwrap_or(&[]);
+            preflight::secure_boot::enforce_target_bootloaders(
+                &secure_boot,
+                loaders,
+                preflight::secure_boot::TargetBootloaderKind::Shim,
+                self.force,
+            )?;
         }
 
         // #256/#258: lineage gate. No /etc policy can be applied to what
@@ -503,17 +693,22 @@ impl OstreeInstallConfig<'_> {
         }
 
         let esp = find_esp_or_mount().context("locating the EFI system partition")?;
-        let report = preflight::run_preflight_checks().ok();
-        let booted_image = report.as_ref().and_then(|r| r.booted_image.clone());
+        let booted_image = if self.source == InstallSource::Composefs {
+            preflight::run_preflight_checks()
+                .ok()
+                .and_then(|report| report.booted_image)
+        } else {
+            None
+        };
 
-        // #305: with /boot on an encrypted root, the GRUB stub bootupd
-        // writes cannot reach the new kernels; the deployment boots through
-        // the restored systemd-boot from an ESP copy instead.
-        let boot_on_luks = esp_resident::detect(
-            &boot_bind_plan(&esp, &live_boot_mounts(&esp)),
-            PHYSICAL_ROOT,
-            &cmdline,
-        );
+        // #305 applies only to composefs sources. Package-host preflight
+        // refuses encrypted roots until their own E2E coverage lands.
+        let boot_on_luks = self.source == InstallSource::Composefs
+            && esp_resident::detect(
+                &boot_bind_plan(&esp, &live_boot_mounts(&esp)),
+                PHYSICAL_ROOT,
+                &cmdline,
+            );
         if boot_on_luks {
             println!(
                 "/boot is on the encrypted root with no boot partition of its own; GRUB cannot \
@@ -538,27 +733,43 @@ impl OstreeInstallConfig<'_> {
 
         if self.dry_run {
             println!("[DRY RUN] Would pull {} with podman.", self.target_image);
-            println!(
-                "[DRY RUN] Would snapshot composefs ESP artifacts from {esp} to {STATE_DIR}/esp-snapshot-*."
-            );
+            match self.source {
+                InstallSource::Composefs => println!(
+                    "[DRY RUN] Would snapshot composefs ESP artifacts from {esp} to \
+                     {STATE_DIR}/esp-snapshot-*."
+                ),
+                InstallSource::Package => println!(
+                    "[DRY RUN] Would snapshot the running package system's kernels, initramfs, \
+                     BLS entries and GRUB configuration from /boot to \
+                     {STATE_DIR}/boot-snapshot-*."
+                ),
+            }
+            let kargs = if self.source == InstallSource::Package {
+                package_carry_over_kargs(&cmdline)
+            } else {
+                carry_over_kargs(&cmdline)
+            };
             println!(
                 "[DRY RUN] Would run: {}",
-                install_command(self.target_image, &carry_over_kargs(&cmdline)).join(" ")
+                install_command_for_root(self.target_image, &kargs, self.source.physical_root())
+                    .join(" ")
             );
             println!(
-                "[DRY RUN] Would 3-way merge /etc into the new deployment (source defaults from {}), copy /var to {OSTREE_STATEROOT_VAR}, restore the composefs ESP artifacts, and {}.",
-                booted_image.as_deref().unwrap_or("<unknown booted image>"),
-                if boot_on_luks {
-                    "copy the new kernel and initrd to the ESP with a BLS entry, make it systemd-boot's default, and put \"Linux Boot Manager\" first in BootOrder"
+                "[DRY RUN] Would merge /etc into the new deployment, carry /var to {}, and {}.",
+                self.source.stateroot_var(),
+                if self.source == InstallSource::Package {
+                    "put the target GRUB entry first while retaining the old /boot snapshot for the Previous system entry"
+                } else if boot_on_luks {
+                    "restore the composefs ESP artifacts, copy the new kernel and initrd to the ESP with a BLS entry, make it systemd-boot's default, and put \"Linux Boot Manager\" first in BootOrder"
                 } else {
-                    "put the GRUB entry first in BootOrder"
+                    "restore the composefs ESP artifacts and put the GRUB entry first in BootOrder"
                 }
             );
             return Ok(());
         }
 
-        let _sleep_guard =
-            crate::migration::SleepGuard::new("bootc composefs -> ostree re-base in progress");
+        let sleep_reason = format!("bootc {} re-base in progress", self.source.route_name());
+        let _sleep_guard = crate::migration::SleepGuard::new(&sleep_reason);
 
         // ---- Pull ----
         println!(
@@ -571,38 +782,75 @@ impl OstreeInstallConfig<'_> {
             "podman pull",
         )?;
 
-        // ---- ESP snapshot ----
-        println!("{}", step(3, TOTAL_STEPS, &format!("ESP snapshot: {esp}")));
+        // ---- Source boot snapshot ----
+        let snapshot_kind = if self.source == InstallSource::Package {
+            "boot"
+        } else {
+            "esp"
+        };
+        let snapshot_source = if self.source == InstallSource::Package {
+            "/boot"
+        } else {
+            &esp
+        };
+        println!(
+            "{}",
+            step(3, TOTAL_STEPS, &format!("Boot snapshot: {snapshot_source}"))
+        );
         fs::create_dir_all(STATE_DIR)?;
         let snapshot_dir = Path::new(STATE_DIR).join(format!(
-            "esp-snapshot-{}",
+            "{snapshot_kind}-snapshot-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         ));
-        let snapshot_paths = snapshot_esp(Path::new(&esp), &snapshot_dir)?;
+        let snapshot_paths = if self.source == InstallSource::Package {
+            snapshot_package_boot(Path::new("/boot"), &snapshot_dir)?
+        } else {
+            snapshot_esp(Path::new(&esp), &snapshot_dir)?
+        };
         println!(
-            "[esp] {} composefs artifact(s) snapshotted to {}",
+            "[{snapshot_kind}] {} artifact(s) snapshotted to {}",
             snapshot_paths.len(),
             snapshot_dir.display()
         );
-        if !snapshot_paths
-            .iter()
-            .any(|p| p.starts_with("EFI/Linux/bootc_composefs-"))
+        if self.source == InstallSource::Composefs
+            && !snapshot_paths
+                .iter()
+                .any(|p| p.starts_with("EFI/Linux/bootc_composefs-"))
         {
             eprintln!(
                 "Warning: no composefs kernel directory found on the ESP; the running \
                  deployment will not be restorable as a rollback entry after the install."
             );
         }
+        if self.source == InstallSource::Package
+            && !snapshot_paths.iter().any(|p| p.starts_with("vmlinuz-"))
+        {
+            bail!(
+                "no package-host kernel was found under /boot; refusing before \
+                 `bootc install` empties the boot directory"
+            );
+        }
+
+        // Everything from here writes under /sysroot (the stateroot /var, the
+        // install, the /etc merge), which is read-only by its mount flag on a
+        // composefs host. Hold it writable until the run ends; preflight no
+        // longer leaves it writable by accident (#419).
+        let _sysroot = SysrootWritable::acquire(SYSROOT)
+            .context("cannot write the OSTree deployment under /sysroot")?;
 
         // A previous failed attempt may have removed the stateroot /var while
         // the repo layout survives; `bootc install` reuses extant layouts
         // verbatim and fails opening it. The install expects it empty — the
         // /var copy below fills it — so (re)create it, never wipe it.
-        fs::create_dir_all(OSTREE_STATEROOT_VAR)
-            .with_context(|| format!("creating the stateroot /var at {OSTREE_STATEROOT_VAR}"))?;
+        fs::create_dir_all(self.source.stateroot_var()).with_context(|| {
+            format!(
+                "creating the stateroot /var at {}",
+                self.source.stateroot_var()
+            )
+        })?;
 
         // ---- Deploy: the target's bootc, alongside ----
         println!(
@@ -617,11 +865,17 @@ impl OstreeInstallConfig<'_> {
             )
         );
         println!("[deploy] streaming `bootc install` output below (OSTree import takes minutes)…");
-        let _ = Command::new("mount")
-            .args(["-o", "remount,rw", PHYSICAL_ROOT])
-            .status();
-        let _boot_binds = bind_boot_into_physical_root(&esp)?;
-        let argv = install_command(self.target_image, &carry_over_kargs(&cmdline));
+        let _boot_binds = if self.source == InstallSource::Composefs {
+            Some(bind_boot_into_physical_root(&esp)?)
+        } else {
+            None
+        };
+        let kargs = if self.source == InstallSource::Package {
+            package_carry_over_kargs(&cmdline)
+        } else {
+            carry_over_kargs(&cmdline)
+        };
+        let argv = install_command_for_root(self.target_image, &kargs, self.source.physical_root());
         println!("[deploy] {}", argv.join(" "));
         let status = Command::new(&argv[0])
             .args(&argv[1..])
@@ -629,18 +883,20 @@ impl OstreeInstallConfig<'_> {
             .context("failed to execute podman")?;
         if !status.success() {
             bail!(
-                "bootc install to-existing-root failed (exit {status}); the composefs ESP \
-                 snapshot is at {} — restore it with `bootc-rebase` before rebooting if the \
-                 ESP was already emptied",
+                "bootc install to-existing-root failed (exit {status}); the pre-install boot \
+                 snapshot is at {}",
                 snapshot_dir.display()
             );
         }
         drop(_boot_binds);
 
-        let deployment = newest_deployment(&deployment_entries()?).ok_or_else(|| {
-            anyhow!("no OSTree deployment found under {OSTREE_DEPLOY_DIR} after the install")
+        let deployment = newest_deployment(&deployment_entries(self.source)?).ok_or_else(|| {
+            anyhow!(
+                "no OSTree deployment found under {} after the install",
+                self.source.deploy_dir()
+            )
         })?;
-        let deploy_root = Path::new(OSTREE_DEPLOY_DIR).join(&deployment);
+        let deploy_root = Path::new(self.source.deploy_dir()).join(&deployment);
         println!("[deploy] new deployment: {}", deploy_root.display());
 
         // ---- /etc ----
@@ -668,9 +924,9 @@ impl OstreeInstallConfig<'_> {
                 "/var: carrying the live tree into the stateroot"
             )
         );
-        let var_copied = copy_var_into_stateroot()?;
+        let var_copied = copy_var_into_stateroot(self.source.stateroot_var())?;
         if var_copied {
-            seed_var_from_target(self.target_image);
+            seed_var_from_target(self.target_image, self.source.stateroot_var());
         }
 
         if let Some(outcome) = cross.as_ref() {
@@ -678,10 +934,13 @@ impl OstreeInstallConfig<'_> {
             let source_group = fs::read_to_string("/etc/group").unwrap_or_default();
             cross_family::apply_post_merge(&cross_family::PostMergeInputs {
                 etc_outcome: outcome,
-                deploy_dir: &deploy_root,
+                // The deployment root is immutable once `bootc install`
+                // returns (EPERM, found by the Marlin -> Utah E2E run), so
+                // the report goes beside this route's own carried report.
+                report_dir: &Path::new(self.source.stateroot_var()).join("lib/bootc-rebase"),
                 etc_dir: &deploy_root.join("etc"),
                 staged_var: if var_copied {
-                    cross_family::StagedVar::Copied(Path::new(OSTREE_STATEROOT_VAR))
+                    cross_family::StagedVar::Copied(Path::new(self.source.stateroot_var()))
                 } else {
                     cross_family::StagedVar::InPlace
                 },
@@ -709,7 +968,7 @@ impl OstreeInstallConfig<'_> {
         // CoreMigration, so the machine-id class is not armed.
         crate::firstboot_repair::stage_repair(
             &deploy_root.join("etc"),
-            var_copied.then(|| Path::new(OSTREE_STATEROOT_VAR)),
+            var_copied.then(|| Path::new(self.source.stateroot_var())),
             false,
         )?;
 
@@ -726,10 +985,16 @@ impl OstreeInstallConfig<'_> {
             step(
                 7,
                 TOTAL_STEPS,
-                "SELinux: labelling the merged /etc and the carried /var"
+                "SELinux: labelling the merged /etc, the carried /var and /boot"
             )
         );
-        match relabel_with_target_policy(self.target_image, &deploy_root, var_copied) {
+        match relabel_with_target_policy(
+            self.target_image,
+            &deploy_root,
+            self.source.physical_root(),
+            self.source.stateroot_var(),
+            var_copied,
+        ) {
             Ok(Some(n)) => println!("[selinux] labelled {n} tree(s) with the target's policy"),
             Ok(None) => println!("[selinux] target does not enable SELinux; nothing to label"),
             Err(e) if self.force => eprintln!(
@@ -739,26 +1004,34 @@ impl OstreeInstallConfig<'_> {
             Err(e) => return Err(e),
         }
 
-        // ---- ESP restore + NVRAM ----
+        // ---- Boot snapshot restore + NVRAM ----
         println!(
             "{}",
             step(
                 8,
                 TOTAL_STEPS,
-                "Bootloader: restoring the composefs rollback entry"
+                if self.source == InstallSource::Package {
+                    "Bootloader: selecting the target entry"
+                } else {
+                    "Bootloader: restoring the composefs rollback entry"
+                }
             )
         );
-        let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
-        println!("[esp] {} composefs artifact(s) restored", restored.len());
+        let restored = if self.source == InstallSource::Composefs {
+            let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
+            println!("[esp] {} composefs artifact(s) restored", restored.len());
+            restored
+        } else {
+            Vec::new()
+        };
         // A composefs host installed to disk boots systemd-boot through the
         // removable-media path and may never have had a firmware entry of
         // its own; bootupd just replaced that path with shim. The restored
-        // loader needs an entry to be reachable at all, so register one
-        // when it is missing (idempotent, best-effort), then put GRUB
-        // ahead of it.
-        let rollback_entry = if Path::new(&esp)
-            .join("EFI/systemd/systemd-bootx64.efi")
-            .is_file()
+        // loader needs an entry to be reachable at all.
+        let rollback_entry = if self.source == InstallSource::Composefs
+            && Path::new(&esp)
+                .join("EFI/systemd/systemd-bootx64.efi")
+                .is_file()
         {
             ensure_systemd_boot_entry(self.target_image, &esp)
         } else {
@@ -782,7 +1055,7 @@ impl OstreeInstallConfig<'_> {
             // Everything is staged by now; a failed NVRAM write must not
             // abort the run before the report, so it is best-effort like
             // the entry registration above.
-            systemd_boot_entry = match put_systemd_boot_first() {
+            systemd_boot_entry = match put_systemd_boot_first(self.target_image) {
                 Ok(id) => id,
                 Err(e) => {
                     eprintln!(
@@ -805,33 +1078,47 @@ impl OstreeInstallConfig<'_> {
                     esp_resident::manual_workaround()
                 );
             }
-            put_grub_first()?
+            put_grub_first(self.target_image)?
         };
 
-        let report = OstreeInstallReport {
-            target_image: self.target_image.to_string(),
-            deployment: deployment.clone(),
-            esp: esp.clone(),
-            esp_snapshot_dir: snapshot_dir.display().to_string(),
-            esp_paths_restored: restored,
-            etc_merge,
-            var_copied,
-            cross_family: cross.is_some(),
-            grub_boot_entry: grub_entry,
-            boot_on_encrypted_root: boot_on_luks,
-            esp_resident_entry: esp_resident_entry.clone(),
-            systemd_boot_entry,
+        let rendered = if self.source == InstallSource::Package {
+            serde_json::to_string_pretty(&PackageInstallReport {
+                target_image: self.target_image.to_string(),
+                deployment: deployment.clone(),
+                esp: esp.clone(),
+                boot_snapshot_dir: snapshot_dir.display().to_string(),
+                boot_snapshot_paths: snapshot_paths,
+                etc_merge: etc_merge.clone(),
+                var_copied,
+                cross_family: cross.is_some(),
+                grub_boot_entry: grub_entry.clone(),
+            })
+            .expect("PackageInstallReport serializes")
+        } else {
+            serde_json::to_string_pretty(&OstreeInstallReport {
+                target_image: self.target_image.to_string(),
+                deployment: deployment.clone(),
+                esp: esp.clone(),
+                esp_snapshot_dir: snapshot_dir.display().to_string(),
+                esp_paths_restored: restored,
+                etc_merge,
+                var_copied,
+                cross_family: cross.is_some(),
+                grub_boot_entry: grub_entry.clone(),
+                boot_on_encrypted_root: boot_on_luks,
+                esp_resident_entry: esp_resident_entry.clone(),
+                systemd_boot_entry,
+            })
+            .expect("OstreeInstallReport serializes")
         };
-        let report_path = Path::new(STATE_DIR).join(REPORT_FILE);
-        let rendered =
-            serde_json::to_string_pretty(&report).expect("OstreeInstallReport serializes");
+        let report_path = Path::new(STATE_DIR).join(self.source.report_file());
         fs::write(&report_path, &rendered)
             .with_context(|| format!("writing {}", report_path.display()))?;
         println!("Report written to {}", report_path.display());
         // The report above lands on THIS /var; post-reboot /var is the
         // carried copy made before it existed. Mirror it into the new
-        // stateroot var so `bootc-rebase status` finds it after the reboot.
-        let carried = carried_report_path();
+        // stateroot var so post-boot tooling finds it after the reboot.
+        let carried = carried_report_path(self.source);
         if let Some(parent) = carried.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -844,9 +1131,16 @@ impl OstreeInstallConfig<'_> {
         // CoreMigration) rode along in the /var copy. `bootc-rebase status`
         // prefers it over ours, so it would name the old route after the
         // reboot. Keep it for reference, under a name status does not read.
-        let stale = Path::new(OSTREE_STATEROOT_VAR).join("lib/bootc-migrate/report.json");
+        let stale = Path::new(self.source.stateroot_var()).join("lib/bootc-migrate/report.json");
         if stale.exists() {
-            let kept = stale.with_extension("json.before-ostree-install");
+            let kept = stale.with_extension(format!(
+                "json.before-{}-install",
+                if self.source == InstallSource::Package {
+                    "package"
+                } else {
+                    "ostree"
+                }
+            ));
             fs::rename(&stale, &kept)
                 .with_context(|| format!("moving {} to {}", stale.display(), kept.display()))?;
             println!(
@@ -854,7 +1148,14 @@ impl OstreeInstallConfig<'_> {
                 kept.display()
             );
         }
-        if esp_resident_entry.is_some() {
+        if self.source == InstallSource::Package {
+            println!(
+                "OSTree deployment staged. Reboot to enter it. The old package system remains \
+                 on disk, and its boot artifacts are retained in {} for the Previous system \
+                 rollback entry (#374).",
+                snapshot_dir.display()
+            );
+        } else if esp_resident_entry.is_some() {
             println!(
                 "OSTree deployment staged. Reboot to enter it through systemd-boot; the \
                  composefs deployment stays selectable in the systemd-boot menu as rollback. \
@@ -878,9 +1179,50 @@ impl OstreeInstallConfig<'_> {
     }
 }
 
+/// The argv prefix that runs the target image's `efibootmgr` with the
+/// host's `/dev` and `/sys`, the way bootupd ran from the same container.
+fn target_efibootmgr_prefix(target_image: &str) -> Vec<String> {
+    [
+        "podman",
+        "run",
+        "--rm",
+        "--privileged",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        "/dev:/dev",
+        "-v",
+        "/sys:/sys",
+        target_image,
+        "efibootmgr",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// The argv prefix for `efibootmgr`: the host's when it ships one, else the
+/// target image's. Some composefs hosts ship none (TunaOS Marlin), and on an
+/// image-based host the operator cannot just install it, so this route
+/// would otherwise refuse before it starts. Pure so it is table-tested.
+fn efibootmgr_prefix(target_image: &str, host_has_efibootmgr: bool) -> Vec<String> {
+    if host_has_efibootmgr {
+        vec!["efibootmgr".to_string()]
+    } else {
+        target_efibootmgr_prefix(target_image)
+    }
+}
+
+/// An `efibootmgr` command, from the host or the target image.
+fn efibootmgr(target_image: &str) -> Command {
+    let argv = efibootmgr_prefix(target_image, which("efibootmgr").is_some());
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd
+}
+
 /// Whether `efibootmgr -v` lists a "Linux Boot Manager" entry.
-fn systemd_boot_entry_present() -> bool {
-    Command::new("efibootmgr")
+fn systemd_boot_entry_present(target_image: &str) -> bool {
+    efibootmgr(target_image)
         .arg("-v")
         .output()
         .map(|o| {
@@ -895,19 +1237,8 @@ fn systemd_boot_entry_present() -> bool {
 /// target image's efibootmgr, the way bootupd registered its own entry
 /// moments earlier from the same container. Pure so it is table-tested.
 pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec<String> {
-    vec![
-        "podman".into(),
-        "run".into(),
-        "--rm".into(),
-        "--privileged".into(),
-        "--security-opt".into(),
-        "label=disable".into(),
-        "-v".into(),
-        "/dev:/dev".into(),
-        "-v".into(),
-        "/sys:/sys".into(),
-        target_image.into(),
-        "efibootmgr".into(),
+    let mut argv = target_efibootmgr_prefix(target_image);
+    argv.extend([
         "--create".into(),
         "--disk".into(),
         disk.into(),
@@ -917,17 +1248,21 @@ pub fn register_entry_command(target_image: &str, disk: &str, part: &str) -> Vec
         "\\EFI\\systemd\\systemd-bootx64.efi".into(),
         "--label".into(),
         "Linux Boot Manager".into(),
-    ]
+    ]);
+    argv
 }
 
 /// Make sure a firmware entry reaches the restored systemd-boot loader.
 /// The host's own efibootmgr is tried first (Phase 5's helper); on the
 /// eighth E2E run Dakota's failed with exit 5 while bootupd's, run from
 /// the target container with /dev and /sys, had just succeeded, so that
-/// is the fallback. Returns whether the entry exists afterwards.
+/// is the fallback, and the only way on a host with no efibootmgr at all
+/// (tunaOS Marlin). Returns whether the entry exists afterwards.
 fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
-    crate::migration::boot::register_systemd_boot_nvram(esp);
-    if systemd_boot_entry_present() {
+    if which("efibootmgr").is_some() {
+        crate::migration::boot::register_systemd_boot_nvram(esp);
+    }
+    if systemd_boot_entry_present(target_image) {
         return true;
     }
     let Some((disk, part)) = crate::migration::boot::get_esp_disk_and_part(esp) else {
@@ -943,7 +1278,7 @@ fn ensure_systemd_boot_entry(target_image: &str, esp: &str) -> bool {
         ),
         Err(e) => eprintln!("Warning: could not run efibootmgr in the target image: {e}"),
     }
-    let present = systemd_boot_entry_present();
+    let present = systemd_boot_entry_present(target_image);
     if present {
         println!("[nvram] registered \"Linux Boot Manager\" through the target image's efibootmgr");
     }
@@ -971,16 +1306,23 @@ fn deployment_enables_selinux(deploy_root: &Path) -> bool {
     }
 }
 
-/// The `podman run` argv that labels `paths` (host paths under
-/// [`PHYSICAL_ROOT`]) with the target image's own `setfiles` and policy,
-/// each matched against the file contexts relative to its `alt_root`, so
-/// `<deployment>/etc/passwd` is labelled as `/etc/passwd` and
-/// `<stateroot>/var/log` as `/var/log`. Pure so it is table-tested.
-pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<String>> {
-    let to_container = |p: &Path| -> String {
-        let rel = p.strip_prefix(PHYSICAL_ROOT).unwrap_or(p);
-        Path::new(CONTAINER_TARGET).join(rel).display().to_string()
-    };
+/// Where `p`, a path under `physical_root`, appears in the relabel
+/// container.
+fn container_path(physical_root: &str, p: &Path) -> String {
+    match p.strip_prefix(physical_root).unwrap_or(p) {
+        rel if rel.as_os_str().is_empty() => CONTAINER_TARGET.to_string(),
+        rel => Path::new(CONTAINER_TARGET).join(rel).display().to_string(),
+    }
+}
+
+/// The `podman run` argv that labels `paths` with the target image's own
+/// `setfiles` and policy, each matched against its `alt_root`.
+fn relabel_command_for_root(
+    target_image: &str,
+    physical_root: &str,
+    jobs: &[(&Path, &Path)],
+) -> Vec<Vec<String>> {
+    let to_container = |p: &Path| container_path(physical_root, p);
     jobs.iter()
         .map(|(alt_root, path)| {
             vec![
@@ -991,7 +1333,7 @@ pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<S
                 "--security-opt".into(),
                 "label=disable".into(),
                 "--mount".into(),
-                format!("type=bind,src={PHYSICAL_ROOT},dst={CONTAINER_TARGET}"),
+                format!("type=bind,src={physical_root},dst={CONTAINER_TARGET}"),
                 target_image.to_string(),
                 "setfiles".into(),
                 "-F".into(),
@@ -1004,12 +1346,70 @@ pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<S
         .collect()
 }
 
-/// Label the merged `/etc` and, when it was copied, the stateroot `/var`
-/// with the target's policy. `Ok(None)` when the target does not enable
-/// SELinux.
+/// Whether `boot` is a directory on the same filesystem as `physical_root`.
+///
+/// `bootc install` writes the target's `/boot` (GRUB, `bootupd-state.json`,
+/// the OSTree kernels) there when the host has no separate boot
+/// partition. A host that ran without SELinux (tunaOS Marlin is Arch) has
+/// no labels on that filesystem, so the target booted with `/boot/efi`
+/// `unlabeled_t` and `systemd-logind` was denied on it. A separate boot
+/// partition carries labels of its own and is left alone.
+fn boot_shares_the_root_filesystem(physical_root: &Path, boot: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (
+        fs::symlink_metadata(physical_root),
+        fs::symlink_metadata(boot),
+    ) {
+        (Ok(root), Ok(boot)) => boot.is_dir() && boot.dev() == root.dev(),
+        _ => false,
+    }
+}
+
+/// The mount points strictly below `dir`, from `/proc/self/mountinfo`.
+fn mounts_below(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(|p| PathBuf::from(crate::package_data::decode_mountinfo_path(p)))
+        .filter(|p| p != dir && p.starts_with(dir))
+        .collect()
+}
+
+/// The relabel argv for the physical root's `/boot`, matched against the
+/// physical root so it gets the policy's `/boot` labels. Each mount point
+/// in `mounts` (an ESP mounted below `/boot`) is excluded with `-e`:
+/// `setfiles` has no option that keeps it on one filesystem.
+fn boot_relabel_command(
+    target_image: &str,
+    physical_root: &str,
+    boot: &Path,
+    mounts: &[PathBuf],
+) -> Vec<String> {
+    let root = Path::new(physical_root);
+    let mut argv = relabel_command_for_root(target_image, physical_root, &[(root, boot)])
+        .pop()
+        .expect("one job gives one command");
+    let at = argv.iter().position(|a| a == "-F").expect("setfiles -F") + 1;
+    let excludes = mounts
+        .iter()
+        .flat_map(|m| ["-e".to_string(), container_path(physical_root, m)]);
+    argv.splice(at..at, excludes);
+    argv
+}
+
+/// Composefs-source relabel command, retained as the public planning helper.
+pub fn relabel_command(target_image: &str, jobs: &[(&Path, &Path)]) -> Vec<Vec<String>> {
+    relabel_command_for_root(target_image, PHYSICAL_ROOT, jobs)
+}
+
+/// Label the merged `/etc`, the stateroot `/var` when it was copied, and
+/// the physical root's `/boot` when it is on the root filesystem, with the
+/// target's policy. `Ok(None)` when the target does not enable SELinux.
 fn relabel_with_target_policy(
     target_image: &str,
     deploy_root: &Path,
+    physical_root: &str,
+    stateroot_var: &str,
     var_copied: bool,
 ) -> Result<Option<usize>> {
     if !deployment_enables_selinux(deploy_root) {
@@ -1019,18 +1419,17 @@ fn relabel_with_target_policy(
         .ok()
         .and_then(|c| crate::selinux::parse_selinux_config(&c).selinux_type)
         .unwrap_or_else(|| "targeted".to_string());
-    let stateroot = Path::new(OSTREE_STATEROOT_VAR)
+    let stateroot = Path::new(stateroot_var)
         .parent()
-        .unwrap_or(Path::new(PHYSICAL_ROOT))
+        .unwrap_or(Path::new(physical_root))
         .to_path_buf();
     let etc = deploy_root.join("etc");
-    let var = Path::new(OSTREE_STATEROOT_VAR);
+    let var = Path::new(stateroot_var);
     let mut jobs: Vec<(&Path, &Path)> = vec![(deploy_root, etc.as_path())];
     if var_copied {
         jobs.push((stateroot.as_path(), var));
     }
-    let mut done = 0;
-    for mut argv in relabel_command(target_image, &jobs) {
+    let with_policy = |mut argv: Vec<String>| {
         if let Some(fc) = argv
             .iter_mut()
             .find(|a| a.as_str() == "/etc/selinux/targeted/contexts/files/file_contexts")
@@ -1038,11 +1437,39 @@ fn relabel_with_target_policy(
             *fc = format!("/etc/selinux/{policy_type}/contexts/files/file_contexts");
         }
         println!("[selinux] {}", argv.join(" "));
+        argv
+    };
+    let mut done = 0;
+    for argv in relabel_command_for_root(target_image, physical_root, &jobs) {
+        let argv = with_policy(argv);
         run_checked(
             Command::new(&argv[0]).args(&argv[1..]),
             "setfiles in the target image",
         )?;
         done += 1;
+    }
+    // Best-effort: bootc labelled what it needs to boot, and an error here
+    // must not undo a migration whose /etc and /var are labelled.
+    let boot = Path::new(physical_root).join("boot");
+    if boot_shares_the_root_filesystem(Path::new(physical_root), &boot) {
+        let mounts = fs::read_to_string("/proc/self/mountinfo")
+            .map(|m| mounts_below(&m, &boot))
+            .unwrap_or_default();
+        let argv = with_policy(boot_relabel_command(
+            target_image,
+            physical_root,
+            &boot,
+            &mounts,
+        ));
+        match run_checked(
+            Command::new(&argv[0]).args(&argv[1..]),
+            "setfiles on /boot in the target image",
+        ) {
+            Ok(()) => done += 1,
+            Err(e) => eprintln!(
+                "Warning: labelling /boot failed ({e:#}); the target boots, but may deny access to unlabeled files there."
+            ),
+        }
     }
     Ok(Some(done))
 }
@@ -1065,12 +1492,15 @@ fn run_checked(cmd: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn list_deployments() -> Result<Vec<String>> {
-    Ok(deployment_entries()?.into_iter().map(|(n, _)| n).collect())
+fn list_deployments(source: InstallSource) -> Result<Vec<String>> {
+    Ok(deployment_entries(source)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
 }
 
-fn deployment_entries() -> Result<Vec<(String, u64)>> {
-    let dir = Path::new(OSTREE_DEPLOY_DIR);
+fn deployment_entries(source: InstallSource) -> Result<Vec<(String, u64)>> {
+    let dir = Path::new(source.deploy_dir());
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -1099,6 +1529,22 @@ fn snapshot_esp(esp: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
     let paths = composefs_esp_paths(listing.iter().map(String::as_str));
     for rel in &paths {
         let src = esp.join(rel);
+        let dst = snapshot_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&src, &dst).with_context(|| format!("snapshotting {}", src.display()))?;
+    }
+    Ok(paths)
+}
+
+/// Snapshot the package host's boot artifacts for the rollback-entry stage.
+fn snapshot_package_boot(boot: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
+    let mut listing = Vec::new();
+    walk_files(boot, boot, &mut listing)?;
+    let paths = package_boot_snapshot_paths(listing.iter().map(String::as_str));
+    for rel in &paths {
+        let src = boot.join(rel);
         let dst = snapshot_dir.join(rel);
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
@@ -1244,13 +1690,12 @@ struct SourceEtc {
 }
 
 /// The fs-verity digest of the booted composefs image, from the kernel
-/// command line's `composefs=` argument. Pure so it is table-tested.
+/// command line's composefs argument in either form
+/// ([`crate::composefs_karg`]). Pure so it is table-tested.
 pub fn booted_composefs_verity(cmdline: &str) -> Option<String> {
-    cmdline
-        .split_whitespace()
-        .find_map(|t| t.strip_prefix("composefs="))
-        .map(|v| v.trim_start_matches("sha512:").to_string())
-        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_hexdigit()))
+    crate::composefs_karg::digest(cmdline)
+        .filter(|v| v.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
 }
 
 /// Mount the booted composefs image read-only from the host's own store
@@ -1532,9 +1977,9 @@ pub fn supplement_identity_from_usr_lib(deploy_root: &Path, out_etc: &Path) -> R
     Ok(supplemented)
 }
 
-/// Copy the live `/var` into the new stateroot's `/var` unless `/var` is a
-/// dedicated filesystem the deployment's fstab will mount itself.
-fn copy_var_into_stateroot() -> Result<bool> {
+/// Copy the live `/var` into `stateroot_var` unless `/var` is a dedicated
+/// filesystem the deployment's fstab will mount itself.
+fn copy_var_into_stateroot(stateroot_var: &str) -> Result<bool> {
     if let Some(var) = crate::migration::var_layout::detect_separate_var()? {
         println!(
             "[var] /var is a dedicated filesystem (UUID={}); the merged /etc/fstab mounts it, \
@@ -1543,7 +1988,7 @@ fn copy_var_into_stateroot() -> Result<bool> {
         );
         return Ok(false);
     }
-    let dst = Path::new(OSTREE_STATEROOT_VAR);
+    let dst = Path::new(stateroot_var);
     fs::create_dir_all(dst)?;
     // A live /var is gigabytes; heartbeat every few seconds so the copy
     // reads as progress, podman-pull style, instead of a hang.
@@ -1582,8 +2027,8 @@ fn copy_var_into_stateroot() -> Result<bool> {
 /// file type (a directory where the target ships a symlink) makes `cp`
 /// report an error for that path while still copying the rest, and the
 /// carried data must win there anyway.
-fn seed_var_from_target(target_image: &str) {
-    let argv = seed_var_command(target_image);
+fn seed_var_from_target(target_image: &str, stateroot_var: &str) {
+    let argv = seed_var_command_for(target_image, stateroot_var);
     println!("[var] {}", argv.join(" "));
     match Command::new(&argv[0]).args(&argv[1..]).status() {
         Ok(s) if s.success() => println!("[var] target /var skeleton added"),
@@ -1601,8 +2046,8 @@ fn seed_var_from_target(target_image: &str) {
 /// it. Returns the entry id, or `None` with a warning when no such entry
 /// exists — the firmware's removable-media fallback (`EFI/BOOT/BOOTX64.EFI`,
 /// which bootupd also writes) then boots GRUB.
-fn put_grub_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
+fn put_grub_first(target_image: &str) -> Result<Option<String>> {
+    let out = efibootmgr(target_image)
         .arg("-v")
         .output()
         .context("running efibootmgr")?;
@@ -1623,7 +2068,7 @@ fn put_grub_first() -> Result<Option<String>> {
     let order = rollback::parse_boot_order(&txt).unwrap_or_default();
     let new_order = rollback::build_new_boot_order(&order, &id);
     run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        efibootmgr(target_image).args(["--bootorder", &new_order]),
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (GRUB entry Boot{id} first)");
@@ -1634,8 +2079,8 @@ fn put_grub_first() -> Result<Option<String>> {
 /// `BootOrder`, for the layout where GRUB cannot boot the deployment
 /// (#305). Returns the entry id, or `None` with a warning when there is
 /// no such entry.
-fn put_systemd_boot_first() -> Result<Option<String>> {
-    let out = Command::new("efibootmgr")
+fn put_systemd_boot_first(target_image: &str) -> Result<Option<String>> {
+    let out = efibootmgr(target_image)
         .arg("-v")
         .output()
         .context("running efibootmgr")?;
@@ -1653,7 +2098,7 @@ fn put_systemd_boot_first() -> Result<Option<String>> {
     let order = rollback::parse_boot_order(&txt).unwrap_or_default();
     let new_order = rollback::build_new_boot_order(&order, &id);
     run_checked(
-        Command::new("efibootmgr").args(["--bootorder", &new_order]),
+        efibootmgr(target_image).args(["--bootorder", &new_order]),
         "efibootmgr --bootorder",
     )?;
     println!("[nvram] BootOrder: {new_order} (systemd-boot entry Boot{id} first)");
@@ -1663,6 +2108,19 @@ fn put_systemd_boot_first() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn efibootmgr_falls_back_to_the_target_image_when_the_host_has_none() {
+        assert_eq!(efibootmgr_prefix("img", true), ["efibootmgr"]);
+        let argv = efibootmgr_prefix("ghcr.io/projectbluefin/utah:testing", false);
+        assert_eq!(argv[..4], ["podman", "run", "--rm", "--privileged"]);
+        assert!(
+            argv.join(" ").contains(
+                "-v /dev:/dev -v /sys:/sys ghcr.io/projectbluefin/utah:testing efibootmgr"
+            )
+        );
+        assert_eq!(argv.last().map(String::as_str), Some("efibootmgr"));
+    }
 
     #[test]
     fn seed_var_command_never_overwrites_carried_data() {
@@ -1721,6 +2179,40 @@ mod tests {
         assert_eq!(bare.last().map(String::as_str), Some(CONTAINER_TARGET));
         // Never the composefs backend: the whole point is the ostree one.
         assert!(!argv.iter().any(|a| a.contains("composefs-backend")));
+    }
+
+    #[test]
+    fn package_install_command_binds_the_live_root_with_submounts() {
+        let argv = package_install_command(
+            "quay.io/fedora/fedora-bootc:44",
+            &[
+                "root=UUID=abc".to_string(),
+                "rootflags=subvol=root".to_string(),
+            ],
+        );
+        assert!(argv.contains(&format!(
+            "type=bind,src=/,dst={CONTAINER_TARGET},bind-propagation=rslave"
+        )));
+        assert!(!argv.iter().any(|arg| arg.contains("src=/sysroot")));
+        let image = argv
+            .iter()
+            .position(|arg| arg == "quay.io/fedora/fedora-bootc:44")
+            .unwrap();
+        assert_eq!(
+            &argv[image + 1..],
+            &[
+                "bootc",
+                "install",
+                "to-existing-root",
+                "--acknowledge-destructive",
+                "--skip-fetch-check",
+                "--karg",
+                "root=UUID=abc",
+                "--karg",
+                "rootflags=subvol=root",
+                CONTAINER_TARGET,
+            ]
+        );
     }
 
     /// The snapshot is exactly what alongside mode's ESP wipe would take
@@ -1789,6 +2281,57 @@ mod tests {
     }
 
     #[test]
+    fn boot_relabel_stays_on_the_root_filesystem() {
+        let boot = Path::new(PHYSICAL_ROOT).join("boot");
+        let argv =
+            boot_relabel_command("quay.io/fedora/fedora-bootc:44", PHYSICAL_ROOT, &boot, &[])
+                .join(" ");
+        assert!(
+            argv.ends_with("setfiles -F -r /target /etc/selinux/targeted/contexts/files/file_contexts /target/boot"),
+            "{argv}"
+        );
+        let mountinfo = "\
+            22 1 0:30 / / rw - btrfs /dev/vda3 rw\n\
+            40 22 0:30 /boot /sysroot/boot rw - btrfs /dev/vda3 rw\n\
+            41 40 8:2 / /sysroot/boot/efi rw - vfat /dev/vda2 rw\n\
+            42 40 8:4 / /sysroot/boot/my\\040esp rw - vfat /dev/vda4 rw\n\
+            43 22 8:2 / /sysroot/bootx rw - vfat /dev/vda2 rw\n";
+        let mounts = mounts_below(mountinfo, &boot);
+        assert_eq!(
+            mounts,
+            [boot.join("efi"), boot.join("my esp")],
+            "{mounts:?}"
+        );
+        let argv = boot_relabel_command(
+            "quay.io/fedora/fedora-bootc:44",
+            PHYSICAL_ROOT,
+            &boot,
+            &mounts,
+        );
+        let at = argv.iter().position(|a| a == "setfiles").unwrap();
+        assert_eq!(
+            argv[at..at + 6],
+            [
+                "setfiles",
+                "-F",
+                "-e",
+                "/target/boot/efi",
+                "-e",
+                "/target/boot/my esp"
+            ]
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let boot = root.path().join("boot");
+        assert!(!boot_shares_the_root_filesystem(root.path(), &boot));
+        fs::create_dir(&boot).unwrap();
+        assert!(boot_shares_the_root_filesystem(root.path(), &boot));
+        let link = root.path().join("boot-link");
+        std::os::unix::fs::symlink(&boot, &link).unwrap();
+        assert!(!boot_shares_the_root_filesystem(root.path(), &link));
+    }
+
+    #[test]
     fn booted_composefs_verity_table() {
         assert_eq!(
             booted_composefs_verity("initrd=x rw composefs=abc123 console=ttyS0"),
@@ -1796,6 +2339,10 @@ mod tests {
         );
         assert_eq!(
             booted_composefs_verity("composefs=sha512:0f1e"),
+            Some("0f1e".to_string())
+        );
+        assert_eq!(
+            booted_composefs_verity("rw composefs.digest=v1-sha512-12:0f1e lockdown=integrity"),
             Some("0f1e".to_string())
         );
         assert_eq!(
@@ -1858,6 +2405,33 @@ mod tests {
     }
 
     #[test]
+    fn package_boot_snapshot_path_table() {
+        let listing = [
+            "vmlinuz-6.12.0",
+            "/initramfs-6.12.0.img",
+            "initrd.img-6.11.0",
+            "loader/entries/fedora-6.12.0.conf",
+            "grub2/grub.cfg",
+            "grub/grub.cfg",
+            "config-6.12.0",
+            "System.map-6.12.0",
+            "efi/EFI/fedora/shimx64.efi",
+            "loader/random-seed",
+        ];
+        assert_eq!(
+            package_boot_snapshot_paths(listing),
+            vec![
+                "grub/grub.cfg",
+                "grub2/grub.cfg",
+                "initramfs-6.12.0.img",
+                "initrd.img-6.11.0",
+                "loader/entries/fedora-6.12.0.conf",
+                "vmlinuz-6.12.0",
+            ]
+        );
+    }
+
+    #[test]
     fn newest_deployment_picks_latest_serial_zero() {
         let entries = vec![
             ("aaaa.0".to_string(), 10),
@@ -1885,6 +2459,26 @@ mod tests {
                 "systemd.log_level=info",
             ]
         );
+        assert_eq!(
+            package_carry_over_kargs(cmdline),
+            vec![
+                "root=UUID=abc",
+                "rootflags=subvol=root",
+                "console=ttyS0,115200n8",
+                "console=tty0",
+                "rd.lvm.lv=vg/root",
+                "rd.luks.name=1234=root",
+                "systemd.log_level=info",
+            ]
+        );
+        for dropped in ["BOOT_IMAGE=", "composefs=", "ostree=", "initrd="] {
+            assert!(
+                package_carry_over_kargs(cmdline)
+                    .iter()
+                    .all(|arg| !arg.starts_with(dropped)),
+                "{dropped}"
+            );
+        }
     }
 
     /// Snapshot then restore over a "wiped" ESP that bootupd has partially
@@ -1966,14 +2560,15 @@ mod tests {
     }
 
     #[test]
-    fn existing_deploy_refusal_names_both_ways_out() {
-        let msg = existing_deploy_refusal(&["abc123.0".to_string()]);
-        assert!(msg.contains("abc123.0"), "{msg}");
-        // Never-committed forward migration: rollback returns to it.
-        assert!(msg.contains("bootc-migrate rollback"), "{msg}");
-        // Failed-attempt leftover: undeploy, or delete when unregistered.
-        assert!(msg.contains("undeploy"), "{msg}");
-        assert!(msg.contains("delete the directory"), "{msg}");
+    fn existing_deploy_refusal_names_source_paths_and_both_ways_out() {
+        for source in [InstallSource::Composefs, InstallSource::Package] {
+            let msg = existing_deploy_refusal(source, &["abc123.0".to_string()]);
+            assert!(msg.contains("abc123.0"), "{msg}");
+            assert!(msg.contains(source.deploy_dir()), "{msg}");
+            assert!(msg.contains("bootc-migrate rollback"), "{msg}");
+            assert!(msg.contains("undeploy"), "{msg}");
+            assert!(msg.contains("delete the directory"), "{msg}");
+        }
     }
 
     #[test]
@@ -1985,14 +2580,20 @@ mod tests {
     }
 
     #[test]
-    fn carried_report_path_lands_in_the_new_var() {
-        let path = carried_report_path();
-        assert_eq!(
-            path,
-            Path::new(OSTREE_STATEROOT_VAR)
-                .join("lib/bootc-rebase")
-                .join(REPORT_FILE)
-        );
+    fn carried_report_paths_land_in_each_new_var() {
+        for (source, var, report) in [
+            (InstallSource::Composefs, OSTREE_STATEROOT_VAR, REPORT_FILE),
+            (
+                InstallSource::Package,
+                PACKAGE_OSTREE_STATEROOT_VAR,
+                PACKAGE_REPORT_FILE,
+            ),
+        ] {
+            assert_eq!(
+                carried_report_path(source),
+                Path::new(var).join("lib/bootc-rebase").join(report)
+            );
+        }
     }
 
     #[test]
