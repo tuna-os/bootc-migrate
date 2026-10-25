@@ -87,7 +87,7 @@ pub fn render_complete(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "       cat /proc/cmdline | grep composefs=",
+            "       grep -E 'composefs(\\.digest)?=' /proc/cmdline",
             Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),

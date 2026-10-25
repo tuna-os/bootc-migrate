@@ -267,15 +267,10 @@ pub fn stage_via_bootc_switch(target_image: &str) -> Result<()> {
 /// Where a composefs host keeps each deployment's `/etc` and `.origin`.
 const COMPOSEFS_DEPLOY_ROOT: &str = "/sysroot/state/deploy";
 
-/// The verity digest in `composefs=` on the kernel command line. A leading
-/// `?` marks an image booted without signature enforcement; it is not part
-/// of the digest.
+/// The verity digest of the composefs image the kernel command line names,
+/// in either argument form ([`crate::composefs_karg`]).
 pub fn booted_composefs_verity(cmdline: &str) -> Option<&str> {
-    cmdline
-        .split_whitespace()
-        .find_map(|arg| arg.strip_prefix("composefs="))
-        .map(|v| v.trim_start_matches('?'))
-        .filter(|v| !v.is_empty())
+    crate::composefs_karg::digest(cmdline)
 }
 
 /// The staged deployment's verity: bootc's own report when it gives one,
@@ -567,8 +562,10 @@ const STAGED_DEPLOYMENT_MARKER: &str = "/run/ostree/staged-deployment";
 /// alone.
 ///
 /// Call this last. Finalization marks the deployment root immutable, so every
-/// write into it (the cross-base remap and /etc policy, their reports, the
-/// SELinux relabel marker, the desktop-migration step) must come before.
+/// write into it (the cross-base remap, the reports, the SELinux relabel
+/// marker, the desktop-migration step) must come before. The cross-base /etc
+/// rewrite is the exception: finalization merges the live /etc into the
+/// deployment again, so that rewrite comes after it.
 fn finalize_staged_now() -> Result<()> {
     if !std::path::Path::new(STAGED_DEPLOYMENT_MARKER).exists() {
         return Ok(());
@@ -781,10 +778,10 @@ impl ImageSwapConfig<'_> {
         // may have been told --source-backend composefs explicitly, but staging
         // relies on the running bootc's composefs support.
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-        if !cmdline.contains("composefs=") && !self.force {
+        if !crate::composefs_karg::present(&cmdline) && !self.force {
             bail!(
                 "System is not booted from a composefs deployment (/proc/cmdline has no \
-                 composefs= parameter). Use --force to override, or re-run with \
+                 composefs= or composefs.digest= parameter). Use --force to override, or re-run with \
                  --source-backend auto."
             );
         }
@@ -870,7 +867,7 @@ pub struct OstreeDeployConfig<'a> {
 ///
 /// The one place that merge is second-guessed is a cross-base re-base, where
 /// "keep the user's value" is the wrong answer for a path whose vendor
-/// default also moved — see [`cross_base::apply_cross_base_etc_policy`].
+/// default also moved — see [`cross_base::plan_cross_base_etc_policy`].
 ///
 /// Bootloader: the standalone `migrate-bootloader` route owns the audited
 /// systemd-boot trial. Backend re-bases keep their current bootloader because
@@ -945,11 +942,12 @@ impl OstreeDeployConfig<'_> {
         let _sysroot =
             SysrootWritable::acquire(SYSROOT).context("cannot write into the staged deployment")?;
 
+        let mut etc_policy = None;
         if let Some(plan) = &cross_base_plan {
             let staged_root = cross_base::staged_deployment_root()
                 .context("failed to locate the staged deployment for cross-base post-processing")?;
             cross_base::apply_cross_base_remap(&staged_root, plan)?;
-            cross_base::apply_cross_base_etc_policy(&staged_root)?;
+            etc_policy = cross_base::plan_cross_base_etc_policy(&staged_root)?;
 
             // #67: when the base family changes, the SELinux policy type may
             // differ — schedule /.autorelabel so the target's policy is applied
@@ -970,6 +968,12 @@ impl OstreeDeployConfig<'_> {
 
         // #262: last, after every write into the deployment root above.
         finalize_staged_now()?;
+        // The finalization merged the live /etc into the deployment again,
+        // which put back each local value the /etc policy replaces. Rewrite
+        // those paths now; they are under etc/, not the immutable root.
+        if let Some(policy) = &etc_policy {
+            policy.apply()?;
+        }
 
         println!(
             "Re-base staged. Reboot to enter the new deployment; the previous \
@@ -1044,6 +1048,10 @@ mod tests {
         );
         assert_eq!(
             booted_composefs_verity("composefs=?abc12 quiet"),
+            Some("abc12")
+        );
+        assert_eq!(
+            booted_composefs_verity("composefs.digest=v1-sha512-12:abc12 rw"),
             Some("abc12")
         );
         assert_eq!(booted_composefs_verity("rd.composefs=1 root=UUID=1"), None);

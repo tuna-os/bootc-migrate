@@ -154,7 +154,7 @@ const ROUTES: &[Route] = &[
         from: Backend::Package,
         to: Backend::Ostree,
         strategy: Strategy::PackageInstall,
-        implemented: false,
+        implemented: true,
     },
 ];
 
@@ -293,9 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn package_to_ostree_is_planned() {
+    fn package_to_ostree_is_implemented() {
         let r = route(Backend::Package, Backend::Ostree).unwrap();
-        assert!(!r.implemented);
+        assert!(r.implemented);
         assert_eq!(r.strategy, Strategy::PackageInstall);
         let p = plan(Backend::Package, Backend::Ostree).unwrap();
         assert_eq!(p.phase_names(), "preflight -> pull -> deploy -> bootloader");

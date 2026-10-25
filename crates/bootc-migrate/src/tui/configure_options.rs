@@ -28,8 +28,8 @@ pub fn render_configure_options(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .iter()
         .map(|row| match row {
             OptRow::DryRun => (
-                if app.booted_backend == Some(Backend::Package) {
-                    "Dry-run (package-host preview only)"
+                if app.is_package_source() {
+                    "Dry-run (required: PackageInstall is preview-only)"
                 } else if !app.live_source_ready() {
                     "Dry-run (source unknown; preview only)"
                 } else {

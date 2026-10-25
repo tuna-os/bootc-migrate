@@ -2,7 +2,7 @@
 //!
 //! Also home to the standalone `migrate-bootloader` subcommand (issue #65).
 
-use super::boot_deployments::{BootDeployment, enumerate_deployments};
+use super::boot_deployments::{BootDeployment, enumerate_deployments, find_kver_in_modules};
 use super::*;
 use crate::preflight::SystemInfo;
 
@@ -98,10 +98,10 @@ fn bootc_bls_entries(entries_dir: &Path) -> Result<Vec<PathBuf>> {
 fn bootc_bls_entry_targets_verity(entry_path: &Path, verity: &str) -> Result<bool> {
     let contents = fs::read_to_string(entry_path)
         .with_context(|| format!("reading BLS entry {}", entry_path.display()))?;
-    let expected = format!("composefs={verity}");
     Ok(contents.lines().any(|line| {
         let mut fields = line.split_whitespace();
-        matches!(fields.next(), Some("options")) && fields.any(|field| field == expected.as_str())
+        matches!(fields.next(), Some("options"))
+            && fields.any(|field| crate::composefs_karg::arg_digest(field) == Some(verity))
     }))
 }
 
@@ -212,16 +212,13 @@ pub fn phase5_setup_bootloader(
 
     // Find kernel version from the mounted image /usr/lib/modules.
     let modules_dir = mount_path.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)
-        .with_context(|| {
-            format!(
-                "reading kernel modules dir from mounted image: {}",
-                modules_dir.display()
-            )
-        })?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+    fs::metadata(&modules_dir).with_context(|| {
+        format!(
+            "reading kernel modules dir from mounted image: {}",
+            modules_dir.display()
+        )
+    })?;
+    let kver = find_kver_in_modules(&modules_dir)
         .ok_or_else(|| anyhow!("could not find kernel version in mounted image"))?;
     println!("Found kernel version: {}", kver);
 
@@ -801,10 +798,7 @@ fn build_ostree_fallback_on_esp(esp_path: &Path) -> Result<bootloader::BlsEntry>
     let (deploy_root, _checksum) = find_ostree_deployment()?;
 
     let modules_dir = deploy_root.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+    let kver = find_kver_in_modules(&modules_dir)
         .ok_or_else(|| anyhow!("no kernel version in OSTree deployment"))?;
 
     let vmlinuz_path = modules_dir.join(&kver).join("vmlinuz");
@@ -822,7 +816,7 @@ fn build_ostree_fallback_on_esp(esp_path: &Path) -> Result<bootloader::BlsEntry>
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let options: Vec<&str> = cmdline
         .split_whitespace()
-        .filter(|w| !w.starts_with("composefs="))
+        .filter(|w| !crate::composefs_karg::is_arg(w))
         .collect();
 
     Ok(bootloader::BlsEntry {
@@ -841,10 +835,7 @@ fn build_ostree_fallback_entry() -> Result<bootloader::BlsEntry> {
     let (deploy_root, _checksum) = find_ostree_deployment()?;
 
     let modules_dir = deploy_root.join("usr/lib/modules");
-    let kver = fs::read_dir(&modules_dir)?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+    let kver = find_kver_in_modules(&modules_dir)
         .ok_or_else(|| anyhow!("no kernel version in OSTree deployment"))?;
 
     let vmlinuz_path = modules_dir.join(&kver).join("vmlinuz");
@@ -862,7 +853,7 @@ fn build_ostree_fallback_entry() -> Result<bootloader::BlsEntry> {
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let options: Vec<&str> = cmdline
         .split_whitespace()
-        .filter(|w| !w.starts_with("composefs="))
+        .filter(|w| !crate::composefs_karg::is_arg(w))
         .collect();
 
     Ok(bootloader::BlsEntry {
@@ -1231,7 +1222,7 @@ fn migrate_to_systemd_boot(
         let strip = if dep.is_composefs {
             &[][..]
         } else {
-            &["composefs="][..]
+            crate::composefs_karg::PREFIXES
         };
         entries.push(bootloader::BlsEntry {
             title,
@@ -1344,7 +1335,7 @@ fn migrate_to_grub2(_sys: &SystemInfo, deps: &[BootDeployment], dry_run: bool) -
         let strip: &[&str] = if dep.is_composefs {
             &[]
         } else {
-            &["composefs="]
+            crate::composefs_karg::PREFIXES
         };
         let options = bootloader::systemd_boot::carry_over_kargs(&live_cmdline, strip);
 
@@ -1505,6 +1496,16 @@ mod tests {
         )
         .unwrap();
 
+        assert!(bootc_bls_entry_targets_verity(&entry, "current-verity").unwrap());
+        assert!(!bootc_bls_entry_targets_verity(&entry, "stale-verity").unwrap());
+
+        // Newer bootc writes the digest as composefs.digest=.
+        fs::write(
+            &entry,
+            "title Dakota\n\
+             options root=UUID=root composefs.digest=v1-sha512-12:current-verity rw\n",
+        )
+        .unwrap();
         assert!(bootc_bls_entry_targets_verity(&entry, "current-verity").unwrap());
         assert!(!bootc_bls_entry_targets_verity(&entry, "stale-verity").unwrap());
     }

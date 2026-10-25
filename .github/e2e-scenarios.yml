@@ -12,7 +12,10 @@
   expect_dm: gdm
   # 20G intermittently ENOSPCs during the Phase-2 podman pull
   # (#42-class; last seen 2026-07-19) — match the other cells.
-  disk_size: 40G
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
 - name: bluefin LTS -> dakota (systemd-boot + composefs)
   base: ghcr.io/projectbluefin/bluefin:lts
   target: ghcr.io/projectbluefin/dakota:stable
@@ -21,8 +24,11 @@
   filesystem: ext4
   # 20G default has intermittently ENOSPC'd (#42) — no XFS loopback
   # is involved here (ext4 natively supports fs-verity), so this is
-  # just the outer disk being tight; match the LUKS scenario's 40G.
-  disk_size: 40G
+  # just the outer disk being tight.
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
 - name: bluefin LTS -> dakota (LUKS + systemd-boot + composefs)
   base: ghcr.io/projectbluefin/bluefin:lts
   target: ghcr.io/projectbluefin/dakota:stable
@@ -120,7 +126,10 @@
   # checklist, wizard navigation, live migration, reboot into
   # composefs, rollback round-trip, commit.
   mode: tui-migrate
-  disk_size: 40G
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
 - name: bluefin -> openSUSE Tumbleweed (cross-family composefs migration)
   base: ghcr.io/projectbluefin/bluefin:stable
   # #256: the only pair in the matrix with NO shared ID_LIKE
@@ -134,7 +143,10 @@
   # community composefs-native openSUSE bootc build; there is no
   # official one yet.
   target: ghcr.io/bootcrew/opensuse-bootc:latest
-  disk_size: 40G
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
   cross_family: true
   expect_os_id: opensuse-tumbleweed
   allow_failure: true
@@ -144,7 +156,10 @@
   # apt package family (/etc/apt, /etc/dpkg). Non-gating until
   # passed twice on main.
   target: ghcr.io/bootcrew/debian-bootc:latest
-  disk_size: 40G
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
   cross_family: true
   expect_os_id: debian
   allow_failure: true
@@ -153,7 +168,10 @@
   # #261: cross-family migration from Fedora lineage to Ubuntu
   # (ID_LIKE=debian). Non-gating until passed twice on main.
   target: ghcr.io/bootcrew/ubuntu-bootc:latest
-  disk_size: 40G
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
   cross_family: true
   expect_os_id: ubuntu
   allow_failure: true
@@ -162,7 +180,10 @@
   # #261: cross-family migration to Arch Linux (no ID_LIKE at all,
   # pacman package family). Non-gating until passed twice on main.
   target: ghcr.io/bootcrew/arch-bootc:latest
-  disk_size: 40G
+  # #440's free-space check counts five times the target's compressed
+  # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
+  # about 33 GB free, and a 40G disk has 32.7 GB.
+  disk_size: 60G
   cross_family: true
   expect_os_id: arch
   allow_failure: true
@@ -319,6 +340,41 @@
   # and serial goes quiet after ~7 s (#383). Forward the first
   # boot's journal to serial so the stalling unit shows in qemu.log.
   console_journal: true
+  allow_failure: true
+- name: "tunaOS marlin gnome -> utah (cross-family composefs, ImageSwap)"
+  # A TunaOS Marlin user's move to Utah. Marlin is Arch-based
+  # (systemd-boot, composefs) and Utah is Fedora Hummingbird, so the swap
+  # must be refused until --accept-cross-base and then run through the
+  # host's own `bootc switch`. Non-gating: utah publishes only :testing.
+  base: ghcr.io/tuna-os/marlin:gnome
+  target: ghcr.io/projectbluefin/utah:testing
+  mode: image-swap
+  cross_family: true
+  disk_size: 60G
+  expect_os_id: hummingbird
+  expect_dm: gdm
+  allow_failure: true
+- name: "tunaOS marlin gnome -> utah (cross-family composefs -> ostree, OstreeInstall)"
+  # The route a Marlin user takes to Utah today. Marlin's own bootc
+  # cannot pull utah:testing, so the image swap cell above does not
+  # finish. OstreeInstall runs the target's bootc in podman instead.
+  # Marlin is Arch: no efibootmgr, no SELinux, and its system flatpaks
+  # come from `flatpak preinstall`, so this cell covers the NVRAM
+  # fallback, the /boot relabel and the kept preinstalled apps.
+  base: ghcr.io/tuna-os/marlin:gnome
+  target: ghcr.io/projectbluefin/utah:testing
+  mode: composefs-to-ostree
+  # The Marlin store, the pulled utah image, the OSTree deployment and
+  # a second /var (14 GB of it) did not fit in less.
+  disk_size: 80G
+  expect_os_id: hummingbird
+  expect_dm: gdm
+  # Utah's brew-setup.service unpacks Homebrew into /home/linuxbrew on
+  # a host that had none, with mkdir, tar and cp and no restorecon. All
+  # of it inherits home_root_t from /var/home. Utah writes these files
+  # after the migration is done. /etc and every other home stay fully
+  # checked.
+  allowed_mislabeled: "/var/home/linuxbrew /var/home/linuxbrew/*"
   allow_failure: true
 - name: Fedora Cloud -> fedora-bootc (package install)
   # #380: the source is an official Fedora Cloud qcow2, not a bootc image.

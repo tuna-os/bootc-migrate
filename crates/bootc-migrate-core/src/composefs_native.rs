@@ -239,16 +239,21 @@ impl ComposefsStore for NativeStore {
         Ok(format!("config {sealed_digest}"))
     }
 
-    fn verify_store_target_readable(&self, _target_image: &str) -> Result<()> {
-        // Native analog of the CLI store's check: the repository must reopen
-        // cleanly (meta.json parses, format is compatible) and its OCI refs
-        // must enumerate. A full byte-level fsck would re-hash every object of
-        // a multi-GB store — far too slow for a migration phase. Cross-checking
-        // against the *target's* bootc binary stays meaningful only for the
-        // CLI store; for a new-generation target this store IS the target's
-        // native format (see the generation matrix in the module docs).
+    fn verify_store_integrity(&self, _target_image: &str) -> Result<()> {
+        // The OCI fsck validates repository metadata, object verity metadata,
+        // splitstreams, image structure, and OCI digests. It still does not
+        // read protected object data, so the explicit pass below is required
+        // to surface the EIO that a later composefs overlay read would see.
         let repo = self.repo()?;
-        composefs_oci::oci_image::list_refs(&repo).context("enumerating OCI refs in the store")?;
+        let fsck = runtime()?
+            .block_on(composefs_oci::oci_fsck(&repo))
+            .context("running composefs OCI fsck")?;
+        if !fsck.is_ok() {
+            anyhow::bail!("composefs OCI fsck found integrity errors:\n{fsck}");
+        }
+        let checked = crate::composefs::verify_object_store_contents(&self.repo_path)
+            .context("reading composefs objects for integrity verification")?;
+        println!("Verified {checked} composefs objects for integrity.");
         Ok(())
     }
 }
@@ -397,7 +402,7 @@ mod tests {
         assert_ne!(sealed, config_digest);
 
         // And the store still verifies clean.
-        store.verify_store_target_readable("unused").unwrap();
+        store.verify_store_integrity("unused").unwrap();
     }
 
     #[test]
@@ -451,7 +456,7 @@ mod tests {
     fn verify_on_empty_store_is_ok() {
         let dir = tempfile::tempdir().unwrap();
         let store = NativeStore::new(dir.path().join("repo"));
-        store.verify_store_target_readable("unused").unwrap();
+        store.verify_store_integrity("unused").unwrap();
     }
 
     #[test]

@@ -1,29 +1,6 @@
-use anyhow::{Context, Result};
-use sha2::{Digest, Sha512};
+use anyhow::Result;
 use std::fs;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-
-pub fn compute_sha512<P: AsRef<Path>>(path: P) -> Result<String> {
-    let file = fs::File::open(&path).with_context(|| {
-        format!(
-            "failed to open file for hashing: {}",
-            path.as_ref().display()
-        )
-    })?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha512::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let result = hasher.finalize();
-    Ok(result.iter().map(|b| format!("{b:02x}")).collect())
-}
 
 #[derive(Debug)]
 pub struct OstreeFileObject {
@@ -94,11 +71,5 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].ostree_checksum, "abcdef1234");
         assert_eq!(list[0].path, file_path);
-
-        let hash = compute_sha512(&file_path).unwrap();
-        assert_eq!(
-            hash,
-            "6543084c6981d2d3e44d295d20adee4e5fa3fc1bb2b7d3ac80ca456b0141dfd75657ba40ea5ae398824b3a871c8b7762c8bdbcbc252fa7f358d33d90ee455d86"
-        );
     }
 }

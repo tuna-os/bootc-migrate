@@ -114,10 +114,12 @@ validation named in that issue's own scope never shipped.
 | DE stash/restore (`--de-migrate`) | implemented, detection table-tested | the non-gating Bluefin→Aurora cell passes `--de-migrate` and asserts the stash; evidence depends on the exploratory cell and target registry scan succeeding | #68, #188 |
 | Identity-DB merge across bases | **gap, not closed** — `etc_conflict` holds identity DBs exempt | needs upstream change or compensating logic; the `#80` advisory no longer silently no-ops on an unscannable target (#191), but it has still never fired on a genuinely cross-base pair | #80 |
 | composefs → ostree (`ostree_install`, `Strategy::OstreeInstall`) | implemented: alongside install through the target's bootc, ESP snapshot/restore, `/etc` merge, `/var` copy, NVRAM order; the argv builder, ESP path classifier, deployment picker, karg carry-over and the snapshot/restore round trip are table-tested | two non-gating cells (dakota composefs-native → fedora-bootc 44, and → utah testing, #302) assert the route, the fixtures, GRUB first in BootOrder and the preserved rollback entry; never executed on a real host before that cell | #260 |
+| package → ostree (`Strategy::PackageInstall`) | implemented on the shared alongside-install engine: `/` is bound at `/target` with `rslave`, root-mount kargs are retained, and the old kernel/initramfs/BLS/GRUB paths are snapshotted before bootc empties `/boot`; argv, karg and snapshot selection are table-tested | package-host E2E cells are tracked by #380; the old-system boot entry, package-aware `/etc`, selective data carry and commit remain separate #374–#378 slices | #373, #380 |
 | composefs → ostree with `/boot` on an encrypted root (`ostree_install::esp_resident`) | implemented: the route detects `/boot` without its own partition on a dm-crypt or `rd.luks.` root, copies the new kernel and initrd to the ESP with a BLS entry that keeps the `ostree=` argument, makes that entry the systemd-boot default and puts systemd-boot first in `BootOrder`; detection, entry parsing, the ESP plan and the staging are table-tested | no E2E cell installs a composefs host with `/boot` on LUKS; the hand-made equivalent was staged on a real host, but its boot is not yet recorded; after `bootc upgrade`, the ESP copy does not follow the new kernel | #305 |
 | composefs → composefs image swap (`Strategy::ImageSwap`) | implemented: delegates staging to the host's `bootc switch`, then verifies the staged image | one non-gating cell (dakota composefs-native → utah:testing, Bluefin on Fedora Hummingbird) asserts the route, the fixtures, the booted identity and the kept rollback; it depends on a pre-alpha image and has not yet passed end to end | #66 |
 | Cross-family migration on the composefs route (`cross_family`) | implemented: lineage gate on both composefs routes, cross-family `/etc` policy + target-first identity merge + `/var` remap + first-boot relabel unit in Phase 4; planner, gate, unit rendering and the merge outcome are table-tested | four non-gating cells (bluefin → bootcrew openSUSE, Debian, Ubuntu, Arch) assert the refusal, the staged `/etc` shape and the booted identity; they depend on community images and have not yet passed end to end | #256, #261 |
 | First-boot repair (`firstboot_repair`, L3) | implemented on the `CoreMigration` and `OstreeInstall` routes; each class and the unit are table-tested on fixture roots | the `CoreMigration` cells break a canary tree after staging and assert the ownership repair after the reboot; the `flatpak` and `selinux-label` classes run in no cell, and `selinux-label` gets input only when the verify probe reports that class | #309 |
+| package → ostree (`PackageInstall`) | source detection, route planning, package-host readiness and hardware reports implemented; TUI exposes an OSTree-only read-only preview | install, `/etc` classification, data carry, rollback, software report, commit, first-boot verification and every E2E cell remain open; no package-host source is supported | #370–#381 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 | TUI composefs-host route step (#312) | implemented: background scan, dual-capable route choice, honest notes, bootc-rebase execution | covered by state-machine tests only; tui-migrate cell runs on an ostree host and does not exercise the composefs-host screens or launch bootc-rebase | #312 |
 | Package-managed source → OSTree (`Strategy::PackageInstall`) | harness support is implemented: checksum-pinned Fedora Cloud, synthesized Workstation, and Ubuntu Cloud disks, cloud-init SSH, package fixtures and Previous system assertions | the three #380 cells are exploratory until the package route and its readiness/report/bootloader pieces (#373–#379) land; the Fedora Cloud cell must be promoted to gating after its first green run on `main` | #373–#380 |
@@ -334,6 +336,43 @@ still advisable before treating firmware-specific behavior as universal.
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
 request; non-experts can read what will happen before it happens.
 
+### M6 — Package-host onboarding — **detection and readiness only**
+
+[#370](https://github.com/tuna-os/bootc-migrate/issues/370) extends the engine
+to regular rpm-, dpkg-, and pacman-managed installs. We use this order because
+package hosts have varied disk layouts and lack an OSTree factory `/etc`.
+Detection alone does not prove that a side-by-side install is safe.
+
+The two read-only pieces have landed:
+
+- #371 detects `Backend::Package`, plans `PackageInstall`, and defaults its
+  target backend to OSTree.
+- #372 reports boot mode, filesystems, LUKS/LVM, btrfs subvolumes, `/boot`,
+  `/home`, free space, active package managers, SELinux, and target hardware.
+
+Mutation and completion remain open. Tracked work includes:
+
+- #373: install engine.
+- #374: old-system rollback and undo.
+- #375: package-database `/etc` classification.
+- #376: home and data carry.
+- #377: software report.
+- #378: guided commit.
+- #379: first-boot verification.
+- #380: package-source E2E cells.
+
+#381 records that boundary and adds evidence rows. It adds an OSTree-only
+**dry-run** entry to the TUI. Live confirmation and software reports need #373
+and #377.
+
+**Exit criteria (not yet met):**
+
+- The Fedora Cloud → fedora-bootc cell is green on `main`.
+- The TUI shows target-specific readiness and software reports before live confirmation.
+- The old OS boots after staging and after undo.
+- First-boot verification passes.
+- Guided commit removes only the verified old system.
+
 ### Deferred extensions (raised on #30, not yet scoped into a milestone)
 
 Two directions came up in discussion on the [generalize-into-a-re-base-engine
@@ -392,6 +431,7 @@ graph TD
   M1 --> M5A["M5 #68 DE stash/restore — detection+wiring landed, cross-DE E2E cell deferred"]
   M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI unit-tested + tui-migrate E2E cell gating"]
   M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
+  M1 --> M6["M6 #370 package hosts — detection + readiness landed; install, reports, rollback and E2E open"]
 ```
 
 ## Risks & standing mitigations
