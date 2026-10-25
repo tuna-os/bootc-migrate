@@ -135,9 +135,9 @@ options root=UUID=aaaa-bbbb rw ostree=/ostree/boot.1/fedora/abc123/0
 ```
 /sysroot/                           # Physical root
 ├── composefs/                      # ComposeFS repository (mode 0700)
-│   ├── objects/                    # SHA-512 content-addressed objects
-│   │   ├── xx/                     # First two hex chars of SHA-512
-│   │   │   └── <sha512_hash>       # Content-object files
+│   ├── objects/                    # SHA-512 fs-verity-addressed objects
+│   │   ├── xx/                     # First two hex chars of the fs-verity digest
+│   │   │   └── <fsverity_sha512>   # Content-object files
 │   │   └── ...
 │   ├── images/                     # Bootable EROFS images
 │   │   └── <sha512_hash>.erofs     # Each image is an EROFS filesystem
@@ -491,9 +491,9 @@ The conversion process:
 2. Convert ostree objects to composefs objects:
    For each object in /ostree/repo/objects/:
      - Read the ostree file object
-     - Compute SHA-512 content digest (raw bytes, NOT including ostree metadata header)
-     - FICLONE into /sysroot/composefs/objects/XX/<sha512>
-     - Optionally enable fsverity on the new object
+     - Compute the SHA-512 fs-verity digest over the file contents
+     - FICLONE into /sysroot/composefs/objects/XX/<fsverity_sha512>
+     - Enable fsverity on the new object
 
 3. Create the composefs EROFS image:
    mkcomposefs --from-file /sysroot/composefs/objects/ <target_dir>
@@ -631,11 +631,13 @@ graph TD
     C --> D["Copy Dakota kernel + initrd/UKI to ESP"]
     D --> E["Write ComposeFS BLS entry<br/>to ESP /loader/entries/"]
     E --> F["Retain old GRUB2 boot configs on /boot"]
-    F --> G["efibootmgr: register systemd-boot<br/>as #1 boot target"]
-    G --> H["Reboot system"]
+    F --> G["efibootmgr: register systemd-boot<br/>leave BootOrder unchanged<br/>set one-boot BootNext"]
+    G --> H["Reboot system for trial"]
     H --> I{"Boots via<br/>systemd-boot?"}
-    I -- Yes --> J["bootc internals cleanup<br/>remove old GRUB2 configs &amp; OSTree deployments"]
-    I -- No --> K["User selects GRUB2 in UEFI boot menu<br/>&rarr; rolls back to OSTree deployment"]
+    I -- Yes --> J["Run kernel-install resync hook<br/>then --promote"]
+    I -- No --> K["Select GRUB2 in UEFI boot menu<br/>&rarr; run --undo"]
+    J --> L["--promote makes BootOrder persistent<br/>state remains available for --undo"]
+    L -. "--undo" .-> M["Restore BootOrder/BootNext<br/>remove owned ESP/NVRAM state"]
 
     %% ── Status colours ──────────────────────────────────────────
     classDef start fill:#e3f0ff,stroke:#3b82c4,color:#0b2545;
@@ -645,7 +647,7 @@ graph TD
     classDef bad fill:#fde2e2,stroke:#d64545,color:#5a0b0b;
 
     class A start;
-    class B,C,D,E,F,G,H step;
+    class B,C,D,E,F,G,H,L,M step;
     class I decision;
     class J good;
     class C1,K bad;
@@ -666,13 +668,25 @@ graph TD
    - Do **NOT** modify or delete existing GRUB2 entries or files on the `/boot` partition.
    - This ensures that if the system fails to boot via `systemd-boot`, the user can press the UEFI boot menu key (F12/F11) at startup and select the GRUB2 entry to boot the old working OSTree deployment.
 
-5. **Update UEFI NVRAM Boot Order**:
-   - Run `efibootmgr` to register systemd-boot as the primary boot choice (first option) and demote the GRUB2 bootloader to the secondary option.
+5. **Register a One-Boot Trial**:
+   - Save the exact `BootOrder` and `BootNext`, register a dedicated
+     systemd-boot NVRAM entry, restore the saved `BootOrder`, and set the new
+     entry as `BootNext`. The first invocation MUST NOT make systemd-boot the
+     persistent default.
+   - Install
+     `/etc/kernel/install.d/95-bootc-migrate-esp-sync.install`. On every
+     `kernel-install add`, it copies the supplied kernel/initramfs into the
+     entry-token namespace and rewrites the matching BLS entry.
 
-6. **Verify and Clean Up**:
-   - Reboot the system.
-   - Upon successful boot into Dakota via `systemd-boot`, verify that `bootc status` shows ComposeFS and systemd-boot.
-   - Run the final cleanup command which removes the old GRUB2 boot records and `/sysroot/ostree/` deployments to reclaim storage space.
+6. **Verify, Promote, or Undo**:
+   - Reboot the system and verify `BootCurrent` identifies the trial entry.
+   - Exercise the resync hook with a new kernel version, then run
+     `migrate-bootloader --promote` to put the trial first in `BootOrder` and
+     clear its `BootNext` selection.
+   - If the trial fails, select GRUB2 or otherwise recover the old boot, then
+     run `migrate-bootloader --undo`. Undo restores the saved `BootOrder` and
+     `BootNext`, removes the migration-created NVRAM entry and ESP artifacts,
+     and restores any pre-existing loader configuration and resync hook.
 
 #### 6.7.3 Btrfs Subvolume Migration Details
 Since both Bluefin and Dakota use Btrfs as the default filesystem, subvolume structure must be carefully transitioned:

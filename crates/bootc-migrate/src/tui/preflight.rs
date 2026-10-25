@@ -61,6 +61,8 @@ pub(crate) struct PreflightTuiState {
     projected_composefs_free: u64,
     /// Individual readiness checks: (label, readiness).
     checks: Vec<(String, Readiness)>,
+    /// This source is package-managed rather than a bootc deployment.
+    package_source: bool,
     /// Overall readiness.
     overall: Readiness,
 }
@@ -92,8 +94,8 @@ impl PreflightTuiState {
                 Readiness::Pass,
             ),
             Some(Backend::Package) => (
-                "Booted bootc backend: none (package-managed host, not supported yet)".to_string(),
-                Readiness::Fail,
+                "Package-managed source: dry-run readiness preview".to_string(),
+                Readiness::Tight,
             ),
             None => ("Booted bootc backend: none".to_string(), Readiness::Fail),
         });
@@ -227,6 +229,7 @@ impl PreflightTuiState {
             projected_composefs_used: projected_used,
             projected_composefs_free: projected_free,
             checks,
+            package_source: report.booted_backend == Some(Backend::Package),
             overall,
         }
     }
@@ -278,6 +281,11 @@ pub(crate) fn render_preflight(f: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn render_preflight_content(f: &mut ratatui::Frame, state: &PreflightTuiState, area: Rect) {
+    if state.package_source {
+        render_package_preview(f, area);
+        return;
+    }
+
     // Layout: overall banner, disk gauges, projected usage, checklist
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -394,6 +402,44 @@ fn render_preflight_content(f: &mut ratatui::Frame, state: &PreflightTuiState, a
 
     // ── Readiness checklist ──
     render_readiness_checklist(f, state, chunks[7]);
+}
+
+fn render_package_preview(f: &mut ratatui::Frame, area: Rect) {
+    let text = Text::from(vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Package-managed host detected",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  The wizard offers the read-only package → OSTree preview.",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "  Choose an OSTree target, then run the dry-run to see the package-host",
+            Style::default().fg(TEXT),
+        )),
+        Line::from(Span::styled(
+            "  readiness and hardware reports. No system changes are made.",
+            Style::default().fg(TEXT),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Live install (#373), software report (#377), rollback (#374), and",
+            Style::default().fg(MUTED),
+        )),
+        Line::from(Span::styled(
+            "  guided commit (#378) are not implemented yet.",
+            Style::default().fg(MUTED),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Press [Enter] to choose an OSTree target.",
+            Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
 }
 
 /// Draw a gauge whose readout sits *beside* the bar rather than inside it.

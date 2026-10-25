@@ -1,6 +1,10 @@
 //! Phase 1: import OSTree file objects into the composefs object store.
 
 use super::*;
+use anyhow::bail;
+use composefs::fsverity::{
+    FsVerityHashValue, Sha512HashValue, enable_verity_with_retry, measure_verity_opt,
+};
 
 // ---- Phase 1 ----
 
@@ -28,14 +32,14 @@ pub fn phase1_import_objects(report: &PreflightReport, dry_run: bool) -> Result<
     let mut count = 0usize;
     let mut reflink_count = 0usize;
     for obj in file_objects {
-        let sha512 = crate::ostree::compute_sha512(&obj.path)?;
-        let prefix = &sha512[..2];
-        let rest = &sha512[2..];
-        let target_dir = Path::new("/sysroot/composefs/objects").join(prefix);
-        let target_path = target_dir.join(rest);
+        let digest = crate::composefs::compute_fsverity_sha512(&obj.path)?;
+        let target_path = Path::new("/sysroot/composefs/objects").join(digest.to_object_pathname());
 
         if !target_path.exists() {
-            fs::create_dir_all(&target_dir)?;
+            let target_dir = target_path
+                .parent()
+                .expect("object path always has a parent directory");
+            fs::create_dir_all(target_dir)?;
             if report.supports_reflink {
                 if crate::reflink::reflink(&obj.path, &target_path).is_ok() {
                     reflink_count += 1;
@@ -45,6 +49,31 @@ pub fn phase1_import_objects(report: &PreflightReport, dry_run: bool) -> Result<
             } else {
                 fs::copy(&obj.path, &target_path)?;
             }
+        }
+
+        let actual = crate::composefs::compute_fsverity_sha512(&target_path)?;
+        if actual != digest {
+            bail!(
+                "imported composefs object {} has digest {}, expected {}",
+                target_path.display(),
+                actual.to_hex(),
+                digest.to_hex()
+            );
+        }
+        let object = fs::File::open(&target_path)
+            .with_context(|| format!("opening imported object {}", target_path.display()))?;
+        match measure_verity_opt::<Sha512HashValue>(&object)
+            .with_context(|| format!("measuring {}", target_path.display()))?
+        {
+            Some(measured) if measured != digest => bail!(
+                "imported composefs object {} has fs-verity digest {}, expected {}",
+                target_path.display(),
+                measured.to_hex(),
+                digest.to_hex()
+            ),
+            Some(_) => {}
+            None => enable_verity_with_retry::<Sha512HashValue>(&object)
+                .with_context(|| format!("enabling fs-verity on {}", target_path.display()))?,
         }
         count += 1;
         if count.is_multiple_of(1000) {

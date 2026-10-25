@@ -15,6 +15,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::preflight::secure_boot::{
+    TargetBootloader, TargetBootloaderKind, inspect_target_bootloader,
+};
+
 /// Where layer blobs are staged while they are being unpacked. `/var/tmp` is
 /// disk-backed (unlike `/tmp`, which is a tmpfs on bootc systems and far too
 /// small for a multi-hundred-MB layer).
@@ -309,6 +313,38 @@ pub fn extract_paths_into_dir_with(
     Ok(skipped)
 }
 
+/// The zstd frame magic number (RFC 8878, section 3.1.1).
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Replace a zstd-compressed blob with its decompressed bytes, after its
+/// digest is verified. `tar -a` gives zstd to an external `zstd` program, and
+/// on a host without one tar fails. Every extraction here ignores tar's
+/// status, because a member that is absent from a layer also fails it. So a
+/// zstd layer read as empty, and `scan` reported a bootc image as "not an
+/// ostree/bootc image". A gzip or plain blob is left as it is.
+fn decompress_zstd_in_place(blob: &Path) -> Result<()> {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    let is_zstd = fs::File::open(blob)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && magic == ZSTD_MAGIC;
+    if !is_zstd {
+        return Ok(());
+    }
+    let decoded = blob.with_extension("tar");
+    {
+        let input = fs::File::open(blob)?;
+        let mut output = fs::File::create(&decoded)
+            .with_context(|| format!("failed to create {}", decoded.display()))?;
+        if let Err(e) = zstd::stream::copy_decode(input, &mut output) {
+            let _ = fs::remove_file(&decoded);
+            return Err(e).context("invalid zstd stream");
+        }
+    }
+    fs::rename(&decoded, blob).with_context(|| format!("failed to replace {}", blob.display()))
+}
+
 /// A layer's `tar -tv` listing. Empty when tar cannot list it; the
 /// extraction then proceeds without hard-link targets, as before.
 fn layer_listing(blob: &Path) -> String {
@@ -419,6 +455,16 @@ const PROBE_PATHS: &[&str] = &[
     "usr/bin/dpkg",
     "usr/bin/pacman",
     "usr/bin/apk",
+    // Package databases used by the package-host software report (#377).
+    "usr/lib/sysimage/rpm",
+    "var/lib/rpm",
+    "var/lib/dpkg/status",
+    "var/lib/dpkg/info",
+    "var/lib/pacman/local",
+    // Units may be generated into the image without package ownership.
+    "usr/lib/systemd/system",
+    "lib/systemd/system",
+    "etc/systemd/system",
 ];
 
 /// The kernel inventory files ([`crate::hardware::TargetKernel`]'s sources)
@@ -473,6 +519,57 @@ fn read_target_kernel(
     })
 }
 
+fn collect_target_bootloaders(root: &Path) -> Vec<TargetBootloader> {
+    let mut loaders = Vec::new();
+
+    let systemd_path = root.join("usr/lib/systemd/boot/efi/systemd-bootx64.efi");
+    if systemd_path.is_file() {
+        loaders.push(inspect_target_bootloader(
+            &systemd_path,
+            "usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+            TargetBootloaderKind::SystemdBoot,
+        ));
+    }
+
+    let updates_dir = root.join("usr/lib/bootupd/updates");
+    let mut efi_files = Vec::new();
+    collect_efi_files(&updates_dir, &mut efi_files);
+    efi_files.sort();
+    for path in efi_files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if lower != "shimx64.efi" && lower != "bootx64.efi" {
+            continue;
+        }
+        let logical = path
+            .strip_prefix(root)
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+        loaders.push(inspect_target_bootloader(
+            &path,
+            &logical,
+            TargetBootloaderKind::Shim,
+        ));
+    }
+    loaders
+}
+
+fn collect_efi_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_efi_files(&path, files);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+}
+
 /// Stream probe files for the target image from the registry without pulling full layers.
 /// The target image's compressed size: the sum of its layer sizes in the
 /// manifest for this machine's architecture. Reads the manifest only.
@@ -513,6 +610,10 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
                 ..k
             }
         }),
+        software: std::sync::Arc::new(crate::software_report::target_inventory_from_root(
+            scratch.path(),
+            skipped,
+        )),
         ..Default::default()
     };
 
@@ -562,6 +663,7 @@ pub fn fetch_probe_files_via_registry(image_ref: &str) -> Result<crate::scan::Pr
         .path()
         .join("usr/lib/systemd/boot/efi/systemd-bootx64.efi")
         .exists();
+    probe.target_bootloaders = collect_target_bootloaders(scratch.path());
     probe.has_bootc = scratch.path().join("usr/bin/bootc").exists()
         || scratch.path().join("usr/lib/bootc").exists();
     // bootc's own test (`supports_bootupd`): the binary on PATH and the
@@ -807,7 +909,8 @@ impl RegistryEndpoint {
             let _ = fs::remove_file(dst);
             return Err(e);
         }
-        Ok(())
+        decompress_zstd_in_place(dst)
+            .with_context(|| format!("failed to decompress zstd blob {digest}"))
     }
 
     /// Resolve a (possibly multi-arch) manifest to the concrete image manifest
@@ -1184,6 +1287,51 @@ mod tests {
     use super::*;
 
     /// ostree-exported layers: the real path is a hard link to the object.
+    #[test]
+    fn zstd_layers_are_decoded_before_tar_reads_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        fs::create_dir_all(tree.join("usr/lib/ostree")).unwrap();
+        fs::write(
+            tree.join("usr/lib/ostree/prepare-root.conf"),
+            "[composefs]\n",
+        )
+        .unwrap();
+        let tar_path = dir.path().join("layer.tar");
+        assert!(
+            Command::new("tar")
+                .arg("-cf")
+                .arg(&tar_path)
+                .arg("-C")
+                .arg(&tree)
+                .arg("usr")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let plain = fs::read(&tar_path).unwrap();
+
+        // zstd: replaced by the plain tar, which tar reads with no zstd program.
+        let blob = dir.path().join("layer.blob");
+        fs::write(&blob, zstd::encode_all(&plain[..], 3).unwrap()).unwrap();
+        decompress_zstd_in_place(&blob).unwrap();
+        assert_eq!(fs::read(&blob).unwrap(), plain);
+        assert!(layer_listing(&blob).contains("usr/lib/ostree/prepare-root.conf"));
+
+        // gzip and plain blobs are left for tar's own detection.
+        let gz = [0x1f, 0x8b, 0x08, 0x00, 1, 2, 3];
+        fs::write(&blob, gz).unwrap();
+        decompress_zstd_in_place(&blob).unwrap();
+        assert_eq!(fs::read(&blob).unwrap(), gz);
+
+        // A corrupt zstd stream is an error, not an empty layer.
+        let mut bad = ZSTD_MAGIC.to_vec();
+        bad.extend_from_slice(b"not a zstd frame");
+        fs::write(&blob, &bad).unwrap();
+        assert!(decompress_zstd_in_place(&blob).is_err());
+        assert!(!blob.with_extension("tar").exists());
+    }
+
     #[test]
     fn listing_names_strip_fields_and_link_suffixes() {
         let listing = "\
