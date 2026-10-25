@@ -29,21 +29,22 @@ Organized by the milestone it feeds (see ROADMAP.md).
   one-boot trial design.
 - **openSUSE sdbootutil** —
   <https://en.opensuse.org/Systemd-boot>,
-  <https://microos.opensuse.org/blog/2023-12-20-sdboot-fde/>. The most
-  complete production GRUB→sd-boot migration in the wild: bootctl wrapper
-  managing kernel/cmdline/initrd bookkeeping per snapshot, FDE with
-  TPM2 policy prediction (systemd-pcrlock / pcr-oracle), and a documented
-  in-place migration (`zypper rm grub2-common; zypper in sdbootutil
-  systemd-boot`). Note their 2025 pivot: **GRUB2-BLS became Tumbleweed's
-  default** (<https://news.opensuse.org/2025/11/13/tw-grub2-bls/>) — a
-  BLS-native GRUB2 is an alternative endpoint that avoids the ESP-resync
-  problem entirely. *For #65: consider `grub2-bls` as a cheaper interim
-  target on systems where sd-boot is blocked (NVRAM ro, weird ESPs).*
-- **kernel-install / BLS spec** — sdbootutil and Fedora both anchor on
-  Boot Loader Specification type-1 entries. The standalone path installs
+  <https://microos.opensuse.org/blog/2023-12-20-sdboot-fde/>. The
+  `sdbootutil` project provides a mature production migration from GRUB to
+  systemd-boot. Its `bootctl` wrapper tracks kernel, command line, and initrd
+  data for each snapshot. It supports FDE through TPM2 policy prediction with
+  systemd-pcrlock or pcr-oracle. It also documents an in-place migration:
+  `zypper rm grub2-common; zypper in sdbootutil systemd-boot`.
+  openSUSE changed the Tumbleweed default to **GRUB2-BLS** in 2025
+  (<https://news.opensuse.org/2025/11/13/tw-grub2-bls/>). BLS-native GRUB2
+  can avoid the ESP resync problem. *For #65: consider `grub2-bls` as a
+  cheaper interim target on systems that cannot use sd-boot. Causes include
+  read-only NVRAM and unusual ESPs.*
+- **kernel-install / BLS spec** — sdbootutil and Fedora use entries of type 1
+  from the Boot Loader Specification. The standalone path installs
   `/etc/kernel/install.d/95-bootc-migrate-esp-sync.install` as the resync
-  drop-in; a path-unit fallback is not needed because the hook receives the
-  kernel and initramfs paths directly from `kernel-install`.
+  drop-in. The hook receives the kernel and initramfs paths directly from
+  `kernel-install`, so this path does not need a fallback unit.
 
 ## M4 — Native store & generation matrix (#13, #72)
 

@@ -109,10 +109,10 @@ the pipeline; it is a mode that omits `seal` and pins `bootloader=keep`.
 | D cross-image | ✔ | ✔ | ✔/✘ | ✔ | per §5.1 | conflict policy | ✔ |
 | E (hooks) | — | — | — | — | — | — | — |
 
-`migrate-bootloader` (B) keeps the one-phase bootloader-only shape, but its
-live operation is implemented in `migration::bootloader::live` and routed by
-the shared `StandaloneBootloaderConfig` controller. It stages a reversible
-trial rather than changing the persistent firmware order in the first step.
+`migrate-bootloader` (B) keeps the one-phase bootloader-only shape.
+`migration::bootloader::live` implements its live operation. The shared
+`StandaloneBootloaderConfig` controller routes it. The command stages a
+reversible trial. It does not change the persistent firmware order in the first step.
 
 The executable counterpart is `crates/bootc-rebase/src/routing.rs::plan`.
 `bootc-rebase --plan` prints the selected phases and bootloader policy

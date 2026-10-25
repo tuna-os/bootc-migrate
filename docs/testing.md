@@ -92,36 +92,35 @@ complete #67 flow without adding another expensive matrix entry:
 1. A dry run without `--accept-cross-base` must identify the pair as
    cross-base and refuse it. An unscannable target instead takes #191's
    fail-closed `Unknown` path, which the harness reports separately.
-2. The harness takes the first UID/GID divergence from the remap report and
-   creates a file under the stateroot's shared `/var` with that old numeric
-   owner. It also appends a marker to `/etc/dconf/db/distro`, whose Bluefin
-   and Dakota vendor defaults differ, producing a deliberate three-way
-   conflict.
-3. The accepted re-base must emit both the remap and `/etc` conflict reports
-   and their JSON twins. Before reboot, the `/var` fixture must have the
-   target ID; `/etc/dconf/db/distro` must equal the target default; and the
-   displaced marked value must exist as `.rebase-old`.
+2. The harness finds the first UID/GID difference in the remap report. It
+   creates a file in the stateroot's shared `/var`. The file uses the old
+   numeric owner. It also adds a marker to `/etc/dconf/db/distro`. Bluefin
+   and Dakota have different vendor defaults for this file. This creates an
+   intentional three-way conflict.
+3. The accepted re-base must emit the remap and `/etc` conflict reports.
+   It must also emit their JSON forms. Before reboot, the `/var` fixture must
+   have the target ID. `/etc/dconf/db/distro` must equal the target default.
+   The `.rebase-old` file must contain the displaced marked value.
 4. The same ownership, target-default and sidecar checks run again after
    reboot.
 
-These assertions prevent both vacuous-pass shapes that originally left #67
-unproven: a scan that never evaluates `is_cross_base`, and reports that render
-without either filesystem apply pass doing work. They also cover OSTree's
-actual `/var` layout: deployments share the physical
-`/ostree/deploy/<stateroot>/var`; there is no per-deployment `var` tree to
-walk.
+These assertions prevent two vacuous results that previously left #67 unproven.
+One result is a scan that never evaluates `is_cross_base`. The other is a
+report without work from either filesystem pass. The assertions also cover
+the actual OSTree `/var` layout. Deployments share
+`/ostree/deploy/<stateroot>/var`; no `var` tree exists per deployment.
 
-Every ostree-rebase cell still probes the guest's registry path
-(`curl`, `https://ghcr.io/v2/`, and resolver state) before running the gate.
-This distinguishes registry/token infrastructure from a code or assertion
-failure. The earlier ghcr.io token-request 403 is fixed: current runs receive
-the expected registry challenge, scan the target, and classify the
-Bluefin → Dakota pair as cross-base.
+Every ostree-rebase cell probes the registry path in the guest
+(`curl`, `https://ghcr.io/v2/`, and resolver state) before it starts the gate.
+This separates registry or token infrastructure from code and assertion
+failures. Current runs no longer get the earlier ghcr.io token-request 403.
+They receive the expected registry challenge. They scan the target and
+classify the Bluefin → Dakota pair as cross-base.
 
-`E2E_CROSS_BASE=1` remains available to require a deliberately selected
-ostree-rebase pair to reach the cross-base report. The normal gating cell no
-longer needs that flag: once its dry-run scan identifies a cross-base pair,
-the harness automatically runs all remap and conflict-policy assertions.
+`E2E_CROSS_BASE=1` can make a chosen ostree-rebase pair reach the cross-base
+report. The normal gating cell no longer needs that flag. Its dry-run scan
+identifies a cross-base pair. The harness then runs all remap and policy
+checks for conflicts.
 
 ### Desktop migration (`E2E_DE_MIGRATE=1`)
 
@@ -133,8 +132,8 @@ a cross-desktop plan exists and `~/.local/share/de-migrate` exists.
 The failure branches report the exact cause if a test fails.
 
 Desktop detection uses the same target-image scan as the cross-base gate.
-The registry token-scope fix therefore keeps both checks live; a scan
-regression is distinguished explicitly from a same-desktop result.
+The fix for registry token scope keeps both checks live. The harness now
+separates a scan regression from a same-desktop result.
 
 After reboot, the cell checks the return trip. On the booted Aurora system,
 it restores the GNOME stash with `de-migrate restore`. It asserts that the
@@ -187,25 +186,25 @@ This cell changes real UEFI NVRAM (#189). It tests the write path and the
 snapshot-restore path against firmware variables.
 
 The separate `bootloader-trial` cell covers #65/#382. It installs the
-standalone systemd-boot path on a GRUB2 Bluefin guest, saves and swaps
-`BootOrder` because OVMF does not honor `BootNext`, reboots through the trial,
-calls the installed `kernel-install` resync hook for a second kernel version,
-then exercises `--promote` and `--undo`. The final assertion requires the
-original firmware order, GRUB fallback, migration-owned ESP files and hook to
-be restored.
+standalone systemd-boot path on a GRUB2 Bluefin guest. OVMF does not honor
+`BootNext`, so the cell saves and swaps `BootOrder`. It reboots through the
+trial and calls the installed `kernel-install` resync hook for a second kernel
+version. It then tests `--promote` and `--undo`. The final check confirms the
+original firmware order and GRUB fallback. It also confirms restoration of
+migration-owned ESP files and the hook.
 
 Planned items per milestone:
 
 - **M1**: dakota → utah (`ImageSwap`, `E2E_MODE=image-swap`), active as the non-gating cell above
 - **M3**: the cross-base cell above covers centos-family → fedora-family.
-  The exit criterion names the *other* direction (fedora → centos), which
-  needs a CentOS-family target image the harness does not currently install;
-  decide explicitly whether direction matters (#187)
+  The exit criterion names the opposite direction (fedora → centos). That
+  direction needs a target image from the CentOS family. The harness does not
+  install one now. Decide if the direction matters (#187).
 - **M4**: a migration where **no** legacy-CLI bootc exists (NativeStore
   writer); kernel-version gate ≥6.12 for file-backed EROFS mounts
-- **M0**: rollback cell — migrate, boot, `rollback`, assert the OSTree
-  deployment boots and the store is intact (#22/#26); greenboot-compatible
-  health scripts asserted present
+- **M0**: rollback cell — migrate, boot, and run `rollback`. Confirm that the
+  OSTree deployment boots and the store stays intact (#22/#26). Confirm that
+  health scripts compatible with greenboot are present.
 
 Design rules: create new cells for new capabilities.
 Use `E2E_MODE` flags in the shared harness. Run cells locally with `just e2e*`.
@@ -275,9 +274,10 @@ The scenarios live in `.github/e2e-scenarios.yml`. Cells without
 `(run_number × size) mod <gating cells>`.
 
 TUI source, entry point, drift review, harness, dependency, or selector changes
-also require the existing `tui-migrate` cell. The path list is in
-`scripts/select_e2e.py`. This adds at most one VM; it keeps every baseline cell.
+also need the existing `tui-migrate` cell. The path list is in
+`scripts/select_e2e.py`. This adds at most one VM and keeps every baseline cell.
 PRs compare the merge base with the head. Pushes compare `before` with `after`.
+
 A failed diff stops the plan. Tests run with `just test-ci-selection`.
 The nightly schedule and `workflow_dispatch` run every cell.
 
@@ -312,13 +312,14 @@ The summary contains the last phase banner, failed assertions, and log tails.
 
 ## Upstream drift canary
 
-`.github/workflows/upstream-drift-canary.yml` runs twice weekly (and on
-dispatch): `tests/drift-canary.sh` probes every image in
-`tests/canary-baseline.tsv` for its cfs CLI generation and exits 1 on
-drift (auto-filing/updating a canary issue), 2 on probe-infra failure
-(retried next run, never alerted). The #72 breakage is exactly what this
-catches; **the pinned legacy builder drifting to new-gen is the important
-alert** — it breaks the delegation ladder and blocks the MVP.
+`.github/workflows/upstream-drift-canary.yml` runs twice a week and on dispatch.
+`tests/drift-canary.sh` probes every image in `tests/canary-baseline.tsv`.
+It checks the cfs CLI generation. Exit 1 means drift and creates or updates a
+canary issue. Exit 2 means that probe infrastructure failed. The next run tries
+again without an alert. This catches breakage from #72.
+
+**A change from the pinned legacy builder to the new generation is the important
+alert.** It breaks the delegation ladder and blocks the MVP.
 
 To maintain the baseline: when a drift is real and absorbed (code adapted,
 docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
@@ -344,13 +345,13 @@ docs updated), update `canary-baseline.tsv` in the same PR that absorbs it.
   The cells explain their disk sizes in e2e-tests.yml.
 - **Mount errors on new-gen hosts:** Phases 4/5 use podman fallbacks until
   PR #76 lands. Do not treat those expected mount errors as the failure signal.
-- **The LVM-on-LUKS cell has the least free space.** Its 60G disk contains
-  BIOS-boot, ESP, separate /boot, and a fixed 4G /var LV before root.
-  Check for ENOSPC first. Then investigate other regressions.
+- **The LVM-on-LUKS cell has the least free space.** Its disk is 60G. It
+  contains a BIOS-boot partition, an ESP, separate `/boot`, and a fixed 4G
+  `/var` LV before root. Check for ENOSPC first. Then investigate other regressions.
 
 ### Incident: `required-checks` did not gate on `e2e-gate`
 
-PR #73 auto-merged on 2026-07-19. Its LVM-on-LUKS cell failed due to ENOSPC.
+PR #73 auto-merged on 2026-07-19. Its LVM-on-LUKS cell had an ENOSPC failure.
 Branch protection watched `required-checks`. That job listed `[validate,
 cargo-deny, coverage, actionlint]` in `needs`, but omitted `e2e-gate`.
 The two jobs had been independent since the workflow began.

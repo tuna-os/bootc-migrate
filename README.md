@@ -123,8 +123,8 @@ partition**, the tool handles those automatically — see
 ## Interactive wizard (TUI)
 
 Prefer a guided walkthrough? Run `bootc-migrate` with no `--target-image`
-or with `tui` to open the terminal wizard. It guides target image selection,
-options, the review, and live phase logs:
+or with `tui` to open the terminal wizard. The wizard helps you select a target
+image and options. It then shows the review and live phase logs:
 
 ```bash
 sudo bootc-migrate tui
@@ -254,21 +254,21 @@ Six phases (numbered 0–5 to match console output), run as one command:
 
 - **Phase 0 — Preflight** — free-space, reflink/CoW, UEFI, NVRAM-writable, ESP
   capacity.
-- **Phase 1 — OSTree import** *(optional)* — reflinks OSTree file objects into
-  the composefs store. This reduces duplicate data in Phase 2. Skip it with
+- **Phase 1 — OSTree import** *(optional)* — copies file objects from OSTree
+  into the composefs store. This reduces duplicate data in Phase 2. Skip it with
   `--skip-import`.
 - **Phase 2 — OCI pull** — `bootc internals cfs oci pull` of the target bootc
   image into the composefs store.
 - **Phase 3 — EROFS seal** — builds and seals the EROFS image. It saves the
   sealed config digest for Phases 4 and 5.
-- **Phase 4 — Stage deploy** — merges `/etc` and unions identity
-  database lines. It reads from the sealed mount and removes broken
+- **Phase 4 — Stage deploy** — merges `/etc` and combines lines from identity
+  databases. It reads from the sealed mount and removes broken
   `/usr/*` symlinks. It keeps `/home` ↔ `/var/home` compatibility and
   preserves `/var`. `.origin` stores `boot_digest` and `manifest_digest`;
   `tini` writes it.
 - **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed
-  mount to the ESP. It verifies that the target kernel resolves current
-  wireless devices. It writes BLS entries and adds a stateroot mount argument
+  mount to the ESP. It confirms that current wireless devices work with the
+  target kernel. It writes BLS entries and adds a stateroot mount argument
   for dedicated `/var`. It registers `Linux Boot Manager` in UEFI NVRAM. The
   original GRUB entry stays as a rollback escape hatch.
 
@@ -326,9 +326,9 @@ Things to confirm in the report:
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
   target image onto the ESP.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
-- `ComposeFS free space` includes the source OSTree import, two expanded
-  copies of the target image (ComposeFS and podman fallback storage), and 5 GiB
-  of temporary headroom for the initrd rebuild.
+- `ComposeFS free space` includes the source OSTree import. It also includes
+  two expanded copies of the target image for ComposeFS and podman fallback
+  storage. Another 5 GiB provides temporary headroom for the initrd rebuild.
 
 Optionally, preview what Phase 4's `/etc` merge will see before you run it:
 
@@ -629,10 +629,10 @@ Needs Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
-A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It either installs an
-OSTree/ComposeFS base image with bootc or, for `E2E_MODE=package-install`,
-boots an official Fedora Cloud or Ubuntu Cloud disk prepared by
-`tests/package-base.sh`, runs the package → OSTree migration, reboots, and
+A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It installs an
+OSTree/ComposeFS base image with bootc. In `E2E_MODE=package-install`, it boots
+an official cloud disk from Fedora or Ubuntu. `tests/package-base.sh` prepares
+that disk. The harness runs the package → OSTree migration, reboots, and
 validates the target plus its `Previous system` entry.
 
 ```
@@ -643,9 +643,9 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `E2E_MODE`, `E2E_PACKAGE_BASE`, and
 `E2E_PACKAGE_CROSS_FAMILY`.
 
-The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs
-nightly; each PR and push to `main` runs a round-robin slice of the gating
-cells (see [docs/testing.md](docs/testing.md)):
+The full matrix is authoritative in `.github/e2e-scenarios.yml`. The nightly
+schedule runs it. Each PR and push to `main` runs a round-robin slice of the
+gating cells (see [docs/testing.md](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -725,8 +725,8 @@ pacman database when `bootc status` names no deployment and the root has no
 ostree or composefs state. On such a system, `--target-backend auto` (the
 default) selects ostree. `PackageInstall` runs the target image's own `bootc
 install to-existing-root` against the live physical root after readiness and
-hardware gates pass. It snapshots the old kernels, initramfs, BLS entries and
-GRUB configuration before bootc empties `/boot`; the `Previous system` entry
+hardware gates pass. It snapshots the old kernels, initramfs, BLS entries, and
+GRUB configuration. Bootc then empties `/boot`. The `Previous system` entry
 and guided package-host commit remain tracked by #374 and #378.
 
 `--dry-run` on a package host also prints a readiness report and the
@@ -744,18 +744,20 @@ SELinux disabled on the host gives a warning, because the first boot then
 relabels all carried files.
 
 The same registry pass extracts the target's rpm, dpkg or pacman inventory.
-`scan` and package-host `--dry-run` compare it with the live host and group
-packages the image lacks into desktop applications, CLI tools, system services,
-kernel modules and other packages. Suggestions prefer a matching Flathub ID,
-then a known Homebrew formula, a toolbox/distrobox, or a derived image.
-Third-party package repositories and enabled services absent from the target are
-listed separately. An incomplete registry pass suppresses absence claims rather
-than treating missing evidence as an empty image.
+`scan` and package-host `--dry-run` compare this inventory with the live host.
+They group packages that the image lacks into desktop applications, CLI tools,
+system services, kernel modules, and other packages. Suggestions first use a
+matching Flathub ID. They then use a known Homebrew formula, a toolbox or
+distrobox, or a derived image.
+
+The report lists third-party package repositories and enabled services that
+the target lacks. If the registry pass is incomplete, the report does not make
+absence claims. It does not treat missing evidence as an empty image.
 
 A non-dry package-host invocation writes the machine-readable report and its
 Markdown twin to `/var/lib/bootc-rebase/software-report.json` and
 `/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report
-without changing the host.
+and do not change the host.
 
 ## Roadmap
 

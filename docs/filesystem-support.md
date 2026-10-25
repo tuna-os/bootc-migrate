@@ -80,12 +80,12 @@ initrd updates before composefs boots.
 
 ### Phase 0 — preflight
 
-Same fs-type detection. `is_btrfs = false`, `fs_type = "xfs"`. Reflink is probed
-separately (XFS supports reflink on many configurations but not all). The
-free-space check fetches the target image's compressed layer size before any
-image pull or storage setup and includes both expanded target copies plus
-initrd-rebuild headroom in the required root space. This catches a tight XFS
-root before the sparse loopback and podman storage consume it.
+Preflight detects the same filesystem type: `is_btrfs = false`,
+`fs_type = "xfs"`. It probes reflink separately because not all XFS
+configurations support it. The free-space check fetches the compressed layer
+size of the target image. It does this before any image pull or storage setup.
+It adds space for both expanded target copies and for the initrd rebuild. This
+catches a tight XFS root before the sparse loopback and podman storage use it.
 
 ### Pre-Phase 1 — ext4 loopback for fs-verity
 
@@ -217,10 +217,10 @@ data, and the fstab entry persists across `bootc upgrade` deployments.
 
 ## Package-based E2E source layouts
 
-The package-install E2E mode starts from a distribution disk, so its source
-filesystem is not selected by `bootc install`. `tests/package-base.sh` verifies
-the official image checksum, grows the root partition to `DISK_SIZE`, and
-mounts it only to prepare the layout and cloud-init seed.
+The distribution disk determines the source filesystem in package-install E2E
+mode. `bootc install` does not select it. `tests/package-base.sh` verifies the
+official image checksum and grows the root partition to `DISK_SIZE`. It mounts
+the partition only to prepare the layout and cloud-init seed.
 
 | Source cell | Root and home | Boot layout | Package database |
 |---|---|---|---|
@@ -228,11 +228,11 @@ mounts it only to prepare the layout and cloud-init seed.
 | Fedora Workstation | btrfs `root` and `home` subvolumes | separate ext4 `/boot` added by the helper | rpm/dnf |
 | Ubuntu Cloud | ext4 | image's UEFI layout | dpkg/apt |
 
-The Workstation source intentionally uses the Fedora Cloud disk as its
-reproducible seed, then installs the Workstation environment through `dnf`.
-This tests a package-managed GNOME/GDM system with the same btrfs home layout
-and a distinct `/boot`, rather than silently testing another bootc image.
-The Ubuntu cell is ext4/dpkg and passes `--accept-cross-base` explicitly when
+The Workstation source uses the Fedora Cloud disk as its reproducible seed.
+It then installs the Workstation environment through `dnf`. This tests a
+package-managed GNOME/GDM system. It uses the same btrfs layout for home and a
+separate `/boot`. Thus it does not test another bootc image. The Ubuntu cell is
+ext4/dpkg and passes `--accept-cross-base` explicitly when
 moving to `fedora-bootc`.
 
 ---
