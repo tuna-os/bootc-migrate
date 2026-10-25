@@ -508,6 +508,12 @@ pub struct PackageInstallReport {
     pub var_copied: bool,
     pub cross_family: bool,
     pub grub_boot_entry: Option<String>,
+    #[serde(default)]
+    pub source_distro: Option<String>,
+    #[serde(default)]
+    pub rollback_entry: Option<String>,
+    #[serde(default)]
+    pub carried_etc_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -904,12 +910,38 @@ impl InstallConfig<'_> {
             "{}",
             step(5, TOTAL_STEPS, "/etc: 3-way merge into the new deployment")
         );
-        let (etc_merge, cross) = merge_etc_into(
+        let (etc_merge, cross, carried_etc) = merge_etc_into(
             &deploy_root,
             booted_image.as_deref(),
             self.accept_cross_base,
         )?;
         println!("[etc] {etc_merge}");
+        let carried_etc_content = carried_etc
+            .iter()
+            .map(|p| format!("/etc/{p}\n"))
+            .collect::<String>();
+        let _ = fs::create_dir_all(STATE_DIR);
+        let _ = fs::write(
+            Path::new(STATE_DIR).join("carried-etc.txt"),
+            &carried_etc_content,
+        );
+        let _ = fs::create_dir_all("/var/lib/bootc-migrate");
+        let _ = fs::write(
+            "/var/lib/bootc-migrate/carried-etc.txt",
+            &carried_etc_content,
+        );
+        let carried_state_dir = Path::new(self.source.stateroot_var()).join("lib/bootc-rebase");
+        let _ = fs::create_dir_all(&carried_state_dir);
+        let _ = fs::write(
+            carried_state_dir.join("carried-etc.txt"),
+            &carried_etc_content,
+        );
+        let carried_migrate_dir = Path::new(self.source.stateroot_var()).join("lib/bootc-migrate");
+        let _ = fs::create_dir_all(&carried_migrate_dir);
+        let _ = fs::write(
+            carried_migrate_dir.join("carried-etc.txt"),
+            &carried_etc_content,
+        );
         // Day-2 hygiene, not staging: never fail the run over fstab.
         if let Err(e) = ensure_esp_fstab_entry(&deploy_root, &esp) {
             eprintln!("Warning: leaving deployed fstab without an ESP entry: {e:#}");
@@ -1082,6 +1114,30 @@ impl InstallConfig<'_> {
         };
 
         let rendered = if self.source == InstallSource::Package {
+            let source_distro = crate::migration::os_release::read_os_release(Path::new("/"))
+                .ok()
+                .map(|os| {
+                    if !os.pretty_name.is_empty() {
+                        os.pretty_name
+                    } else if !os.name.is_empty() {
+                        os.name
+                    } else {
+                        os.id
+                    }
+                });
+            let rollback_entry = Some(format!(
+                "Previous system{}",
+                source_distro
+                    .as_deref()
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            ));
+            if let Err(e) = crate::motd::write_package_migration_reminder_at(
+                &deploy_root.join("etc/motd.d"),
+                self.target_image,
+            ) {
+                eprintln!("Warning: failed to stage package login reminder: {e:#}");
+            }
             serde_json::to_string_pretty(&PackageInstallReport {
                 target_image: self.target_image.to_string(),
                 deployment: deployment.clone(),
@@ -1092,6 +1148,9 @@ impl InstallConfig<'_> {
                 var_copied,
                 cross_family: cross.is_some(),
                 grub_boot_entry: grub_entry.clone(),
+                source_distro,
+                rollback_entry,
+                carried_etc_files: carried_etc,
             })
             .expect("PackageInstallReport serializes")
         } else {
@@ -1825,7 +1884,11 @@ fn merge_etc_into(
     deploy_root: &Path,
     booted_image: Option<&str>,
     accept_cross_base: bool,
-) -> Result<(String, Option<cross_family::CrossFamilyEtcOutcome>)> {
+) -> Result<(
+    String,
+    Option<cross_family::CrossFamilyEtcOutcome>,
+    Vec<String>,
+)> {
     let new_default = deploy_root.join("usr/etc");
     let out = deploy_root.join("etc");
     let current = Path::new("/etc");
@@ -1879,7 +1942,7 @@ fn merge_etc_into(
     // marks the deployment root immutable, so unlinking `etc` from it is
     // EPERM (the fourth E2E run); only its contents are ours.
     clear_dir_contents(&out).with_context(|| format!("clearing {}", out.display()))?;
-    mergetc::merge_etc_files_with_policy(
+    let carried_paths = mergetc::merge_etc_files_with_policy(
         old_default,
         current,
         &new_default,
@@ -1922,7 +1985,7 @@ fn merge_etc_into(
             "same-lineage"
         }
     );
-    Ok((summary, outcome))
+    Ok((summary, outcome, carried_paths))
 }
 
 /// Supplement the merged `/etc` identity databases (passwd, group, shadow, gshadow, subuid, subgid)

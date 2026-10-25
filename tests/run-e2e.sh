@@ -366,6 +366,29 @@ assert_package_install() {
 
     assert_system_healthy "package-install target"
 
+    step "=== package-install: L2 status, desktop prompt and commit reminder ==="
+    if ! ssh $SSH_OPTS root@localhost "test -x /var/tmp/bootc-rebase"; then
+        scp $SCP_OPTS target/debug/bootc-rebase root@localhost:/var/tmp/bootc-rebase
+    fi
+    assert_l2_present "package-install" "/var/tmp/bootc-rebase" "package -> ostree via PackageInstall"
+    STATUS_OUT=$(ssh $SSH_OPTS root@localhost "/var/tmp/bootc-rebase status")
+    echo "$STATUS_OUT" | grep -q "Migrated from:" || {
+        echo "FAIL: bootc-rebase status does not report 'Migrated from:'"; exit 1; }
+    echo "$STATUS_OUT" | grep -q "Rollback entry:" || {
+        echo "FAIL: bootc-rebase status does not report 'Rollback entry:'"; exit 1; }
+    echo "$STATUS_OUT" | grep -q "Software report:" || {
+        echo "FAIL: bootc-rebase status does not report 'Software report:'"; exit 1; }
+    echo "$STATUS_OUT" | grep -q "run \`bootc-rebase commit\` when ready" || {
+        echo "FAIL: bootc-rebase status does not contain commit reminder 'run \`bootc-rebase commit\` when ready'"; exit 1; }
+    echo "OK: package-host status and commit reminder verified."
+
+    ssh $SSH_OPTS root@localhost "test -f /var/lib/bootc-rebase/carried-etc.txt" || {
+        echo "FAIL: carried /etc manifest (/var/lib/bootc-rebase/carried-etc.txt) is missing"; exit 1; }
+    PROMPT_PREVIEW=$(ssh $SSH_OPTS root@localhost "sh /etc/bootc-migrate/cleanup-prompt.sh 2>&1 || true")
+    echo "$PROMPT_PREVIEW" | grep -qi "package-host migration follow-up pending" || {
+        echo "FAIL: headless cleanup prompt did not report package-host follow-up (got: $PROMPT_PREVIEW)"; exit 1; }
+    echo "OK: headless cleanup prompt reminder verified."
+
     step "=== package-install: booting Previous system with fixtures ==="
     PREVIOUS_ENTRY=$(ssh $SSH_OPTS root@localhost \
         "grep -il 'previous system' /boot/loader/entries/*.conf /boot/efi/loader/entries/*.conf /efi/loader/entries/*.conf 2>/dev/null | head -1")
