@@ -40,6 +40,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   → OSTree migration, and verifies the target plus the `Previous system`
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
+- Cross-family `/etc` policy now covers `OstreeDeploy` and `ImageSwap`
+  (#258, #259). It runs after native finalization, keeps target defaults,
+  remaps identities, preserves sidecars, and schedules first-boot repairs.
+  A non-gating `OstreeDeploy` E2E cell covers it.
 
 - ComposeFS migrations now run a post-seal integrity pass. The native
   composefs-rs backend runs `fsck` on the store. Both backends read and verify

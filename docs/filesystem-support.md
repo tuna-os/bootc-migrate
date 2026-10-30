@@ -70,6 +70,9 @@ subvolume. The tool copies `/var` data into `/sysroot/state/os/default/var`
 (the composefs state path) with `copy_dir_all_with_xattrs`. The composefs
 initramfs bind-mounts this path at `/var` after the switch root to preserve user data.
 
+The non-gating Bluefin → openSUSE `OstreeDeploy` cell exercises cross-family
+`/etc` reconciliation and shared `/var` ownership remapping after finalization.
+
 ---
 
 ## XFS path (Bluefin LTS → Dakota stable)

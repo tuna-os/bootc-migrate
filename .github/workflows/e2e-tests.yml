@@ -88,10 +88,10 @@ jobs:
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
           (vars.E2E_SELF_HOSTED == 'true' &&
            fromJSON('["self-hosted", "kvm"]') || 'ubuntu-latest') }}
-    # 90, not 45: the tui-migrate cell measured 65 min end to end on a
-    # hosted runner (image bake + migration + reboot + rollback + commit,
-    # all driven through the wizard).
-    timeout-minutes: 90
+    # Keep the normal 90-minute failure bound. The TUI cell overrides it:
+    # a cold hosted runner spent 62 minutes building before its full
+    # migration/reboot/rollback flow started and was killed at 90 minutes.
+    timeout-minutes: ${{ matrix.scenario.timeout_minutes || 90 }}
     # Exploratory cells opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without failing
     # the run; only the scheduled and dispatched full matrix runs them.
