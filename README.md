@@ -731,6 +731,15 @@ snapshots the old kernels, initramfs, BLS entries, and GRUB configuration.
 Bootc then empties `/boot`. The `Previous system` entry and guided
 package-host commit remain tracked by #374 and #378.
 
+The package-host `/etc` transition is ready for that install engine. It uses
+rpm, dpkg or pacman verification as the missing factory-copy classifier:
+target defaults replace unmodified packaged files, while package-host edits,
+unpackaged files and machine state are carried. A target version displaced by
+a carried edit is kept as `.rebase-new`; human identity records are merged
+target-first and numeric collisions produce an ownership-remap plan. The
+transition also drops the old root mount from `fstab` and rewrites `/home` to
+`/var/home` (#375).
+
 `--dry-run` on a package host also prints a readiness report and the
 hardware report. The report refuses these systems and gives the reason for
 each refusal:
