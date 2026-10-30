@@ -95,6 +95,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   the btrfs subvolume layout, `/boot` and `/home`, free space against the
   target image's size, running package managers and SELinux. It prints a
   reason for each refusal, then the hardware report.
+- Package-host rollback artifacts (#374): the core library snapshots the
+  source kernel, initramfs and command line, stages a stable `Previous system`
+  BLS or GRUB entry, and provides `bootc-rebase undo` without removing the new
+  bootc deployment.
 - Package-host software report (#377): `bootc-rebase scan` and package-host
   `--dry-run` compare rpm, dpkg or pacman package databases with target image.
   They classify packages absent from image. They suggest Flatpak, Homebrew,

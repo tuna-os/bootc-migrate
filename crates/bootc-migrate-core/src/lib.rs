@@ -28,7 +28,7 @@
 //! - [`preflight`] — system introspection and migration readiness checks
 //! - [`migration`] — the phase 0–5 migration pipeline, bootloader/BLS handling,
 //!   kernel command-line construction, and os-release parsing
-//! - [`transaction`] — two-phase apply: `commit` / `undo` of a staged migration
+//! - [`package_rollback`] — package-host kernel/initramfs snapshots, rollback BLS/GRUB entries, and undo
 //! - [`types`] — shared types such as [`VerityDigest`]
 
 pub mod app_mapping;
@@ -57,6 +57,7 @@ pub mod ostree_install_commit;
 pub mod package_data;
 pub mod package_etc;
 pub mod package_host;
+pub mod package_rollback;
 pub mod preflight;
 pub mod rebase_controller;
 pub mod rebase_plan;
