@@ -109,6 +109,17 @@
   # the stash directory exists afterwards.
   de_migrate: true
   allow_failure: true
+- name: bluefin -> openSUSE Tumbleweed (cross-family ostree re-base, OstreeDeploy)
+  base: ghcr.io/projectbluefin/bluefin:stable
+  # #259: exercise the post-finalization cross-family policy on the
+  # bootc switch route. Non-gating while the target's community image
+  # and the new OstreeDeploy reconciliation get real-run coverage.
+  target: ghcr.io/bootcrew/opensuse-bootc:latest
+  mode: ostree-rebase
+  disk_size: 40G
+  cross_family: true
+  expect_os_id: opensuse-tumbleweed
+  allow_failure: true
 - name: bluefin -> dakota (TUI-driven migration)
   base: ghcr.io/projectbluefin/bluefin:stable
   target: ghcr.io/projectbluefin/dakota:stable
@@ -121,11 +132,12 @@
   # every downstream assertion of the default mode runs
   # unchanged. This is the only cell that exercises the
   # terminal event loops (ROADMAP M5 "no TUI assertions" gap).
-  # Gating (no allow_failure) since run 33050814991 proved the
-  # whole flow green on a hosted runner in 65 min: drift
-  # checklist, wizard navigation, live migration, reboot into
-  # composefs, rollback round-trip, commit.
+  # Gating (no allow_failure) since run 33050814991 proved the whole flow
+  # green. Preserve enough headroom for cold hosted runners: run 39988706218
+  # spent 62 minutes in setup, reached the live migration at minute 82, and
+  # was killed by the former 90-minute job limit.
   mode: tui-migrate
+  timeout_minutes: 150
   # #440's free-space check counts five times the target's compressed
   # size, plus the source repo and 5 GiB. Bluefin -> Dakota needs
   # about 33 GB free, and a 40G disk has 32.7 GB.

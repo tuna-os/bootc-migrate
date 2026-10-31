@@ -765,7 +765,7 @@ fn pacman_files(contents: &str) -> Vec<String> {
         .collect()
 }
 
-fn read_apk_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
+pub(crate) fn read_apk_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
     let path = if root.join("lib/apk/db/installed").exists() {
         root.join("lib/apk/db/installed")
     } else {

@@ -302,6 +302,8 @@ pub fn parse_grub_menuentries(content: &str) -> Vec<BootEntry> {
 fn boot_relative_path(path: &str) -> Result<PathBuf> {
     let trimmed = path.trim();
     let relative = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    // GRUB configurations sometimes spell a path from the host root
+    // (`/boot/vmlinuz-*`) even though the caller's boot root is `/boot`.
     let relative = relative.strip_prefix("boot/").unwrap_or(relative);
     if relative.is_empty() {
         bail!("boot artifact path is empty");
@@ -528,6 +530,7 @@ pub struct PackageRollbackSnapshot {
     pub schema_version: u32,
     pub source_format: BootEntryFormat,
     pub source: SourceIdentity,
+    pub source_title: String,
     pub version: String,
     pub options: String,
     pub linux: SnapshotArtifact,
@@ -689,6 +692,7 @@ pub fn snapshot_source_boot(
         schema_version: SNAPSHOT_SCHEMA,
         source_format: discovered.format,
         source,
+        source_title: discovered.entry.title,
         version: discovered.entry.version,
         options,
         linux: SnapshotArtifact {
@@ -996,6 +1000,15 @@ mod tests {
 
     fn source() -> SourceIdentity {
         SourceIdentity {
+            id: "fedora".into(),
+            version_id: "43".into(),
+            name: "Fedora Linux".into(),
+            pretty_name: "Fedora Linux 43 (Workstation Edition)".into(),
+        }
+    }
+
+    fn pmos_source() -> SourceIdentity {
+        SourceIdentity {
             id: "postmarketos".into(),
             version_id: "edge".into(),
             name: "postmarketOS".into(),
@@ -1054,11 +1067,186 @@ mod tests {
     }
 
     #[test]
-    fn renderers_keep_devicetree_and_old_cmdline() {
+    fn grub_parser_extracts_linux_and_all_initrds() {
+        let entries = parse_grub_menuentries(
+            "menuentry 'Fedora Linux' --class fedora {\n  linuxefi /vmlinuz-6.9 root=UUID=abc rw\n  initrdefi /initramfs-6.9.img\n  initrd /intel-ucode.img\n}\n",
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Fedora Linux");
+        assert_eq!(entries[0].version, "6.9");
+        assert_eq!(
+            entries[0].initrds,
+            ["/initramfs-6.9.img", "/intel-ucode.img"]
+        );
+        assert_eq!(entries[0].options, "root=UUID=abc rw");
+    }
+
+    #[test]
+    fn grub_source_paths_strip_host_boot_prefix() {
+        let root = tempdir().unwrap();
+        let boot = root.path().join("boot");
+        fs::create_dir_all(boot.join("grub2")).unwrap();
+        fs::write(boot.join("vmlinuz-6.11"), "old kernel").unwrap();
+        fs::write(boot.join("initramfs-6.11.img"), "old initrd").unwrap();
+        fs::write(
+            boot.join("grub2/grub.cfg"),
+            concat!(
+                "menuentry 'Fedora' {\n",
+                " linux /boot/vmlinuz-6.11 root=UUID=old rw\n",
+                " initrd /boot/initramfs-6.11.img\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        let state = root.path().join("var/lib/rollback");
+        let snapshot = snapshot_source_boot(
+            &boot,
+            &state,
+            source(),
+            "root=UUID=old rootflags=subvol=root rw",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.source_format, BootEntryFormat::Grub);
+        assert_eq!(snapshot.linux.original_path, "/boot/vmlinuz-6.11");
+        assert_eq!(
+            fs::read(state.join("artifacts/kernel-vmlinuz-6.11")).unwrap(),
+            b"old kernel"
+        );
+    }
+
+    #[test]
+    fn renderers_keep_old_cmdline_and_use_stable_entry_id() {
         let snapshot = PackageRollbackSnapshot {
             schema_version: SNAPSHOT_SCHEMA,
             source_format: BootEntryFormat::Bls,
             source: source(),
+            source_title: "Fedora Linux".into(),
+            version: "6.11".into(),
+            options: "root=UUID=abc rootflags=subvol=root rw".into(),
+            linux: SnapshotArtifact {
+                original_path: "/vmlinuz-6.11".into(),
+                stored_name: "kernel-vmlinuz-6.11".into(),
+            },
+            initrds: vec![SnapshotArtifact {
+                original_path: "/initramfs-6.11.img".into(),
+                stored_name: "initrd-0-initramfs-6.11.img".into(),
+            }],
+            devicetree: None,
+            uses_boot_prefix: false,
+            nvram: None,
+        };
+        let bls = snapshot.render_bls_entry();
+        assert!(bls.contains("title Previous system (Fedora Linux 43 (Workstation Edition))"));
+        assert!(bls.contains("linux /bootc-migrate-rollback/kernel-vmlinuz-6.11"));
+        assert!(bls.contains("options root=UUID=abc rootflags=subvol=root rw"));
+        assert!(bls.contains("sort-key bootc-migrate-rollback"));
+        assert!(!bls.contains("devicetree"));
+        let grub = snapshot.render_grub_menuentry();
+        assert!(
+            grub.contains("menuentry 'Previous system (Fedora Linux 43 (Workstation Edition))'")
+        );
+        assert!(grub.contains("linux /bootc-migrate-rollback/kernel-vmlinuz-6.11"));
+    }
+
+    #[test]
+    fn snapshot_and_stage_round_trip_preserves_old_boot_contract() {
+        let root = tempdir().unwrap();
+        let boot = root.path().join("boot");
+        let entries = boot.join("loader/entries");
+        fs::create_dir_all(&entries).unwrap();
+        fs::write(boot.join("vmlinuz-6.11"), "old kernel").unwrap();
+        fs::write(boot.join("initramfs-6.11.img"), "old initrd").unwrap();
+        fs::write(
+            entries.join("fedora-old.conf"),
+            "title Fedora\nversion 6.11\nlinux /vmlinuz-6.11\ninitrd /initramfs-6.11.img\noptions root=UUID=old rootflags=subvol=root rw\n",
+        )
+        .unwrap();
+        let state = root.path().join("var/lib/rollback");
+        let snapshot = snapshot_source_boot(
+            &boot,
+            &state,
+            source(),
+            "root=UUID=old rootflags=subvol=root rw",
+            None,
+        )
+        .unwrap();
+        fs::remove_dir_all(&boot).unwrap();
+        fs::create_dir_all(&boot).unwrap();
+        let staged = stage_rollback(&state, &boot, true).unwrap();
+
+        assert_eq!(fs::read(&staged.kernel_path).unwrap(), b"old kernel");
+        assert_eq!(fs::read(&staged.initrd_paths[0]).unwrap(), b"old initrd");
+        assert!(staged.devicetree_path.is_none());
+        let entry = fs::read_to_string(&staged.entry_path).unwrap();
+        assert_eq!(entry, snapshot.render_bls_entry());
+        assert!(entry.contains("rootflags=subvol=root"));
+        assert!(boot.join("loader/entries").join(ROLLBACK_ENTRY).is_file());
+    }
+
+    #[test]
+    fn grub_fallback_stage_writes_custom_cfg() {
+        let root = tempdir().unwrap();
+        let state = root.path().join("state");
+        let artifacts = state.join("artifacts");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::write(artifacts.join("kernel-vmlinuz-6.11"), "kernel").unwrap();
+        fs::write(artifacts.join("initrd-0-initramfs-6.11.img"), "initrd").unwrap();
+        let snapshot = PackageRollbackSnapshot {
+            schema_version: SNAPSHOT_SCHEMA,
+            source_format: BootEntryFormat::Grub,
+            source: source(),
+            source_title: "Fedora".into(),
+            version: "6.11".into(),
+            options: "root=UUID=abc rw".into(),
+            linux: SnapshotArtifact {
+                original_path: "/boot/vmlinuz-6.11".into(),
+                stored_name: "kernel-vmlinuz-6.11".into(),
+            },
+            initrds: vec![SnapshotArtifact {
+                original_path: "/boot/initramfs-6.11.img".into(),
+                stored_name: "initrd-0-initramfs-6.11.img".into(),
+            }],
+            devicetree: None,
+            uses_boot_prefix: true,
+            nvram: None,
+        };
+        fs::write(
+            state.join(SNAPSHOT_FILE),
+            serde_json::to_string(&snapshot).unwrap(),
+        )
+        .unwrap();
+        let boot = root.path().join("boot");
+        fs::create_dir_all(boot.join("grub2")).unwrap();
+        let staged = stage_rollback(&state, &boot, false).unwrap();
+        assert_eq!(staged.entry_path, boot.join("grub2/custom.cfg"));
+        let cfg = fs::read_to_string(staged.entry_path).unwrap();
+        assert!(cfg.contains(
+            "linux /boot/bootc-migrate-rollback/kernel-vmlinuz-6.11 'root=UUID=abc' 'rw'"
+        ));
+        assert!(cfg.contains("--id bootc-migrate-rollback"));
+    }
+
+    #[test]
+    fn undo_command_shapes_do_not_remove_the_new_deployment() {
+        assert_eq!(
+            default_command(Bootloader::SystemdBoot, "bootctl"),
+            ["bootctl", "set-default", ROLLBACK_ENTRY]
+        );
+        assert_eq!(
+            default_command(Bootloader::Grub, "grub2-set-default"),
+            ["grub2-set-default", ROLLBACK_ENTRY_ID]
+        );
+    }
+
+    #[test]
+    fn renderers_keep_devicetree_and_old_cmdline() {
+        let snapshot = PackageRollbackSnapshot {
+            schema_version: SNAPSHOT_SCHEMA,
+            source_format: BootEntryFormat::Bls,
+            source: pmos_source(),
+            source_title: "postmarketOS".into(),
             version: "6.12".into(),
             options: "arm64.nopauth clk_ignore_unused rw".into(),
             linux: SnapshotArtifact {
@@ -1107,7 +1295,7 @@ mod tests {
         let snapshot = snapshot_source_boot(
             &boot,
             &state,
-            source(),
+            pmos_source(),
             "arm64.nopauth clk_ignore_unused rw",
             None,
         )
@@ -1145,7 +1333,7 @@ mod tests {
         )
         .unwrap();
         let state = root.path().join("var/lib/rollback");
-        snapshot_source_boot(&boot, &state, source(), "rw", None).unwrap();
+        snapshot_source_boot(&boot, &state, pmos_source(), "rw", None).unwrap();
 
         let bls_boot = root.path().join("target-bls");
         fs::create_dir_all(bls_boot.join("loader/entries")).unwrap();
@@ -1202,7 +1390,7 @@ mod tests {
         .unwrap();
 
         let state = root.path().join("var/lib/rollback");
-        snapshot_source_boot(&boot, &state, source(), "rw", Some(EFIBOOTMGR_V)).unwrap();
+        snapshot_source_boot(&boot, &state, pmos_source(), "rw", Some(EFIBOOTMGR_V)).unwrap();
         let nvram = read_snapshot(&state).unwrap().nvram.unwrap();
         assert_eq!(nvram.boot_order.as_deref(), Some("0002,0000,0001"));
         assert_eq!(nvram.boot_current.as_deref(), Some("0002"));
@@ -1214,7 +1402,7 @@ mod tests {
         // A host whose NVRAM could not be read still gets a rollback entry;
         // it just has no order to put back.
         let without = root.path().join("var/lib/rollback-no-nvram");
-        snapshot_source_boot(&boot, &without, source(), "rw", None).unwrap();
+        snapshot_source_boot(&boot, &without, pmos_source(), "rw", None).unwrap();
         assert!(read_snapshot(&without).unwrap().nvram.is_none());
     }
 
@@ -1227,7 +1415,7 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         let newer = format!(
             "{{\"schema_version\":{},\"source_format\":\"bls\",\"source\":{{\"id\":\"x\",\
-             \"version_id\":\"1\",\"name\":\"X\",\"pretty_name\":\"X 1\"}},\"version\":\"6\",\
+             \"version_id\":\"1\",\"name\":\"X\",\"pretty_name\":\"X 1\"}},\"source_title\":\"X\",\"version\":\"6\",\
              \"options\":\"rw\",\"linux\":{{\"original_path\":\"/vmlinuz\",\
              \"stored_name\":\"kernel-vmlinuz\"}},\"initrds\":[],\"uses_boot_prefix\":false}}",
             SNAPSHOT_SCHEMA + 1

@@ -651,7 +651,7 @@ fn run() -> Result<()> {
                 rollback_args.dry_run,
             )
         }
-        Some(Commands::Undo(undo_args)) => {
+        Some(Commands::Undo(ref undo_args)) => {
             check_root_privilege()?;
             bootc_migrate_core::package_rollback::run_undo(
                 std::path::Path::new(bootc_migrate_core::package_rollback::STATE_DIR),

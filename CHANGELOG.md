@@ -48,6 +48,10 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   → OSTree migration, and verifies the target plus the `Previous system`
   round-trip. The new matrix cells are exploratory until the package route is
   complete and its first Fedora Cloud run is green.
+- Cross-family `/etc` policy now covers `OstreeDeploy` and `ImageSwap`
+  (#258, #259). It runs after native finalization, keeps target defaults,
+  remaps identities, preserves sidecars, and schedules first-boot repairs.
+  A non-gating `OstreeDeploy` E2E cell covers it.
 
 - ComposeFS migrations now run a post-seal integrity pass. The native
   composefs-rs backend runs `fsck` on the store. Both backends read and verify
@@ -91,11 +95,22 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   Bluefin → Debian, Ubuntu and Arch Linux. The test harness adapts
   base-image setup (SSH units, multi-distro root home locations, and
   family-specific `/etc` configuration sidecars).
+- Package-host `/etc` migration policy (#375). The policy uses rpm, dpkg or
+  pacman checks. It identifies vendor defaults, user edits and unpackaged
+  files without a factory image. The policy carries user and machine state.
+  It keeps target conflicts as `.rebase-new` files. It merges identity
+  databases with target records first, then adds human accounts and resolves
+  numeric collisions. It rewrites `fstab` for the bootc `/var/home` layout.
+  The `PackageInstall` engine in #373 will call this code.
 - Package host readiness report (#372): `bootc-rebase --dry-run` on a
   package-managed system checks boot mode, root filesystem, LUKS and LVM,
   the btrfs subvolume layout, `/boot` and `/home`, free space against the
   target image's size, running package managers and SELinux. It prints a
   reason for each refusal, then the hardware report.
+- Package-host rollback artifacts (#374): the core library snapshots the
+  source kernel, initramfs and command line, stages a stable `Previous system`
+  BLS or GRUB entry, and provides `bootc-rebase undo` without removing the new
+  bootc deployment.
 - Package-host software report (#377): `bootc-rebase scan` and package-host
   `--dry-run` compare rpm, dpkg or pacman package databases with target image.
   They classify packages absent from image. They suggest Flatpak, Homebrew,
