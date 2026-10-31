@@ -157,7 +157,7 @@ pub struct ProbeFiles {
     pub sysusers: Vec<String>,
     /// File names under `/usr/share/xsessions` + `/usr/share/wayland-sessions`.
     pub session_files: Vec<String>,
-    /// `/usr/lib/systemd/boot/efi/systemd-bootx64.efi` present.
+    /// `/usr/lib/systemd/boot/efi/systemd-boot{x64,aa64,ia32}.efi` present.
     pub has_systemd_boot_payload: bool,
     /// EFI loaders found under the target's systemd-boot and bootupd payloads.
     pub target_bootloaders: Vec<TargetBootloader>,
