@@ -142,12 +142,11 @@ tool does not support a return from ComposeFS to OSTree.
 
 The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
 to choose an image, and press Space on the options page to change a setting.
-After a successful dry-run, press Enter to review and apply in the same
-session. The wizard clears the old confirmation and enables readiness checks
-again. The final review requires typing `CONFIRM` and Enter before anything
-changes. You can also turn off dry-run on the options page.
-Root is needed to run a migration,
-though you can browse the catalog without it.
+For a live run, turn off dry-run there, or press Enter after a successful
+dry-run to review and apply in the same session. The wizard then clears the
+old confirmation and does the readiness checks again. The final review needs
+`CONFIRM` and Enter before anything changes. You need root for a migration,
+but you can browse the catalog without it.
 
 ## Coming from a regular (non-bootc) install
 
