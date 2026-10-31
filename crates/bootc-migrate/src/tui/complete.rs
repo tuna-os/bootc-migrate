@@ -22,8 +22,13 @@ pub fn render_complete(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .style(Style::default().bg(DARK_BG));
 
     if app.opt_dry_run {
+        let next = if app.can_review_live_run() {
+            "Press Enter to review and apply without restarting.\n  Checks run again; you must type CONFIRM before changes.\n\n  Press q or Esc to exit."
+        } else {
+            "This preview cannot start a live migration.\n\n  Press q or Enter to exit."
+        };
         let text = Paragraph::new(format!(
-            "\n  ✓ Dry-run completed. No deployment was staged.\n\n  Target: {}\n\n  To stage it, restart the wizard, turn off Dry-run\n  in Options, review the command, then type CONFIRM.\n\n  Press [q] or [Enter] to exit.",
+            "\n  ✓ Dry-run completed. No deployment was staged.\n\n  Target: {}\n\n  {next}",
             app.selected_image()
         ))
         .style(Style::default().fg(TEXT))

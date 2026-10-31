@@ -76,6 +76,20 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
         )),
     ];
 
+    if !app.opt_dry_run && !app.opt_skip_preflight {
+        text_lines.push(Line::from(Span::styled(
+            "  Readiness checks run again before staging the live migration.",
+            Style::default().fg(AMBER),
+        )));
+    }
+
+    if !app.live_source_ready() {
+        text_lines.push(Line::from(Span::styled(
+            "  Preview only: live migration requires a detected bootc source.",
+            Style::default().fg(AMBER),
+        )));
+    }
+
     for l in summary_lines {
         text_lines.push(l);
     }
@@ -95,6 +109,8 @@ pub fn render_review(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let (btn_label, btn_bg) = if app.engine_missing() {
         ("  ✗ Engine missing    ", MUTED)
+    } else if !app.live_source_ready() && !app.opt_dry_run {
+        ("  Preview only      ", MUTED)
     } else if app.opt_dry_run {
         ("  ▶ Run Dry-Run     ", TEAL)
     } else {
