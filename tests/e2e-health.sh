@@ -135,6 +135,30 @@ for unit in $failed_units; do
 done
 [ "$unexpected" = 0 ] && ok "no unexpected failed units"
 
+# ---- 2b. Carried /etc files vs failed units -----------------------------------
+# When a carried /etc manifest exists from a migration, check whether any failed unit
+# references or reads a carried /etc configuration file.
+carried_manifest=/var/lib/bootc-rebase/carried-etc.txt
+[ -f "$carried_manifest" ] || carried_manifest=/var/lib/bootc-migrate/carried-etc.txt
+if [ -f "$carried_manifest" ]; then
+    carried_count=$(wc -l < "$carried_manifest" | tr -d ' ')
+    echo "  carried /etc files tracked: $carried_count"
+    etc_failures=0
+    for unit in $failed_units; do
+        unit_def=$(systemctl cat "$unit" 2>/dev/null || true)
+        unit_dropins=$(systemctl show -p DropInPaths --value "$unit" 2>/dev/null || true)
+        while IFS= read -r carried_path; do
+            [ -n "$carried_path" ] || continue
+            if echo "$unit_def $unit_dropins" | grep -qF "$carried_path" 2>/dev/null \
+                || journalctl -b --no-pager -n 30 -u "$unit" 2>/dev/null | grep -qF "$carried_path"; then
+                bad "failed unit $unit reads carried /etc file: $carried_path"
+                etc_failures=1
+            fi
+        done < "$carried_manifest"
+    done
+    [ "$etc_failures" = 0 ] && ok "no unit that reads a carried /etc file failed"
+fi
+
 # ---- 3. System bus and logind ----------------------------------------------
 if systemctl is-active --quiet dbus.service || systemctl is-active --quiet dbus-broker.service; then
     ok "system D-Bus is active"
