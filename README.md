@@ -34,12 +34,12 @@ old OSTree deployment stays in the boot menu as a fallback the whole time.
 **1. Get the migrator.** Download the latest prebuilt binary (x86_64; for arm64
 swap in `aarch64-unknown-linux-gnu`):
 
-> **Release-naming note.** The project name changed from
-> `bootc-migrate-composefs` to `bootc-migrate` after v0.2.0.
-> `release.yml` already publishes under the new name. From **v0.6.0**, the
-> tarball, binary, and container image are all `bootc-migrate`. The commands
-> below reflect that. To install older v0.2.0 artifacts, substitute
-> `bootc-migrate-composefs` in the paths.
+> **Release-naming note.** The project changed its repository name from
+> `bootc-migrate-composefs` to `bootc-migrate` after v0.2.0. `release.yml`
+> publishes under the new name, so from **v0.6.0** the tarball, binary, and
+> container image are all `bootc-migrate`. The commands below reflect that.
+> To install the older v0.2.0 artifacts, substitute `bootc-migrate-composefs`
+> in the paths.
 
 ```bash
 curl -fsSL -o bmc.tar.gz \
@@ -77,14 +77,14 @@ sudo install -m755 target/release/bootc-migrate /usr/local/bin/
 ```
 </details>
 
-**2. Dry-run** — makes no changes; checks your system is ready:
+**2. Dry-run** — makes no changes and checks that your system is ready:
 
 ```bash
 sudo bootc-migrate \
   --target-image ghcr.io/projectbluefin/dakota:stable --dry-run
 ```
 
-**3. Migrate** (~5–25 min based on cache/network):
+**3. Migrate** (~5–25 min):
 
 ```bash
 sudo bootc-migrate \
@@ -105,30 +105,26 @@ grep -oE 'composefs(\.digest)?=[^ ]*' /proc/cmdline   # confirms composefs boot
 sudo bootc-migrate commit                 # one-way; removes the OSTree fallback
 ```
 
-> **Note:** Phase 4 copies `/var` to the composefs side. The two `/var`
-> trees are **independent** after migration. Changes on the composefs side do
-> not appear after an OSTree rollback, and the reverse also applies. Commit only
-> when you're satisfied with the new system.
+> ⚠️ **Note:** Phase 4 copies `/var` to the composefs side.
+> After migration, the two `/var` trees are independent.
+> Changes on the composefs side do not appear if you roll back to OSTree.
+> Commit only when you trust the new system.
 
-For flags, rollback, problems, and the full phase-by-phase breakdown, see
+That's it. For flags, rollback, recovery steps, and phase details, see
 [Usage — end-to-end walkthrough](#usage--end-to-end-walkthrough).
 On **Bluefin LTS** (XFS) or systems with **LVM / LUKS / a dedicated `/var`
 partition**, the tool handles those automatically — see
 [docs/filesystem-support.md](docs/filesystem-support.md).
 
-> **Status: CI-validated, released, and proven on real hardware.** Seven E2E
-> scenarios — btrfs, ext4, LUKS+XFS, LVM-on-LUKS with a dedicated `/var`, two
-> ostree re-bases, and a TUI-driven migration — run in CI on every push to
-> `main` (migration, commit, deep-clean, and `bootc status` /
-> `upgrade --check` all green). Prebuilt binaries are on the
-> [Releases](https://github.com/tuna-os/bootc-migrate/releases) page. Don't point this at a machine you can't
-> reinstall, but the core path is stable.
+> **Status: CI-validated, released, and tested on real hardware.**
+> Fourteen E2E scenarios run in CI on every push to `main`.
+> Prebuilt binaries are on the [Releases](https://github.com/tuna-os/bootc-migrate/releases) page.
 
 ## Interactive wizard (TUI)
 
 Prefer a guided walkthrough? Run `bootc-migrate` with no `--target-image`
-or with `tui` to open the terminal wizard. It guides target image selection,
-options, the review, and live phase logs:
+or with `tui` to open the terminal wizard. The wizard helps you select a target
+image and options. It then shows the review and live phase logs:
 
 ```bash
 sudo bootc-migrate tui
@@ -257,25 +253,25 @@ layer stream.
 
 ## What it does
 
-Six phases (numbered 0–5 to match the console output), run as one command:
+Six phases (numbered 0–5 to match console output), run as one command:
 
 - **Phase 0 — Preflight** — free-space, reflink/CoW, UEFI, NVRAM-writable, ESP
   capacity.
-- **Phase 1 — OSTree import** *(optional)* — reflinks OSTree file objects into
-  the composefs store. This reduces duplicate data in Phase 2. Skip it with
+- **Phase 1 — OSTree import** *(optional)* — copies file objects from OSTree
+  into the composefs store. This reduces duplicate data in Phase 2. Skip it with
   `--skip-import`.
 - **Phase 2 — OCI pull** — `bootc internals cfs oci pull` of the target bootc
   image into the composefs store.
 - **Phase 3 — EROFS seal** — builds and seals the EROFS image. It saves the
   sealed config digest for Phases 4 and 5.
-- **Phase 4 — Stage deploy** — merges `/etc` and unions identity
-  database lines. It reads from the sealed mount and removes broken
+- **Phase 4 — Stage deploy** — merges `/etc` and combines lines from identity
+  databases. It reads from the sealed mount and removes broken
   `/usr/*` symlinks. It keeps `/home` ↔ `/var/home` compatibility and
   preserves `/var`. `.origin` stores `boot_digest` and `manifest_digest`;
   `tini` writes it.
 - **Phase 5 — Bootloader** — copies `systemd-bootx64.efi` from the sealed
-  mount to the ESP. It verifies that the target kernel resolves current
-  wireless devices. It writes BLS entries and adds a stateroot mount argument
+  mount to the ESP. It confirms that current wireless devices work with the
+  target kernel. It writes BLS entries and adds a stateroot mount argument
   for dedicated `/var`. It registers `Linux Boot Manager` in UEFI NVRAM. The
   original GRUB entry stays as a rollback escape hatch.
 
@@ -284,9 +280,8 @@ commit` removes the OSTree fallback and makes composefs permanent.
 
 ## Usage — end-to-end walkthrough
 
-> **Before you start.** This tool rewrites bootloader state and either reuses
-> or copies the entire `/var`. Don't run it on a machine you can't reinstall
-> in a pinch.
+> **Before you start.** This tool changes bootloader state and copies or reuses
+> all of `/var`. Don't run it on a machine you can't reinstall in a pinch.
 > Until you run `commit`, it's reversible — but a fresh backup is still
 > cheap insurance.
 
@@ -299,8 +294,8 @@ you want to end up on. Today the validated path is **Bluefin → Dakota**:
 ghcr.io/projectbluefin/dakota:stable     # default target
 ```
 
-If you're migrating a different OSTree-backed system (Aurora, Silverblue),
-point `--target-image` at the composefs-flavored equivalent.
+For other OSTree systems (Aurora, Silverblue), set `--target-image` to the
+composefs equivalent.
 
 The target must share a base lineage with the source: its `ID_LIKE` must
 overlap yours, or both images must ship the same package manager. Bluefin,
@@ -327,17 +322,16 @@ sudo bootc-migrate \
 Things to confirm in the report:
 
 - `Booted bootc backend: ostree` — the conversion runs from here. `composefs`
-  means the conversion is already done, and the tool swaps the deployment
-  image instead (`bootc switch`) rather than refusing. Only `none` — not a
-  bootc deployment at all — is a blocker.
+  means the conversion is done, and the tool swaps the deployment image
+  instead (`bootc switch`). Only `none` (not a bootc deployment) is a blocker.
 - `UEFI Boot Mode: Yes` + `NVRAM writable: Yes` — required for the
   systemd-boot path; on BIOS-only or locked NVRAM pass `--bootloader grub2`.
 - `ESP Free Space: ≥ 150 MB` — we copy `systemd-bootx64.efi` from the
   target image onto the ESP.
 - `Reflink (CoW) Support: Yes` — btrfs and XFS both support reflink.
-- `ComposeFS free space` includes the source OSTree import, two expanded
-  copies of the target image (ComposeFS and podman fallback storage), and 5 GiB
-  of temporary headroom for the initrd rebuild.
+- `ComposeFS free space` includes the source OSTree import. It also includes
+  two expanded copies of the target image for ComposeFS and podman fallback
+  storage. Another 5 GiB provides temporary headroom for the initrd rebuild.
 
 Optionally, preview what Phase 4's `/etc` merge will see before you run it:
 
@@ -346,9 +340,9 @@ sudo bootc-migrate etc-drift
 ```
 
 Lists every path where your live `/etc` has diverged from the OSTree factory
-default (added/modified/removed/type-changed), read-only. Useful for
-spotting a stale customization you no longer need before it carries forward
-into the migrated system.
+default (added/modified/removed/type-changed), read-only. Useful to find
+stale customizations you do not need before they carry forward into the
+migrated system.
 
 ### 3. Run the migration
 
@@ -460,63 +454,56 @@ can hide what the image ships.
 
 ### Cross-family targets
 
-`bootc-migrate` reads the target image's `os-release` and looks for its
-package manager before it stages anything. Two images are one family when
-their `ID`/`ID_LIKE` sets overlap or when both ship the same package
-manager (dnf, zypper, apt, pacman or apk). When the sets share nothing and
-the package managers differ (Fedora → openSUSE, Fedora → Debian), it
-refuses. When one image ships no known package manager (Dakota is GNOME
-OS-based), it warns and keeps the standard merge. The standard 3-way `/etc` merge keeps every file you
-changed on the source. Across families, that carries one family's
-package-manager, PAM, service and policy defaults onto the other.
+`bootc-migrate` reads the target image's `os-release` and package manager
+before staging. Overlapping `ID`/`ID_LIKE` values or the same package manager
+mean one family. Different families (Fedora → openSUSE or Debian) refuse.
+If the target has no known package manager, the tool warns and checks the
+staged `os-release` again.
 
-With `--accept-cross-base`, Phase 4 applies the cross-family policy
-instead:
+With `--accept-cross-base`, the conversion route and both `bootc switch` routes
+apply this policy:
 
-- Every path the target ships takes the target's copy.
-- The tool drops every path that only the source's vendor shipped.
-- The tool keeps machine state verbatim: `fstab`, `crypttab`,
-  `mdadm.conf`, `hostname`, `hosts`, `localtime`, `locale.conf`,
-  `vconsole.conf`, `adjtime`, SSH host keys and `sshd_config.d/`, saved
-  NetworkManager connections, and `sudoers.d/`. It also keeps every path
-  you added yourself.
-- Identity databases take the target's numeric ids first, and the tool
-  appends your accounts. Password entries stay yours. The tool then
-  changes the owner of each file under `/var` to match.
-- Every displaced file you had changed stays beside its replacement as
-  `<path>.rebase-old`. The tool deletes nothing.
-- When the target enforces an SELinux policy that the source did not, a
-  one-shot unit relabels `/etc` and `/var` on first boot.
+- Target files win; source vendor-only files are dropped.
+- Machine state and user-added files stay.
+- Target IDs lead identity merges; source accounts append; `/var` ownership is
+  remapped.
+- Displaced edits use `<path>.rebase-old`. The tool deletes no files.
+- `OstreeDeploy` applies after OSTree finalization and schedules `/.autorelabel`
+  when needed. `ImageSwap` applies after composefs finalization and preserves
+  sysusers/ldconfig repair.
+
+If the staged image is cross-family without `--accept-cross-base`, the route
+leaves it staged and unfinalized. Remove it before retrying. Do not reboot.
 
 The tool prints the report and keeps it across the reboot. A composefs
 deployment stores it at
 `/sysroot/state/deploy/<verity>/bootc-migrate-cross-family-report.json`.
 The composefs → OSTree route stores it in the new stateroot's
 `/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json`, because an
-OSTree deployment root is immutable after installation. This route is
-exploratory: one non-gating E2E cell exercises it. See [ROADMAP.md](ROADMAP.md)
-and [#256](https://github.com/tuna-os/bootc-migrate/issues/256).
+OSTree deployment root is immutable after installation. Non-gating E2E cells
+cover conversion and `OstreeDeploy`. See [ROADMAP.md](ROADMAP.md) and issues
+[#258](https://github.com/tuna-os/bootc-migrate/issues/258),
+[#256](https://github.com/tuna-os/bootc-migrate/issues/256), and
+[#259](https://github.com/tuna-os/bootc-migrate/issues/259).
 
 ### Move system Steam into Flatpak Steam
 
-After installing and launching `com.valvesoftware.Steam` once, its per-user
-data can absorb a system Steam installation without re-downloading games:
+After you install and run `com.valvesoftware.Steam` once, its per-user
+data can absorb a system Steam install without new game downloads:
 
 ```bash
 bootc-migrate system-to-flatpak-steam --dry-run
 bootc-migrate system-to-flatpak-steam
 ```
 
-Run it as the desktop user, **without** `sudo`, after closing Steam and all
-Steam games. It uses filesystem renames only—never a recursive copy—to move
-`steamapps`, `userdata`, and `config` from `~/.local/share/Steam` into Flatpak
-Steam's data directory. The pre-existing Flatpak versions and both library
-registries are retained in a timestamped rollback directory under
-`~/.var/app/com.valvesoftware.Steam/`.
+Run it as the desktop user, **without** `sudo`, after you close Steam and all
+Steam games. The tool uses filesystem renames only to move `steamapps`, `userdata`,
+and `config` from `~/.local/share/Steam` into Flatpak Steam directories.
+The tool keeps existing Flatpak versions and library registries in a
+timestamped rollback directory under `~/.var/app/com.valvesoftware.Steam/`.
 
-The command deliberately leaves the native Steam runtime files and unrelated
-non-Steam folders such as `~/Games` alone. Add a Flatpak filesystem override
-for `~/Games` separately if Steam shortcuts need it.
+The command keeps runtime files for Steam and folders like `~/Games`.
+Add a Flatpak filesystem override for `~/Games` separately if Steam shortcuts need it.
 
 ### Rollback / recovery
 
@@ -527,15 +514,14 @@ deployment stays bootable:
   existing `/boot/loader/entries/ostree-*.conf` files.
 - The original `/ostree/deploy/<n>/deploy/<commit>.0/` rootfs and
   `/ostree/deploy/<n>/var/` stay on disk.
-- Phase 4 either copies `/var` to `state/os/default/var` or, for a dedicated
-  filesystem/Btrfs subvolume, reuses it in place through a persistent BLS mount
-  argument. The original data is not deleted during migration.
-- We push `Linux Boot Manager` (systemd-boot) to the front of NVRAM `BootOrder`
-  but the `Fedora` shim entry (which boots GRUB → OSTree) remains listed.
+- Phase 4 copies `/var` or reuses it in place. The migration does not delete
+  original data.
+- The tool pushes `Linux Boot Manager` to the front of NVRAM `BootOrder`.
+  The `Fedora` shim entry remains listed.
 
 #### Automatic rollback subcommand
 
-To return to the original OSTree deployment directly from the command line:
+To return to the original OSTree deployment with the command line:
 
 ```bash
 sudo bootc-migrate rollback --reboot
@@ -547,13 +533,13 @@ This verifies prerequisites, re-orders UEFI `BootOrder` so the OSTree entry (Fed
 
 #### Manual firmware recovery
 
-If the system fails to boot into composefs or NVRAM state is interrupted:
+If the system fails to boot into composefs or NVRAM state breaks:
 
 1. Power on; tap the firmware boot-menu key (commonly **F12**, **F8**, or **Esc**).
 2. Pick the `Fedora` entry. GRUB will show the original `ostree:0` menu.
 3. Boot it. You land on the pre-migration system with its `/var` and `/etc` intact.
 
-Or, from a working composefs login, one-shot:
+From a booted composefs session, run:
 
 ```bash
 sudo efibootmgr -v | grep -E 'Fedora|Linux Boot Manager'
@@ -561,11 +547,13 @@ sudo efibootmgr --bootnext <Boot####-of-Fedora>
 sudo systemctl reboot
 ```
 
-Pre-migration diagnostic snapshots and logs are automatically recorded under `/var/log/bootc-migrate/` on every run (`preflight-*.json` and `migration.log`) so boot configuration can be manually reconstructed if NVRAM is ever wiped.
+The tool writes diagnostic snapshots and logs under `/var/log/bootc-migrate/` on
+every run (`preflight-*.json` and `migration.log`). You can reconstruct boot
+settings if NVRAM is lost.
 
-After running `bootc-migrate commit`, the OSTree fallback is removed
-from the ESP and rollback becomes a fresh install. The E2E test exercises the
-full round-trip (composefs → OSTree → composefs) on every run.
+After `bootc-migrate commit` runs, the tool removes the OSTree fallback from
+the ESP. The E2E test exercises the full round-trip (composefs → OSTree → composefs)
+on every run.
 
 ### First-boot repair
 
@@ -581,19 +569,15 @@ repair, run `sudo bootc-migrate repair --disable` before the reboot. See
 Validated end-to-end (21+ assertions per run; see `tests/run-e2e.sh`):
 
 - **/var data** — `/var/lib/*`, `/var/log/*`, `/var/cache/*`, containers,
-  flatpak system installs, machine-id, hidden dirs and symlinks
-- **User homes** — `/var/home/<user>/`, dotfiles, project trees, SSH keys
-  (with `.ssh` mode preserved so StrictModes still accepts your keys),
-  wallpapers, GNOME extensions, dconf user db, glib gsettings keyfile,
-  homebrew Cellar, per-user flatpak installs. When an OSTree source uses
-  `/home -> /var/home` and the target has a native `/home`, both absolute path
-  spellings remain valid through an ordered compatibility bind mount.
+  flatpak system installs, machine-id, hidden dirs and symlinks.
+- **User homes** — `/var/home/<user>/`, dotfiles, project trees, SSH keys,
+  wallpapers, extensions, dconf user db, and flatpak installs.
+  When an OSTree source uses `/home -> /var/home`, a bind mount keeps paths valid.
 - **/etc state** — `/etc/sudoers.d/*`, `/etc/hosts` edits, custom
-  `sshd_config.d/*`, custom config files added under `/etc/`, in-place
-  edits to image-shipped files (`/etc/hostname`), `/etc` symlinks
-- **Accounts** — `/etc/passwd`, `/etc/shadow`, `/etc/group` line-union
-  merged so users you added survive *and* users the target image needs
-  (messagebus, polkitd, …) get added
+  `sshd_config.d/*`, custom config files in `/etc/`, edits to
+  `/etc/hostname`, and `/etc` symlinks.
+- **Accounts** — `/etc/passwd`, `/etc/shadow`, and `/etc/group` line-union
+  merged so existing users survive and the tool adds new system users (messagebus, polkitd).
 
 What's intentionally *not* carried forward:
 
@@ -628,11 +612,9 @@ What's intentionally *not* carried forward:
 - Btrfs or XFS sysroot with reflink/CoW support
 - ESP with ≥150 MB free
 - ≥ `1.1 × ostree_repo_size` free on `/sysroot/composefs` (no reflink: 1.5×)
-- Outbound registry access for `bootc internals cfs oci pull`
-  (Phase 2 fetches the target image; Phases 4–5 read artifacts from the sealed
-  mount, so no runtime registry access is needed after Phase 2). A registry on
-  your own network works too — see
-  [docs/local-images.md](docs/local-images.md)
+- Outbound registry access for `bootc internals cfs oci pull`.
+  (Phase 2 fetches the target image. Later phases read artifacts from the mount.)
+  A local registry works too — see [docs/local-images.md](docs/local-images.md).
 
 ## Building
 
@@ -641,14 +623,14 @@ cargo build --release
 ```
 
 Drops a single binary at `target/release/bootc-migrate`.
-Requires Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
+Needs Rust 1.85+ and a Linux host with `libxkbcommon-dev`.
 
 ## End-to-end tests
 
-A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It either installs an
-OSTree/ComposeFS base image with bootc or, for `E2E_MODE=package-install`,
-boots an official Fedora Cloud or Ubuntu Cloud disk prepared by
-`tests/package-base.sh`, runs the package → OSTree migration, reboots, and
+A QEMU-based E2E harness lives in `tests/run-e2e.sh`. It installs an
+OSTree/ComposeFS base image with bootc. In `E2E_MODE=package-install`, it boots
+an official cloud disk from Fedora or Ubuntu. `tests/package-base.sh` prepares
+that disk. The harness runs the package → OSTree migration, reboots, and
 validates the target plus its `Previous system` entry.
 
 ```
@@ -659,9 +641,9 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `FILESYSTEM`, `E2E_MODE`, `E2E_PACKAGE_BASE`, and
 `E2E_PACKAGE_CROSS_FAMILY`.
 
-The full matrix is authoritative in `.github/e2e-scenarios.yml`. It runs
-nightly; each PR and push to `main` runs a round-robin slice of the gating
-cells (see [docs/testing.md](docs/testing.md)):
+The full matrix is authoritative in `.github/e2e-scenarios.yml`. The nightly
+schedule runs it. Each PR and push to `main` runs a round-robin slice of the
+gating cells (see the [test guide](docs/)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -689,26 +671,23 @@ no fs-verity); btrfs and ext4 seal in place.
 
 ## Layout
 
-A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md) for why):
+A Cargo workspace with three crates (see [ROADMAP.md](ROADMAP.md)):
 
-- `crates/bootc-migrate-core` — the capability library everything else is
-  built from: phases, preflight/readiness, `/etc` merge (`mergetc`), OSTree
-  object scan, registry streaming, transaction (`commit`/`undo`), target-image
-  capability scan (`scan`), cross-base UID/GID remap (`remap`), UEFI boot-entry
-  audit (`boot_audit`), DE detection (`de_detect`) and config stash/restore
-  (`de_migrate`), types.
+- `crates/bootc-migrate-core` — capability library: phases, preflight checks,
+  `/etc` merge (`mergetc`), OSTree scans, stream extraction, transactions,
+  capability scans, UID remaps, UEFI audits, and desktop migrations.
 - `crates/bootc-migrate` — **the protected MVP binary** described
   above. CLI surface (clap), `commit`/`undo`/`rollback` subcommands, the TUI
   wizard. Its E2E cells are untouchable regression gates — this binary's
   behavior doesn't change as new capability lands in `bootc-rebase`.
-- `crates/bootc-rebase` — the universal re-base engine binary; see below.
-- `tests/run-e2e.sh` — QEMU E2E harness exercising both binaries.
+- `crates/bootc-rebase` — the universal binary for re-base; see below.
+- `tests/run-e2e.sh` — QEMU E2E harness that tests both binaries.
 
 ## `bootc-rebase` — the universal re-base engine
 
 `bootc-migrate` above does one proven thing: OSTree → ComposeFS.
-`bootc-rebase` is the generalization — a routing table over
-**backend × strategy** that will eventually cover every bootc re-base shape
+`bootc-rebase` is the general tool. It provides a table over
+**backend × strategy** to cover re-base scenarios
 (same-backend image swaps, cross-backend conversions, bootloader changes,
 cross-distro-family moves, desktop-environment switches). It's newer and less
 battle-tested than the MVP binary; treat subcommands marked *skeleton* or
@@ -721,16 +700,17 @@ cargo build --release -p bootc-rebase
 | Subcommand | What it does | Status |
 |---|---|---|
 | `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. On a package host it also compares installed software with the target image. `--json` includes the software report for machine consumers. | Done |
-| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). On the composefs routes `--accept-cross-base` also accepts a cross-*family* target and, on the conversion route, selects the cross-family `/etc` policy (#256) |
+| `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). `--accept-cross-base` also accepts a cross-family target on all three migration routes and selects the cross-family `/etc` policy (#256/#259) |
 | `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
+| `undo [--reboot]` | Make the staged package-host `Previous system` entry the bootloader default without removing the new bootc deployment. `--dry-run` prints the exact action. | Core rollback support is implemented for the snapshot produced by PackageInstall; engine wiring is tracked separately in #373 |
 | `boot-entries [--json] [--interactive] [--rename-branding] [--apply] [--undo]` | Enumerate and classify UEFI boot entries: dead (loader path missing), generic-label, duplicate, firmware-managed, plus which are protected and why. **Dry-run by default** — a bare invocation is the read-only audit. `--interactive` opens a checklist (protected entries are unselectable), `--rename-branding` proposes renaming the booted entry to `PRETTY_NAME`, `--apply` writes the result to NVRAM after a typed confirmation and a restorable snapshot, and `--undo` replays that snapshot. | Audit and the cleanup **planner** are unit-tested (protections, the last-bootable-entry guard, and the "every entry looks dead ⇒ the ESP is wrong" refusal). The gating OSTree re-base E2E cell also renames a live OVMF NVRAM entry, applies the plan, undoes it, and asserts byte-identical `efibootmgr -v` output. This covers the executor and snapshot restore; it does **not** cover the separate, unimplemented GRUB2→systemd-boot flip ([#31](https://github.com/tuna-os/bootc-migrate/issues/31), [#189](https://github.com/tuna-os/bootc-migrate/issues/189)) |
 | `commit [--apply] [--yes] [--force]` | After a composefs → ostree re-base has booted, remove the composefs state it kept as rollback (#315). **Dry run by default**: checks that the system booted the OSTree deployment the install report names, that the ESP snapshot and a shim/GRUB firmware entry exist, and that every path of the old `/var` is present in the live `/var`. It then lists every path it would delete, with sizes. `--apply` deletes after a typed confirmation. First it copies the install report and ESP snapshot into the live `/var/lib/bootc-rebase`. Then it removes the old `/var`, the composefs store and the composefs deployments. It never touches the OSTree repo, `/boot`, the ESP or NVRAM. `--force` accepts failed checks. It never accepts a composefs boot or a filesystem mounted inside a path to delete. | Unit-tested against a fixture physical root. The non-gating composefs → ostree cell runs the dry run, then `--apply`, then reboots and checks system health |
 | `de-migrate stash\|restore` | Move a user's desktop-environment config (GNOME dconf/gnome-shell, KDE kdeglobals/plasma, COSMIC, niri, XFCE) into or out of a stash directory around a cross-DE re-base — union of paths per issue [#68](https://github.com/tuna-os/bootc-migrate/issues/68), never deletes. `--run-hooks` executes `pre-switch.d`/`post-switch.d` scripts with `REBASE_FROM_DE`/`REBASE_TO_DE`/`REBASE_STASH_DIR`/`REBASE_HOME` set. `--dry-run` previews without touching anything. | Done. Also runs automatically inside `rebase --de-migrate`; this subcommand remains the manual escape hatch for images shipping several desktops (which detection refuses to guess between) |
 | `rebase --de-migrate` | Detects the desktop environment the target image ships (registry-streamed session files, session binaries, and display-manager default session — no `podman pull`) and the one this host runs. When they differ, stashes every human account's outgoing DE config before staging and re-exposes any stash a previous re-base in the other direction left behind, running the `pre-switch.d`/`post-switch.d` hooks around each. | Done, unit-tested; **off by default** — a re-base never touches per-user desktop state unless asked to. The non-gating Bluefin→Aurora E2E cell passes `--de-migrate`, seeds GNOME config, and asserts that the cross-DE plan and stash are created. Because target desktop detection uses the registry scan, this evidence depends on that exploratory cell completing successfully ([#68](https://github.com/tuna-os/bootc-migrate/issues/68), [#188](https://github.com/tuna-os/bootc-migrate/issues/188)) |
 | `migrate-bootloader --to systemd-boot [--promote\|--undo] [--from-image <image>]` | GRUB2 → systemd-boot conversion, standalone of a backend re-base. | **Implemented** — stages every existing deployment on the ESP, installs systemd-boot, creates a one-boot `BootNext` trial without changing `BootOrder`, and installs a `kernel-install` resync hook. If the host does not ship `systemd-bootx64.efi`, `--from-image <image>` supplies a registry-reachable image to extract it from. `--promote` requires that the running system booted from the trial before making it persistent; `--undo` restores the prior firmware order and removes only the migration-owned files. The `bootloader-trial` QEMU cell covers the OVMF BootOrder swap, reboot, resync, promotion, and undo path. |
 
-`rebase`'s routing table (`crates/bootc-migrate-core/src/rebase_plan.rs` is the single
-source of truth the CLI consults before touching anything):
+The `rebase` route table in `crates/bootc-migrate-core/src/rebase_plan.rs` is
+the CLI source of truth before it touches anything:
 
 | From ↓ \ To → | ostree | composefs |
 |---|---|---|
@@ -742,11 +722,22 @@ A **package** source is a system that is not a bootc deployment: a regular
 Fedora, Ubuntu or Arch installation. `rebase` finds one by its rpm, dpkg or
 pacman database when `bootc status` names no deployment and the root has no
 ostree or composefs state. On such a system, `--target-backend auto` (the
-default) selects ostree. `PackageInstall` runs the target image's own `bootc
-install to-existing-root` against the live physical root after readiness and
-hardware gates pass. It snapshots the old kernels, initramfs, BLS entries and
-GRUB configuration before bootc empties `/boot`; the `Previous system` entry
-and guided package-host commit remain tracked by #374 and #378.
+default) selects ostree.
+
+`PackageInstall` runs the target image's own `bootc install to-existing-root`
+against the live physical root after readiness and hardware gates pass. It
+snapshots the old kernels, initramfs, BLS entries, and GRUB configuration.
+Bootc then empties `/boot`. The `Previous system` entry and guided
+package-host commit remain tracked by #374 and #378.
+
+The package-host `/etc` transition is ready for that install engine. It uses
+rpm, dpkg or pacman verification as the missing factory-copy classifier:
+target defaults replace unmodified packaged files, while package-host edits,
+unpackaged files and machine state are carried. A target version displaced by
+a carried edit is kept as `.rebase-new`; human identity records are merged
+target-first and numeric collisions produce an ownership-remap plan. The
+transition also drops the old root mount from `fstab` and rewrites `/home` to
+`/var/home` (#375).
 
 `--dry-run` on a package host also prints a readiness report and the
 hardware report. The report refuses these systems and gives the reason for
@@ -763,37 +754,36 @@ SELinux disabled on the host gives a warning, because the first boot then
 relabels all carried files.
 
 The same registry pass extracts the target's rpm, dpkg or pacman inventory.
-`scan` and package-host `--dry-run` compare it with the live host and group
-packages the image lacks into desktop applications, CLI tools, system services,
-kernel modules and other packages. Suggestions prefer a matching Flathub ID,
-then a known Homebrew formula, a toolbox/distrobox, or a derived image.
-Third-party package repositories and enabled services absent from the target are
-listed separately. An incomplete registry pass suppresses absence claims rather
-than treating missing evidence as an empty image.
+`scan` and package-host `--dry-run` compare this inventory with the live host.
+They group packages that the image lacks into desktop applications, CLI tools,
+system services, kernel modules, and other packages. Suggestions first use a
+matching Flathub ID. They then use a known Homebrew formula, a toolbox or
+distrobox, or a derived image.
+
+The report shows third-party package repositories and enabled services that the
+target lacks. If the registry pass is incomplete, the report does not make
+absence claims. It does not treat missing evidence as an empty image.
 
 A non-dry package-host invocation writes the machine-readable report and its
 Markdown twin to `/var/lib/bootc-rebase/software-report.json` and
 `/var/lib/bootc-rebase/software-report.md`. Dry runs and `scan` print the report
-without changing the host.
+and do not change the host.
 
 ## Roadmap
 
-Full milestone plan, current status per issue, and design decisions live in
-[ROADMAP.md](ROADMAP.md) — start there for "what's next" and "why did we
-choose X over Y."
+Full milestone plans, status per issue, and design decisions live in
+[ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and
-[REVIEW.md](REVIEW.md) for the code-review expectations. Run `just check` (clippy,
-rustfmt, unit tests, shellcheck) before opening a PR. AI-assisted contributions
-should follow [AGENTS.md](AGENTS.md).
+Contributions are welcome. See the [contributor guide](CONTRIBUTING.md) for
+setup and [REVIEW.md](REVIEW.md) for review rules. Run `just check` before you
+open a PR. AI contributions should follow [AGENTS.md](AGENTS.md).
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in this project by you, as defined in the Apache-2.0 license, shall
-be dual-licensed as above, without any additional terms or conditions.
+Any contribution you submit for inclusion in this project is dual-licensed
+as above.
