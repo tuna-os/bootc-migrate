@@ -1,0 +1,28 @@
+# oci-delta 0.1.1 from crates.io, archive SHA-256:
+# 41a05a78259219da6cd834271e9732013caa47e9955b70cf1e4d45f33f42689a
+# Source and tests are unchanged; only zstd's compatible streaming API is upgraded.
+[package]
+name = "oci-delta"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Parse OCI delta artifacts and reconstruct image layers"
+repository = "https://github.com/containers/oci-delta"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+flate2 = "1.0"
+hex = "0.4"
+oci-spec = "0.10"
+openssl = { version = "0.10", default-features = false }
+zstd = "0.14.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "deny"

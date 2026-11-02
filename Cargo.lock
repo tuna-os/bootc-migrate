@@ -212,7 +212,7 @@ dependencies = [
  "tempfile",
  "tini",
  "tokio",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -456,7 +456,7 @@ dependencies = [
  "xxhash-rust",
  "zerocopy",
  "zlink-core",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -500,7 +500,7 @@ dependencies = [
  "tracing",
  "zlink",
  "zlink-core",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -540,7 +540,7 @@ dependencies = [
  "toml",
  "tracing",
  "zlink",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -552,8 +552,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
- "zstd 0.14.3",
- "zstd-safe 8.2.0",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -1378,9 +1378,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libz-sys"
-version = "1.1.29"
+version = "1.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
 dependencies = [
  "cc",
  "pkg-config",
@@ -1493,15 +1493,15 @@ dependencies = [
 [[package]]
 name = "oci-delta"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41a05a78259219da6cd834271e9732013caa47e9955b70cf1e4d45f33f42689a"
 dependencies = [
  "anyhow",
  "flate2",
  "hex",
  "oci-spec",
  "openssl",
- "zstd 0.13.3",
+ "serde_json",
+ "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -2941,29 +2941,11 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
-dependencies = [
- "zstd-safe 7.2.4",
-]
-
-[[package]]
-name = "zstd"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]
