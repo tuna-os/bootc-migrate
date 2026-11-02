@@ -24,6 +24,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ## [Unreleased]
 
+### Security
+- Replace oci-delta's vulnerable zstd 0.13 dependency with zstd 0.14.3 using
+  the unchanged, vendored 0.1.1 source and tests, and update libz-sys to
+  1.1.31 (#471). Advisory checks and the registry-only dependency policy
+  remain enabled. Remove the local patch once upstream publishes a fixed
+  oci-delta release.
+
 ### Added
 - The TUI catalog lists Utah as "Utah (pre-alpha)" with
   `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
