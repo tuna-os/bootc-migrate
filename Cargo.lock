@@ -203,7 +203,7 @@ name = "bootc-migrate-core"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "composefs",
+ "composefs 0.10.0",
  "composefs-oci",
  "rustix",
  "serde",
@@ -439,7 +439,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7678ceb9ed3a1cd466aac8cae1d055d77336c7698fc3d7c8b8cbc5a3a3d33e42"
 dependencies = [
  "anyhow",
- "composefs-ioctls",
+ "composefs-ioctls 0.9.4",
  "fn-error-context",
  "hex",
  "log",
@@ -460,10 +460,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "composefs"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d7e1513737dcf10ea93c116fe1de51f5160d782cdb78cd4399895069338f47b"
+dependencies = [
+ "anyhow",
+ "composefs-ioctls 0.10.0",
+ "fn-error-context",
+ "hex",
+ "log",
+ "once_cell",
+ "openssl",
+ "rand 0.10.2",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "xxhash-rust",
+ "zerocopy",
+ "zstd 0.14.3",
+]
+
+[[package]]
 name = "composefs-ioctls"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aad17a5f5c2c2f667c1c5cb543f6d6a5b5984fab651178eecc62b83008ebe6d"
+dependencies = [
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
+name = "composefs-ioctls"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d1e1dbf64a4a2dda8db3cbdb3109d29274b0cbeedc1ee68fdc8ccfdefc17cb9"
 dependencies = [
  "rustix",
  "thiserror",
@@ -480,7 +516,7 @@ dependencies = [
  "base64",
  "bytes",
  "cap-std-ext",
- "composefs",
+ "composefs 0.9.4",
  "composefs-splitdirfdstream",
  "composefs-storage",
  "containers-image-proxy",
@@ -893,7 +929,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1908,7 +1944,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2185,10 +2221,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
