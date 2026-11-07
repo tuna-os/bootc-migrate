@@ -73,6 +73,7 @@ Also available via just: `just watch log="e2e-luks.log"`
 | composefs → ostree (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | quay.io/fedora/fedora-bootc:44 | btrfs | 40G |
 | Dakota → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
 | composefs image swap (`E2E_MODE=image-swap`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
+| Utah ostree → composefs (non-gating) | utah:testing (OSTree) | utah:testing | btrfs+crypt | 60G |
 | tunaOS desktop ring (`ostree-rebase`, `--de-migrate`, 4 cells, non-gating) | albacore:gnome, :niri, :cosmic, :xfce | the next desktop in the ring | btrfs | 40G |
 | package install: Fedora Cloud → fedora-bootc:43 (exploratory) | official Fedora Cloud | quay.io/fedora/fedora-bootc:43 | btrfs | 40G |
 | package install: Fedora Workstation → Bluefin (exploratory) | official Fedora Cloud + Workstation packages | ghcr.io/projectbluefin/bluefin:stable | btrfs + separate /boot | 60G |

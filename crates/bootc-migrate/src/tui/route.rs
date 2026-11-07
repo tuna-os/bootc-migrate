@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn utah_is_offered_on_composefs_hosts_only() {
+    fn utah_is_offered_on_composefs_hosts_and_to_itself() {
         let cfs = image_choices(Some(Backend::Composefs), Some(DAKOTA_STABLE), "Dakota");
         let utah = cfs
             .iter()
@@ -484,6 +484,29 @@ mod tests {
         assert_eq!(
             on_utah.iter().filter(|c| c.image == UTAH_TESTING).count(),
             1
+        );
+        // An OSTree Utah converts its own image first; no other OSTree host
+        // is offered Utah.
+        let ostree_utah = image_choices(Some(Backend::Ostree), Some(UTAH_TESTING), "Utah");
+        assert_eq!(ostree_utah[0].image, UTAH_TESTING, "{ostree_utah:?}");
+        assert_eq!(ostree_utah[0].backend, "composefs");
+        assert!(ostree_utah[0].note.contains("converts"), "{ostree_utah:?}");
+        assert_eq!(
+            ostree_utah
+                .iter()
+                .filter(|c| c.image == UTAH_TESTING)
+                .count(),
+            1
+        );
+        let ostree_bluefin = image_choices(
+            Some(Backend::Ostree),
+            Some("ghcr.io/projectbluefin/bluefin:stable"),
+            "Bluefin",
+        );
+        assert!(ostree_bluefin.iter().all(|c| c.image != UTAH_TESTING));
+        assert_ne!(
+            ostree_bluefin[0].image,
+            "ghcr.io/projectbluefin/bluefin:stable"
         );
     }
 
