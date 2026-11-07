@@ -200,9 +200,8 @@ The same image, converted in place by CoreMigration. The TUI offers it first
 on an OSTree Utah host. Status: **UNPROVEN** — the `utah -> utah` cell has no
 `main` run.
 
-A local run of that cell (2026-11-06, `btrfs+crypt`, kernel
-`7.2.15-200.fc44`) stopped after Phase 3, before anything was staged: the
-object-store integrity check read one composefs object with `EIO`, and the
+A local run of that cell stopped after Phase 3. It staged no deployment.
+The object-store integrity check read one composefs object with `EIO`. The
 guest kernel logged `fs-verity ... FILE CORRUPTED!`. The object read back
 intact afterwards. On the same kernel, outside the guest:
 
@@ -218,15 +217,13 @@ they do not always succeed. A host with this kernel can pass the integrity
 check and still read `EIO` from its composefs root later.
 
 The cause is in the kernel, not in this tool. Since 7.2, btrfs uses large data
-folios, and `btrfs_verify_folio()` verifies the whole folio when a read has
-filled only part of it. Every kernel from 7.2 on has it (7.3.x and 7.4-rc1
-included). The fix is linux-next `dcf8811f63af` ("btrfs: fix the fsverity
-callback where unexpected range is verified", bootc-dev/bootc#2471); no
-released kernel carries it yet. Fedora's `7.2.15-200.fc44` rebuilt with only
-that patch logged no reports where the stock build logged 18 (VM, 6700 files,
-10 passes each). Utah plans to ship that rebuild from its kernel cache image.
-Until the target image's kernel carries the fix, do not convert a btrfs Utah
-host.
+folios. `btrfs_verify_folio()` verifies the whole folio when a read fills only
+part of it. Every kernel from 7.2 on has it (7.3.x and 7.4-rc1 included).
+The fix is linux-next `dcf8811f63af`.
+Fedora's `7.2.15-200.fc44` rebuilt with only that patch logged no reports. The
+stock build logged 18 reports. Utah plans to ship that rebuild from its kernel
+cache image. Do not convert a btrfs Utah host until the target's kernel
+carries the fix.
 
 ## Maintenance
 
