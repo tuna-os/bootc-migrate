@@ -4,7 +4,8 @@
 # main run a round-robin slice of the gating cells (E2E_ROUND_ROBIN_SIZE,
 # default 2, rotated by the CI run number), so every gating cell is exercised
 # every few runs. TUI changes also require the existing tui-migrate cell.
-# The nightly schedule and workflow_dispatch run every cell, exploratory ones included.
+# The nightly schedule runs alternate cells (index + days-since-epoch even), so each
+# cell runs every other night; workflow_dispatch runs every cell, exploratory ones included.
 - name: bluefin -> dakota (systemd-boot + composefs)
   base: ghcr.io/projectbluefin/bluefin:stable
   target: ghcr.io/projectbluefin/dakota:stable

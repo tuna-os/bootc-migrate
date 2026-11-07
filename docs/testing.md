@@ -11,7 +11,7 @@ automates validation. This text complements `ROADMAP.md` and
 | Unit | Pure logic: parsers, planners, mergetc tables, routing, digest handling, probe classification | `just test` / CI `validate`, every push | seconds |
 | Feature-matrix | Same, with every cargo feature on (`composefs-native` is invisible to the default build) | `just test-all-features` (part of `just check`) | seconds |
 | Integration (host) | Real repositories on loopback filesystems, real podman probes of real images — no VM | developer machines + scheduled canary | minutes |
-| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml, called from ci.yml's `e2e` job: a round-robin slice of the gating cells per PR/push, the full matrix nightly | ~30 min/cell |
+| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml, called from ci.yml's `e2e` job: a round-robin slice of the gating cells per PR/push, alternate cells each night (every cell every other night) | ~30 min/cell |
 
 Rules of thumb:
 
@@ -281,7 +281,8 @@ also need the existing `tui-migrate` cell. The path list is in
 PRs compare the merge base with the head. Pushes compare `before` with `after`.
 
 A failed diff stops the plan. Tests run with `just test-ci-selection`.
-The nightly schedule and `workflow_dispatch` run every cell.
+The nightly schedule runs alternate cells, so each cell runs every other night.
+`workflow_dispatch` runs every cell.
 
 ### Timeouts, and why they are what they are
 
