@@ -34,12 +34,25 @@ def affects_tui(paths):
     return any(path.startswith(TUI_PREFIX) or path in TUI_PATHS for path in paths)
 
 
-def select_scenarios(scenarios, event, run_number, size, paths):
-    """Keep the baseline ordered slice and append at most one existing TUI cell."""
+def select_scenarios(scenarios, event, run_number, size, paths, night=None):
+    """Keep the baseline ordered slice and append at most one existing TUI cell.
+
+    A scheduled run given `night` (days since the epoch) takes alternate cells, so
+    every scenario still runs every other night; a dispatch runs the whole matrix.
+    """
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("scenarios must be a nonempty list")
     if any(not isinstance(cell, dict) or not cell.get("name") for cell in scenarios):
         raise ValueError("each scenario must have a name")
+    if event == "schedule" and night is not None:
+        if type(night) is not int or night < 0:
+            raise ValueError("night must be a non-negative integer")
+        # A one-cell matrix would be empty every other night: run it in full.
+        half = [cell for index, cell in enumerate(scenarios) if (index + night) % 2 == 0]
+        half = half or scenarios
+        return {"scenarios": half,
+                "reason": f"Scheduled alternate-night half of the matrix (night {night}); "
+                          "workflow_dispatch runs every cell"}
     if event in FULL_EVENTS:
         return {"scenarios": scenarios, "reason": "Full scheduled or manual matrix"}
     if event not in {"pull_request", "push"}:
@@ -117,6 +130,8 @@ def main():
     parser.add_argument("--event-path", type=Path, required=True)
     parser.add_argument("--run-number", type=int, required=True)
     parser.add_argument("--size", type=int, required=True)
+    parser.add_argument("--night", type=int, default=None,
+                        help="days since the epoch; a scheduled run then takes alternate cells")
     arguments = parser.parse_args()
     try:
         scenarios = json.load(sys.stdin)
@@ -126,6 +141,7 @@ def main():
         paths = changed_paths(arguments.event, payload)
         plan = select_scenarios(
             scenarios, arguments.event, arguments.run_number, arguments.size, paths,
+            night=arguments.night,
         )
     except subprocess.TimeoutExpired:
         print(f"E2E planning failed: git exceeded {GIT_TIMEOUT_SECONDS} seconds", file=sys.stderr)

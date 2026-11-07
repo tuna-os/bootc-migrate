@@ -75,6 +75,24 @@ class SelectionTests(unittest.TestCase):
                         SCENARIOS,
                     )
 
+    def test_scheduled_nights_alternate_and_cover_every_cell(self):
+        even = selector.select_scenarios(SCENARIOS, "schedule", 1, 2, [], night=20000)["scenarios"]
+        odd = selector.select_scenarios(SCENARIOS, "schedule", 1, 2, [], night=20001)["scenarios"]
+        self.assertEqual(even, SCENARIOS[0::2])
+        self.assertEqual(odd, SCENARIOS[1::2])
+        self.assertEqual(sorted(c["name"] for c in even + odd), sorted(c["name"] for c in SCENARIOS))
+        self.assertEqual(
+            selector.select_scenarios(SCENARIOS, "workflow_dispatch", 1, 2, [], night=20001)["scenarios"],
+            SCENARIOS,
+        )
+        for single_night in (20000, 20001):
+            self.assertEqual(
+                selector.select_scenarios(SCENARIOS[:1], "schedule", 1, 2, [], night=single_night)["scenarios"],
+                SCENARIOS[:1],
+            )
+        with self.assertRaises(ValueError):
+            selector.select_scenarios(SCENARIOS, "schedule", 1, 2, [], night=-1)
+
     def test_invalid_inputs_fail_closed(self):
         for field, value in [
             ("run_number", 0), ("run_number", -1), ("run_number", 1.5),

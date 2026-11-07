@@ -7,7 +7,8 @@ permissions:
 # calls it (workflow_call) so `required-checks` can depend on the matrix
 # directly instead of a runner sitting in a polling loop for hours. Those
 # calls keep a round-robin baseline and add the TUI cell for TUI changes.
-# Nightly and manual runs use every cell. See .github/e2e-scenarios.yml.
+# The nightly runs alternate cells (every cell every other night); manual runs
+# use every cell. See .github/e2e-scenarios.yml.
 on:
   workflow_call: {}
   workflow_dispatch: {}
@@ -72,6 +73,7 @@ jobs:
           set -euo pipefail
           plan=$(yq -o=json -I=0 '.' .github/e2e-scenarios.yml | \
             python3 scripts/select_e2e.py --event "$EVENT" \
+              --night "$(( $(date -u +%s) / 86400 ))" \
               --event-path "$GITHUB_EVENT_PATH" --run-number "$RUN_NUMBER" --size "$SIZE")
           picked=$(jq -c '.scenarios' <<<"$plan")
           echo "scenarios=$picked" >> "$GITHUB_OUTPUT"
