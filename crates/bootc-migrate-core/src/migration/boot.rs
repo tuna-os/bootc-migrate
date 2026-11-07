@@ -140,49 +140,55 @@ pub fn phase5_setup_bootloader(
     } else {
         Path::new("/boot/loader/entries").to_path_buf()
     };
-    if entries_check.exists() {
-        let existing_entries = bootc_bls_entries(&entries_check)?;
-        let entry_targets = existing_entries
-            .iter()
-            .map(|entry| bootc_bls_entry_targets_verity(entry, verity.as_hex()))
-            .collect::<Result<Vec<_>>>()?;
-        let has_current = entry_targets.iter().any(|matches| *matches);
-        let has_stale = entry_targets.iter().any(|matches| !matches);
+    let existing_entries = if entries_check.exists() {
+        bootc_bls_entries(&entries_check)?
+    } else {
+        Vec::new()
+    };
+    let entry_targets = existing_entries
+        .iter()
+        .map(|entry| bootc_bls_entry_targets_verity(entry, verity.as_hex()))
+        .collect::<Result<Vec<_>>>()?;
+    let has_current = entry_targets.iter().any(|matches| *matches);
+    let has_stale = entry_targets.iter().any(|matches| !matches);
 
-        if has_current && !has_stale && !force {
+    if has_current && !has_stale && !force {
+        println!(
+            "A BLS entry for ComposeFS {} already exists in {}. Skipping Phase 5.",
+            verity.as_hex(),
+            entries_check.display()
+        );
+        return Ok(());
+    }
+
+    // Every dry run stops here. This guard once sat inside the check for an
+    // existing entries directory, so a dry run on a host with no systemd-boot
+    // entries yet (every first migration) installed systemd-boot over the
+    // removable-media loader, wrote a BLS entry and changed NVRAM BootOrder.
+    if dry_run {
+        if !existing_entries.is_empty() {
             println!(
-                "A BLS entry for ComposeFS {} already exists in {}. Skipping Phase 5.",
-                verity.as_hex(),
+                "[DRY RUN] Would replace {} existing ComposeFS BLS entry/entries in {}.",
+                existing_entries.len(),
                 entries_check.display()
             );
-            return Ok(());
         }
+        println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
+        return Ok(());
+    }
 
-        if dry_run {
-            if !existing_entries.is_empty() {
-                println!(
-                    "[DRY RUN] Would replace {} existing ComposeFS BLS entry/entries in {}.",
-                    existing_entries.len(),
-                    entries_check.display()
-                );
-            }
-            println!("[DRY RUN] Would mount EROFS, extract boot artifacts, and write BLS entries.");
-            return Ok(());
+    if !existing_entries.is_empty() {
+        if force {
+            println!("[phase5] --force: re-running Phase 5 over existing BLS entries.");
+        } else {
+            println!(
+                "[phase5] replacing stale ComposeFS BLS entry/entries for {}.",
+                verity.as_hex()
+            );
         }
-
-        if !existing_entries.is_empty() {
-            if force {
-                println!("[phase5] --force: re-running Phase 5 over existing BLS entries.");
-            } else {
-                println!(
-                    "[phase5] replacing stale ComposeFS BLS entry/entries for {}.",
-                    verity.as_hex()
-                );
-            }
-            for entry in existing_entries {
-                fs::remove_file(&entry)
-                    .with_context(|| format!("removing stale BLS entry {}", entry.display()))?;
-            }
+        for entry in existing_entries {
+            fs::remove_file(&entry)
+                .with_context(|| format!("removing stale BLS entry {}", entry.display()))?;
         }
     }
 
@@ -1428,6 +1434,80 @@ fn migrate_to_grub2(_sys: &SystemInfo, deps: &[BootDeployment], dry_run: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A first migration has no systemd-boot entries on the ESP yet. Its dry
+    /// run must still stop before Phase 5 installs anything; it once replaced
+    /// `EFI/BOOT/BOOTX64.EFI`, wrote a BLS entry and reordered NVRAM.
+    #[test]
+    fn phase5_dry_run_leaves_a_fresh_esp_untouched() {
+        let esp = tempdir().unwrap();
+        fs::create_dir_all(esp.path().join("EFI/BOOT")).unwrap();
+        fs::write(esp.path().join("EFI/BOOT/BOOTX64.EFI"), "shim").unwrap();
+        let report = PreflightReport {
+            booted_backend: Some(crate::rebase_plan::Backend::Ostree),
+            booted_image: Some("ghcr.io/projectbluefin/utah:testing".into()),
+            pending_transaction: crate::preflight::PendingTransactionStatus::Clean,
+            is_uefi: true,
+            secure_boot: crate::preflight::SecureBootFacts::default(),
+            nvram_writable: true,
+            esp_path: Some(esp.path().to_string_lossy().into_owned()),
+            esp_free_space_bytes: 2 * 1024 * 1024 * 1024,
+            esp_fs_type: Some("vfat".into()),
+            esp_detected: true,
+            supports_reflink: true,
+            is_btrfs: true,
+            fs_type: Some("btrfs".into()),
+            ostree_repo_size_bytes: 0,
+            composefs_free_bytes: 0,
+            container_storage_free_bytes: 0,
+            container_storage_path: "/var/lib/containers/storage".into(),
+            var_is_separate_mount: false,
+            esp_ready_for_systemd_boot: true,
+            systemd_boot_binaries_present: true,
+            grub_tools_available: true,
+            sysroot_was_ro: false,
+        };
+        let verity = VerityDigest::from_hex(&"ab".repeat(64));
+
+        phase5_setup_bootloader(
+            &report,
+            &verity,
+            "ghcr.io/projectbluefin/utah:testing",
+            "dry-run-config",
+            true,
+            "systemd-boot",
+            false,
+        )
+        .unwrap();
+
+        let mut left: Vec<_> = walkdir_relative(esp.path());
+        left.sort();
+        assert_eq!(left, ["EFI", "EFI/BOOT", "EFI/BOOT/BOOTX64.EFI"]);
+        assert_eq!(
+            fs::read_to_string(esp.path().join("EFI/BOOT/BOOTX64.EFI")).unwrap(),
+            "shim"
+        );
+    }
+
+    fn walkdir_relative(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                out.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        out
+    }
 
     #[test]
     fn esp_source_device_skips_autofs_triggers() {
