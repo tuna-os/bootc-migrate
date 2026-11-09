@@ -44,7 +44,7 @@ pub fn merge_etc_files(
     current_dir: &Path,
     new_default_dir: &Path,
     output_dir: &Path,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     merge_etc_files_with_overrides(
         old_default_dir,
         current_dir,
@@ -64,7 +64,7 @@ pub fn merge_etc_files_with_overrides(
     new_default_dir: &Path,
     output_dir: &Path,
     overrides: Option<&EtcDriftManifest>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     merge_etc_files_with_policy(
         old_default_dir,
         current_dir,
@@ -191,7 +191,8 @@ pub fn merge_etc_files_with_policy(
     new_default_dir: &Path,
     output_dir: &Path,
     policy: &MergePolicy<'_>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut carried_paths = Vec::new();
     let overrides = policy.overrides;
     fs::create_dir_all(output_dir)?;
 
@@ -233,6 +234,14 @@ pub fn merge_etc_files_with_policy(
             Some(false) => (new_entry, true),
             None => (if user_modified { cur_entry } else { new_entry }, false),
         };
+        let from_cur = match decision {
+            Some(true) => true,
+            Some(false) => false,
+            None => user_modified,
+        };
+        if from_cur && cur_entry.is_some() {
+            carried_paths.push(rel_path.clone());
+        }
 
         // When a path the user genuinely changed is force-defaulted, keep
         // their version around instead of silently discarding it — mirrors
@@ -328,7 +337,7 @@ pub fn merge_etc_files_with_policy(
         }
     }
 
-    Ok(())
+    Ok(carried_paths)
 }
 
 /// Preserve the user's pre-override version of `rel_path` as a

@@ -275,7 +275,7 @@ fn perform_etc_merge(
             IdentityMergePolicy::SourceFirst
         },
     };
-    crate::mergetc::merge_etc_files_with_policy(
+    let _ = crate::mergetc::merge_etc_files_with_policy(
         &old_default_etc,
         current_etc,
         &new_default_etc,
