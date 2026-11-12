@@ -390,6 +390,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   the target image. openSUSE lost `os-release`, `localtime` and `termcap`
   that way.
 
+### Security
+
+- The lockfile moves `cap-primitives` to 4.0.3 (RUSTSEC-2026-0482),
+  `libz-sys` to 1.1.33 (RUSTSEC-2026-0418), `zstd` 0.13 to 0.13.5
+  (RUSTSEC-2026-0391) and `zstd-safe` 7 to 7.4.1 (RUSTSEC-2026-0395,
+  RUSTSEC-2026-0396).
+
 ---
 
 ## [v0.6.0] — 2026-09-04
