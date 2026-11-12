@@ -452,25 +452,25 @@ can hide what the image ships.
 ### Cross-family targets
 
 `bootc-migrate` reads the target image's `os-release` and package manager
-before staging. Overlapping `ID`/`ID_LIKE` values or the same package manager
-mean one family. Different families (Fedora → openSUSE or Debian) refuse.
+before it stages the image. Shared `ID`/`ID_LIKE` values or the same package
+manager mean one family. Different families (Fedora → openSUSE or Debian) refuse.
 If the target has no known package manager, the tool warns and checks the
 staged `os-release` again.
 
 With `--accept-cross-base`, the conversion route and both `bootc switch` routes
 apply this policy:
 
-- Target files win; source vendor-only files are dropped.
+- Target files win. The tool drops the vendor-only files of the source.
 - Machine state and user-added files stay.
-- Target IDs lead identity merges; source accounts append; `/var` ownership is
-  remapped.
+- For identity merges, target IDs come first and source accounts append. The
+  tool remaps the ownership of files in `/var`.
 - Displaced edits use `<path>.rebase-old`. The tool deletes no files.
 - `OstreeDeploy` applies after OSTree finalization and schedules `/.autorelabel`
   when needed. `ImageSwap` applies after composefs finalization and preserves
   sysusers/ldconfig repair.
 
 If the staged image is cross-family without `--accept-cross-base`, the route
-leaves it staged and unfinalized. Remove it before retrying. Do not reboot.
+leaves it staged and unfinalized. Remove it before you try again. Do not reboot.
 
 The tool prints the report and keeps it across the reboot. A composefs
 deployment stores it at
@@ -478,7 +478,7 @@ deployment stores it at
 The composefs → OSTree route stores it in the new stateroot's
 `/var/lib/bootc-rebase/bootc-migrate-cross-family-report.json`, because an
 OSTree deployment root is immutable after installation. Non-gating E2E cells
-cover conversion and `OstreeDeploy`. See [ROADMAP.md](ROADMAP.md) and issues
+test the conversion route and `OstreeDeploy`. See [ROADMAP.md](ROADMAP.md) and issues
 [#258](https://github.com/tuna-os/bootc-migrate/issues/258),
 [#256](https://github.com/tuna-os/bootc-migrate/issues/256), and
 [#259](https://github.com/tuna-os/bootc-migrate/issues/259).
@@ -728,11 +728,14 @@ Bootc then empties `/boot`. The `Previous system` entry and guided
 package-host commit remain tracked by #374 and #378.
 
 The package-host `/etc` transition is ready for that install engine. It uses
-rpm, dpkg or pacman verification as the missing factory-copy classifier:
-target defaults replace unmodified packaged files, while package-host edits,
-unpackaged files and machine state are carried. A target version displaced by
-a carried edit is kept as `.rebase-new`; human identity records are merged
-target-first and numeric collisions produce an ownership-remap plan. The
+rpm, dpkg or pacman verification as the missing factory-copy classifier.
+Target defaults replace unmodified packaged files. The transition keeps
+package-host edits, unpackaged files and machine state. When a kept edit
+displaces a target version, the transition writes that version to
+`.rebase-new`.
+
+For human accounts, the transition merges the records, and the target records
+come first. Numeric collisions produce an ownership-remap plan. The
 transition also drops the old root mount from `fstab` and rewrites `/home` to
 `/var/home` (#375).
 
