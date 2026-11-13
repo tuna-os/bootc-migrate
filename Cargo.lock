@@ -434,9 +434,9 @@ dependencies = [
 
 [[package]]
 name = "composefs"
-version = "0.9.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7678ceb9ed3a1cd466aac8cae1d055d77336c7698fc3d7c8b8cbc5a3a3d33e42"
+checksum = "4d7e1513737dcf10ea93c116fe1de51f5160d782cdb78cd4399895069338f47b"
 dependencies = [
  "anyhow",
  "composefs-ioctls",
@@ -461,9 +461,9 @@ dependencies = [
 
 [[package]]
 name = "composefs-ioctls"
-version = "0.9.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aad17a5f5c2c2f667c1c5cb543f6d6a5b5984fab651178eecc62b83008ebe6d"
+checksum = "1d1e1dbf64a4a2dda8db3cbdb3109d29274b0cbeedc1ee68fdc8ccfdefc17cb9"
 dependencies = [
  "rustix",
  "thiserror",
@@ -471,9 +471,9 @@ dependencies = [
 
 [[package]]
 name = "composefs-oci"
-version = "0.9.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4f7302aba57a0663087356e3df39d0bf43adf7304d845f5873b5b62974a4123"
+checksum = "6402e698c01b839294a2787128a2357c47886054d6d249136a54c80693fdad22"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -494,6 +494,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar-core",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -505,9 +506,9 @@ dependencies = [
 
 [[package]]
 name = "composefs-splitdirfdstream"
-version = "0.9.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abe821055dd88f7c2d7e3ee8ac1e54be8b646f676d568c1f37e53c606b911f09"
+checksum = "0d9847c8dd85e017d2615c41c46b9af9e7ce3e4f4021b841c6603cc62e184083"
 dependencies = [
  "openssl",
  "rand 0.10.2",
@@ -519,9 +520,9 @@ dependencies = [
 
 [[package]]
 name = "composefs-storage"
-version = "0.9.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "999579b801c75fec30b73eb416f40eff07725432ea704b1fb646ad709a1664ba"
+checksum = "390fac98c3953f41ec4e65aefc303b1a3e5a2c0e739898471b9ea0cc478f5152"
 dependencies = [
  "anyhow",
  "base64",
@@ -611,9 +612,9 @@ dependencies = [
 
 [[package]]
 name = "containers-image-proxy"
-version = "0.11.0"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3246dd5271aa01ab3d2a5346ef5059ff158e135d59da2d5d3a27954c6704f2c"
+checksum = "c4002d7772063a418d9cd5fe413b9fdd8af154ed34606251fde4d4c722234b60"
 dependencies = [
  "cap-std-ext",
  "futures-util",
@@ -2185,7 +2186,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2328,6 +2329,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
@@ -2835,6 +2837,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985eec839aaf2a1270af8f4ebcf63cf9401cfd90f0902f97c28d9f104ffbde72"
 
 [[package]]
+name = "zcheapstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "939f186d9ecebe044315a5cb6d6f78568bbc21152adc954d5a0c2f58bdbc9920"
+
+[[package]]
 name = "zerocopy"
 version = "0.8.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2856,9 +2864,9 @@ dependencies = [
 
 [[package]]
 name = "zlink"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "706aa8f0ed19681e7e95291fdea930a10485257820999797c2eb3051b22e888b"
+checksum = "198be428106fe2987e3c014daadf976120909f4a765587341c9d4c2624912d61"
 dependencies = [
  "zlink-core",
  "zlink-smol",
@@ -2867,9 +2875,9 @@ dependencies = [
 
 [[package]]
 name = "zlink-core"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f77dd6d1dc0520a668f5640fef2d51dc39df22a939e7c827019d0a2edafe3cc"
+checksum = "24a314bfe2e205db0b9cc286abc09b08f34837a06dd709b10ef7cf28bd622e4f"
 dependencies = [
  "futures-util",
  "itoa",
@@ -2882,34 +2890,46 @@ dependencies = [
  "tracing",
  "zlink-idl",
  "zlink-macros",
+ "zlink-names",
 ]
 
 [[package]]
 name = "zlink-idl"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92b13734a025195596b4d855ddf1e66a5e74533564a7d1b0a8d072dd00e2c6ef"
+checksum = "9beafa91ab0672e1a2adc828cac4163152156d54046a0cad298807e290153ccf"
 dependencies = [
- "winnow 0.7.15",
+ "zlink-names",
 ]
 
 [[package]]
 name = "zlink-macros"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c09c588f0c465b5f17ac9ee187b34ca2b73b06c4a67c6170b856387dbede4cc7"
+checksum = "ad68b7baceb8afe7b0b21e408961f6a9d28fe5f10e02b19ef15b7ac3be39fc90"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
- "zlink-idl",
+ "zlink-names",
+]
+
+[[package]]
+name = "zlink-names"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e2019f3c1186761aee19689ba2f99e659ec7f0d637ad1ee96f22a54434e743a"
+dependencies = [
+ "serde",
+ "winnow 0.7.15",
+ "zcheapstr",
 ]
 
 [[package]]
 name = "zlink-smol"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62c3ee8faa545275ae31816a08455209872da51ef8a3cb46dbe97c9a5f838f34"
+checksum = "43f8b15370cace714c53983a91688004407f897eb1cf9b877b3e9df9330a26aa"
 dependencies = [
  "async-broadcast",
  "async-channel",
@@ -2922,9 +2942,9 @@ dependencies = [
 
 [[package]]
 name = "zlink-tokio"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7fbaa1ec22ae711a158c85220007e8d8c5289591577729679215fce3e960747"
+checksum = "a46c4f9f765ecac29e50b21dc5c73185a2c2885a3d1ca1485ff1a97d96bc1538"
 dependencies = [
  "futures-util",
  "pin-project-lite",
