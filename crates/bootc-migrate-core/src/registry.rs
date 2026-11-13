@@ -1361,7 +1361,7 @@ mod tests {
         // happens to look like a tar option (`--to-command=…` runs a command
         // per extracted file).
         let injected = "--to-command=touch /tmp/pwned".to_string();
-        let args = layer_member_args(&["usr/lib/os-release"], &[injected.clone()]);
+        let args = layer_member_args(&["usr/lib/os-release"], std::slice::from_ref(&injected));
 
         // The `--` marker is mandatory and must come first, so GNU tar stops
         // parsing options before it ever sees the untrusted target.
