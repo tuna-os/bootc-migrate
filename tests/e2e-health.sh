@@ -64,12 +64,21 @@ sample_slow_units() {
                     echo "thread ${t##*/} $(cat "$t/comm" 2>/dev/null): wchan=$(cat "$t/wchan" 2>/dev/null)"
                 done
                 echo "kernel stack:"; cat /proc/"$pid"/stack 2>/dev/null
+                # The kernel stack only says "futex"; the user stack names
+                # the lock or call the thread waits on (#368). Dakota ships
+                # eu-stack. No debuginfod: the VM must not wait on the network.
+                if command -v eu-stack >/dev/null 2>&1; then
+                    echo "user stacks (eu-stack):"
+                    DEBUGINFOD_URLS='' timeout 30 eu-stack -m -b -n 40 -p "$pid" 2>&1
+                fi
                 echo "open files:"; ls -l /proc/"$pid"/fd 2>/dev/null | awk 'NR>1 {print $NF}' | sort | uniq -c
                 echo "queued bus activations:"
                 journalctl -b --no-pager -o cat -u dbus.service -u dbus-broker.service 2>/dev/null \
                     | grep -iE 'activat' | tail -8
                 echo "bus names (busctl --system list, unique names omitted):"
                 busctl --system list --no-pager 2>&1 | grep -v '^:'
+                echo "bus connections of MainPID $pid:"
+                busctl --system list --no-pager 2>&1 | awk -v p="$pid" '$2 == p'
                 echo "bus peers:"
                 for p in $BUS_PEERS; do
                     echo "$p: $(systemctl show -p ActiveState,SubState,ExecMainStartTimestampMonotonic "$p" 2>&1 | paste -sd' ')"
