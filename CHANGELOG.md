@@ -69,6 +69,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   this binary or on `PATH`, and surfaces the source-build hint when missing.
 - The Utah testing image is offered on composefs hosts with an honest
   maturity note ("pre-alpha; E2E status unknown", docs/support-matrix.md).
+- After a successful dry-run, the TUI can open a live review in the same
+  session. The live run must match the command of the preview. The wizard
+  clears the old confirmation, `--force` and `--skip-preflight`, and does the
+  readiness checks again. You must type `CONFIRM` again. Unknown and package
+  sources stay preview-only.
 - Standalone `migrate-bootloader` now stages a systemd-boot kernel/BLS
   generation as a one-boot `BootNext` trial while preserving GRUB, with
   guarded `--promote` and `--undo` actions and a `kernel-install` ESP resync
