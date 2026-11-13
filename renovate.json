@@ -3,5 +3,13 @@
   "extends": [
     "local>tuna-os/.github",
     "local>tuna-os/.github"
+  ],
+  "packageRules": [
+    {
+      "description": "composefs and composefs-oci are released in lockstep; a bump of one does not compile without the other.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["composefs", "composefs-oci"],
+      "groupName": "composefs crates"
+    }
   ]
 }
