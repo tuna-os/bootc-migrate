@@ -77,7 +77,11 @@ echo "  system state: ${state:-<none>}"
 case "$state" in
     running) ok "boot completed (running)" ;;
     degraded) echo "  boot completed degraded; failed units are checked below" ;;
-    *) bad "boot did not complete (systemctl is-system-running: ${state:-<none>})" ;;
+    *)
+        bad "boot did not complete (systemctl is-system-running: ${state:-<none>})"
+        # The jobs still queued are what the boot waits on.
+        systemctl list-jobs --no-pager 2>&1 | sed 's/^/    /'
+        ;;
 esac
 
 # ---- 2. Failed units ---------------------------------------------------------
