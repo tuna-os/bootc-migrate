@@ -18,6 +18,7 @@ pub enum PackageDb {
     Rpm,
     Dpkg,
     Pacman,
+    Apk,
 }
 
 impl std::fmt::Display for PackageDb {
@@ -26,6 +27,7 @@ impl std::fmt::Display for PackageDb {
             Self::Rpm => "rpm",
             Self::Dpkg => "dpkg",
             Self::Pacman => "pacman",
+            Self::Apk => "apk",
         })
     }
 }
@@ -67,6 +69,10 @@ const PACKAGE_DBS: &[(PackageDb, &[&str])] = &[
     (PackageDb::Rpm, &["var/lib/rpm", "usr/lib/sysimage/rpm"]),
     (PackageDb::Dpkg, &["var/lib/dpkg/status"]),
     (PackageDb::Pacman, &["var/lib/pacman/local"]),
+    (
+        PackageDb::Apk,
+        &["lib/apk/db/installed", "var/lib/apk/db/installed"],
+    ),
 ];
 
 /// Classify the root at `root` (`/` on a live system). Pure apart from
@@ -93,7 +99,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for p in paths {
             let path = dir.path().join(p);
-            if p.ends_with("status") || p.ends_with("ostree-booted") {
+            if p.ends_with("status") || p.ends_with("ostree-booted") || p.ends_with("installed") {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, b"").unwrap();
             } else {
@@ -112,6 +118,11 @@ mod tests {
             (
                 &["var/lib/pacman/local"],
                 HostKind::Package(PackageDb::Pacman),
+            ),
+            (&["lib/apk/db/installed"], HostKind::Package(PackageDb::Apk)),
+            (
+                &["var/lib/apk/db/installed"],
+                HostKind::Package(PackageDb::Apk),
             ),
             // An ostree image carries an rpm database too: deployment state wins.
             (

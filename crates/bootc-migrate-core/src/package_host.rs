@@ -34,7 +34,12 @@ const PACKAGE_MANAGERS: &[&str] = &[
     "unattended-upgr",
     "pacman",
     "zypper",
+    "apk",
 ];
+
+/// Minimum free space needed on /boot or ESP for the target boot set (kernel,
+/// initramfs, and DTB).
+pub const REQUIRED_BOOT_FREE_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Free space needed on the root filesystem, from the target image's
 /// compressed size: the pulled image plus the deployment written beside the
@@ -44,6 +49,7 @@ pub fn required_free_bytes(compressed_image_bytes: u64) -> u64 {
 }
 
 const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelinuxMode {
@@ -78,11 +84,13 @@ pub struct PackageHostFacts {
     pub boot: Option<MountFacts>,
     pub root_read_only: bool,
     pub free_root_bytes: Option<u64>,
+    pub free_boot_bytes: Option<u64>,
     /// Running package managers, as `name (pid N)`.
     pub package_managers_running: Vec<String>,
     /// pacman's lock file exists (pacman holds no process lock).
     pub pacman_lock: bool,
     pub selinux: SelinuxMode,
+    pub ext4_has_verity: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -111,6 +119,16 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / GIB as f64)
 }
 
+/// Render a size the way an operator reads it: MiB below a gibibyte, so the
+/// /boot budget does not collapse into "0.0 GiB".
+fn size(bytes: u64) -> String {
+    if bytes < GIB {
+        format!("{:.0} MiB", bytes as f64 / MIB as f64)
+    } else {
+        gib(bytes)
+    }
+}
+
 /// Assess `facts` for the package → ostree install. `compressed_image_bytes`
 /// is the target image's size in the registry, when known.
 pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> Vec<Check> {
@@ -122,7 +140,7 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
         None => check(
             "Package manager",
             Refused,
-            "no rpm, dpkg or pacman database: this is not a package-managed system",
+            "no rpm, dpkg, pacman or apk database: this is not a package-managed system",
         ),
     });
 
@@ -168,12 +186,22 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
     };
     out.push(match stack(root) {
         None => check("Root device", Ready, root.source.clone()),
+        Some("LUKS") if facts.boot.as_ref().is_some_and(|b| !b.on_luks && !b.on_lvm) => {
+            check("Root device", Ready, format!("LUKS ({})", root.source))
+        }
+        Some("LUKS") => check(
+            "Root device",
+            Refused,
+            format!(
+                "the root is on LUKS ({}); encrypted roots require an unencrypted /boot or ESP (#305)",
+                root.source
+            ),
+        ),
         Some(kind) => check(
             "Root device",
             Refused,
             format!(
-                "the root is on {kind} ({}); encrypted and LVM roots are not supported \
-                 in the first slice (#305, #370)",
+                "the root is on {kind} ({}); LVM roots are not supported in the first slice (#370)",
                 root.source
             ),
         ),
@@ -191,6 +219,25 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
                 Refused,
                 "the root is the top level of the btrfs filesystem, not a subvolume; \
                  the old and new systems cannot be kept apart (#370)",
+            ),
+        });
+    }
+    if root.fs_type == "ext4" {
+        out.push(match facts.ext4_has_verity {
+            Some(true) => check("ext4 fs-verity", Ready, "verity feature enabled"),
+            Some(false) => check(
+                "ext4 fs-verity",
+                Warning,
+                "root ext4 filesystem does not have the verity feature enabled, so composefs \
+                 cannot seal its images with fs-verity; the migration still works. ext4 \
+                 refuses to add the feature to a mounted filesystem, so enabling it means \
+                 `tune2fs -O verity <device>` offline from a live image",
+            ),
+            None => check(
+                "ext4 fs-verity",
+                Warning,
+                "the root ext4 feature list could not be read (tune2fs missing or failed), \
+                 so whether composefs can seal its images with fs-verity is unknown",
             ),
         });
     }
@@ -217,6 +264,38 @@ pub fn assess(facts: &PackageHostFacts, compressed_image_bytes: Option<u64>) -> 
             format!("separate {} filesystem ({})", b.fs_type, b.source),
         ),
     });
+    if facts.boot.is_some() {
+        out.push(match facts.free_boot_bytes {
+            Some(free) if free >= REQUIRED_BOOT_FREE_BYTES => check(
+                "/boot free space",
+                Ready,
+                format!(
+                    "{} free on /boot (about {} needed)",
+                    size(free),
+                    size(REQUIRED_BOOT_FREE_BYTES)
+                ),
+            ),
+            Some(free) => check(
+                "/boot free space",
+                Refused,
+                format!(
+                    "{} free on /boot, about {} needed for the target boot set (kernel, \
+                     initramfs and DTB). Free up space on /boot and run again.",
+                    size(free),
+                    size(REQUIRED_BOOT_FREE_BYTES)
+                ),
+            ),
+            None => check(
+                "/boot free space",
+                Warning,
+                format!(
+                    "free space on /boot could not be read; the target boot set needs \
+                     about {} free",
+                    size(REQUIRED_BOOT_FREE_BYTES)
+                ),
+            ),
+        });
+    }
 
     out.push(match &facts.home {
         None => check(
@@ -514,11 +593,36 @@ impl PackageHostFacts {
             boot: separate("/boot"),
             root_read_only: root_line.is_some_and(|m| m.options.split(',').any(|o| o == "ro")),
             free_root_bytes: crate::preflight::system_info::get_free_space("/").ok(),
+            free_boot_bytes: crate::preflight::system_info::get_free_space("/boot").ok(),
             package_managers_running: running_package_managers(Path::new("/proc")),
             pacman_lock: Path::new("/var/lib/pacman/db.lck").exists(),
             selinux,
+            ext4_has_verity: root_line.and_then(|m| {
+                if m.fs_type == "ext4" {
+                    check_ext4_verity(&m.source)
+                } else {
+                    None
+                }
+            }),
         }
     }
+}
+
+fn check_ext4_verity(dev: &str) -> Option<bool> {
+    let output = std::process::Command::new("tune2fs")
+        .args(["-l", dev])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(features) = line.strip_prefix("Filesystem features:") {
+            return Some(features.split_whitespace().any(|f| f == "verity"));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -550,18 +654,23 @@ mod tests {
             boot: Some(mount("ext4", "/dev/nvme0n1p2")),
             root_read_only: false,
             free_root_bytes: Some(200 * GIB),
+            free_boot_bytes: Some(GIB),
             package_managers_running: vec![],
             pacman_lock: false,
             selinux: SelinuxMode::Enforcing,
+            ext4_has_verity: Some(true),
         }
     }
 
-    fn verdict_of(checks: &[Check], name: &str) -> Verdict {
+    fn check_named<'a>(checks: &'a [Check], name: &str) -> &'a Check {
         checks
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("no check {name}: {checks:?}"))
-            .verdict
+    }
+
+    fn verdict_of(checks: &[Check], name: &str) -> Verdict {
+        check_named(checks, name).verdict
     }
 
     #[test]
@@ -588,13 +697,14 @@ mod tests {
                 "btrfs, xfs or ext4",
             ),
             (
-                "luks root",
+                "luks root without separate boot",
                 |f| {
                     f.root = Some(MountFacts {
                         on_luks: true,
                         ..mount("xfs", "/dev/mapper/luks-1")
                     });
                     f.home = None;
+                    f.boot = None;
                 },
                 "Root device",
                 "#305",
@@ -785,6 +895,91 @@ mod tests {
         assert_eq!(
             running_package_managers(dir.path()),
             vec!["apt-get (pid 7)".to_string(), "dnf5 (pid 42)".to_string()]
+        );
+    }
+
+    #[test]
+    fn apk_host_is_ready() {
+        let mut f = fedora();
+        f.package_db = Some(PackageDb::Apk);
+        let checks = assess(&f, Some(4 * GIB));
+        assert_eq!(verdict_of(&checks, "Package manager"), Verdict::Ready);
+    }
+
+    #[test]
+    fn luks_root_with_unencrypted_boot_is_ready() {
+        let mut f = fedora();
+        f.root = Some(MountFacts {
+            on_luks: true,
+            ..mount("ext4", "/dev/mapper/root")
+        });
+        f.boot = Some(mount("vfat", "/dev/nvme0n1p1"));
+        let checks = assess(&f, Some(4 * GIB));
+        assert_eq!(verdict_of(&checks, "Root device"), Verdict::Ready);
+    }
+
+    #[test]
+    fn boot_free_space_refusal_reads_in_mib() {
+        let mut f = fedora();
+        f.free_boot_bytes = Some(50 * MIB); // 50 MiB < 200 MiB
+        let checks = assess(&f, Some(4 * GIB));
+        let c = check_named(&checks, "/boot free space");
+        assert_eq!(c.verdict, Verdict::Refused);
+        assert!(
+            c.detail
+                .starts_with("50 MiB free on /boot, about 200 MiB needed"),
+            "MiB-scale sizes must not collapse into GiB: {:?}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn unreadable_boot_free_space_warns_instead_of_passing() {
+        let mut f = fedora();
+        f.free_boot_bytes = None;
+        let checks = assess(&f, Some(4 * GIB));
+        let c = check_named(&checks, "/boot free space");
+        assert_eq!(c.verdict, Verdict::Warning);
+        assert!(c.detail.contains("200 MiB"), "{:?}", c.detail);
+        assert_eq!(decision(&checks), Verdict::Warning);
+    }
+
+    #[test]
+    fn sizes_switch_from_mib_to_gib_at_one_gibibyte() {
+        assert_eq!(size(0), "0 MiB");
+        assert_eq!(size(REQUIRED_BOOT_FREE_BYTES), "200 MiB");
+        assert_eq!(size(GIB - MIB), "1023 MiB");
+        assert_eq!(size(GIB), "1.0 GiB");
+        assert_eq!(size(3 * GIB / 2), "1.5 GiB");
+    }
+
+    #[test]
+    fn ext4_verity_warning() {
+        let mut f = fedora();
+        f.root = Some(mount("ext4", "/dev/nvme0n1p3"));
+        f.ext4_has_verity = Some(false);
+        let checks = assess(&f, Some(4 * GIB));
+        let c = check_named(&checks, "ext4 fs-verity");
+        assert_eq!(c.verdict, Verdict::Warning);
+        assert!(
+            c.detail.contains("offline from a live image"),
+            "advice must be followable on a mounted root: {:?}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn unreadable_ext4_verity_warns_instead_of_passing() {
+        let mut f = fedora();
+        f.root = Some(mount("ext4", "/dev/nvme0n1p3"));
+        f.ext4_has_verity = None;
+        let checks = assess(&f, Some(4 * GIB));
+        let c = check_named(&checks, "ext4 fs-verity");
+        assert_eq!(c.verdict, Verdict::Warning);
+        assert!(
+            c.detail.contains("could not be read"),
+            "an unreadable feature list must say so: {:?}",
+            c.detail
         );
     }
 }

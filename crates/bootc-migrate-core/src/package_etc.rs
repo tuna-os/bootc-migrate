@@ -131,6 +131,17 @@ pub fn parse_pacman_verify(output: &str) -> BTreeSet<String> {
     output.lines().filter_map(etc_path_in_output).collect()
 }
 
+/// Parse `apk audit` output (`U etc/motd`). Every status except `A` (a file
+/// that no package owns) marks a packaged path that differs from the package.
+pub fn parse_apk_audit(output: &str) -> BTreeSet<String> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().split_once(' '))
+        .filter(|(status, _)| *status != "A")
+        .filter_map(|(_, path)| etc_relative(path))
+        .collect()
+}
+
 fn command_text(
     program: &str,
     args: &[&str],
@@ -186,6 +197,16 @@ pub fn gather_live(db: PackageDb) -> PackageEtcInventory {
         PackageDb::Pacman => (
             command_text("pacman", &["-Qlq"], false, false).map(|s| parse_pacman_owned(&s)),
             command_text("pacman", &["-Qkk"], true, true).map(|s| parse_pacman_verify(&s)),
+        ),
+        PackageDb::Apk => (
+            crate::software_report::read_apk_packages(Path::new("/")).map(|packages| {
+                packages
+                    .iter()
+                    .flat_map(|package| package.files.iter())
+                    .filter_map(|path| etc_relative(path))
+                    .collect()
+            }),
+            command_text("apk", &["audit"], true, false).map(|s| parse_apk_audit(&s)),
         ),
     };
     match owned {
@@ -902,6 +923,16 @@ mod tests {
         assert_eq!(
             parse_pacman_verify(output),
             BTreeSet::from(["ssh/sshd_config".into()])
+        );
+    }
+
+    #[test]
+    fn apk_audit_parser_keeps_changed_packaged_paths_only() {
+        let output =
+            "U etc/motd\nA etc/local.d/custom.start\nD etc/issue\nM etc/shadow\nU usr/share/x\n";
+        assert_eq!(
+            parse_apk_audit(output),
+            BTreeSet::from(["motd".into(), "issue".into(), "shadow".into()])
         );
     }
 
