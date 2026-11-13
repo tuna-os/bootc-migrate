@@ -163,7 +163,9 @@ the host system functions. Issue #267 showed D-Bus failures on Dakota → Utah m
 After every reboot into a migrated system, `tests/e2e-health.sh` runs inside the VM:
 
 - The boot must complete with a valid state (`running` or `degraded`).
-- No unit must fail, except patterns in `E2E_ALLOWED_FAILED_UNITS`.
+- No unit must fail, except patterns in `E2E_ALLOWED_FAILED_UNITS`. A cell
+  sets them in `allowed_failed_units`. The reason for each unit is in
+  `.github/e2e-scenarios.yml`.
 - The system bus and logind must answer.
 - For graphical targets, `graphical.target` must be active and the display
   manager must run.
@@ -172,6 +174,11 @@ After every reboot into a migrated system, `tests/e2e-health.sh` runs inside the
   `restorecon -n` must find no new paths to relabel under `/etc` or `/var/home`.
   The harness records existing mislabeled paths before migration.
   Cells can list globs in `allowed_mislabeled` with a reason.
+
+Before each migration, the harness masks `uupd.timer` and
+`fwupd-refresh.timer` on the source. These timers start network updates at
+random times, and the updates can fail in CI or change the deployment. The
+`/etc` merge keeps the masks, so the migrated system does not run them.
 
 In composefs migration mode, the test checks all target `/etc` files.
 Every file shipped by the target in `/etc` must exist after migration.
