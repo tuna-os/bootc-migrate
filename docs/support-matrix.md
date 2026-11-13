@@ -110,9 +110,9 @@ first-boot verification (#379) are not ready.
 | CoreMigration, LUKS root (`xfs+crypt`, TPM2 unlock) | **PROVEN** | gating cell green on main 33891928677 |
 | CoreMigration, LVM-on-LUKS + separate `/var` | **RED** (`main`); green on a PR branch | red on main 33891928677, green on PR 36215098705 — flaky, unproven |
 | CoreMigration, encrypted `/boot` | **UNPROVEN** | E2E layout assumes unencrypted `/boot`; no code, no cell |
-| CoreMigration, btrfs-on-LUKS | **UNPROVEN** | no code path, no cell |
+| CoreMigration, btrfs-on-LUKS | **UNPROVEN** | `utah -> utah` cell (`btrfs+crypt`) added, no `main` run yet; see "Utah OSTree → Utah composefs" below |
 | CoreMigration, detached LUKS headers | **UNPROVEN** | no code path, no cell |
-| CoreMigration, passphrase (non-TPM2) unlock | **UNPROVEN** | harness unlocks via swtpm only; no sendkey/passphrase cell |
+| CoreMigration, passphrase (non-TPM2) unlock | **UNPROVEN** | the `btrfs+crypt` harness layout injects the passphrase over serial; its only cell has no `main` run yet |
 | LUKS of any kind on ImageSwap / OstreeDeploy | **UNPROVEN** | no cells; both rely on `bootc switch` native behavior, which no cell exercises under encryption |
 | LUKS of any kind on OstreeInstall | **UNPROVEN** | `carry_over_kargs` keeps `rd.luks.*`/`rd.lvm.lv` in code, but the route's only cell is RED on unencrypted disk — encryption adds an unproven axis to a red route |
 
@@ -126,9 +126,11 @@ first-boot verification (#379) are not ready.
 
 Consequence for the Utah question: "composefs-capable" in scan output means
 `prepare-root.conf` enables composefs. It does not tell if the initramfs
-has the composefs module (the scan shows that Utah's does not). It also
-tells nothing about UKI. The RED/flaky image-swap cell must show if Utah
-boots as a composefs deployment. Refer to the backend table, not the scan.
+has the composefs module. Images up to the 2026-09 scan had none; the
+`testing-20261106` image ships `bootc-root-setup.service` and
+`/usr/lib/bootc/initramfs-setup` in its initramfs, and systemd-boot. It
+also tells nothing about UKI. Only a cell that boots shows if Utah boots as
+a composefs deployment. Refer to the backend table, not the scan.
 
 ## Package manager (lineage input)
 
@@ -191,6 +193,37 @@ a supported migration. What would promote it, in order:
    non-gating cell as decoration.
 4. LUKS coverage for the route last — it is the hardest axis to add
    (swtpm + fisherman recipe per `docs/luks-testing.md`).
+
+## Utah OSTree → Utah composefs
+
+The same image, converted in place by CoreMigration. The TUI offers it first
+on an OSTree Utah host. Status: **UNPROVEN** — the `utah -> utah` cell has no
+`main` run.
+
+A local run of that cell stopped after Phase 3. It staged no deployment.
+The object-store integrity check read one composefs object with `EIO`. The
+guest kernel logged `fs-verity ... FILE CORRUPTED!`. The object read back
+intact afterwards. On the same kernel, outside the guest:
+
+| Store | Files read per pass | `FILE CORRUPTED` reports per pass (3 passes) | Failed reads |
+|---|---|---|---|
+| btrfs on LUKS (the cell's disk) | 87384 | 15, 12, 12 | 0 |
+| btrfs, no LUKS | 6791 | 0, 1, 1 | 0 |
+| ext4 `-O verity`, same files | 6418 | 0, 0, 0 | 0 |
+
+Most rejected 4 KiB blocks hash to all zeros. The kernel retries a failed
+readahead, so reads usually succeed; the guest's one failed read shows that
+they do not always succeed. A host with this kernel can pass the integrity
+check and still read `EIO` from its composefs root later.
+
+The cause is in the kernel, not in this tool. Since 7.2, btrfs uses large data
+folios. `btrfs_verify_folio()` verifies the whole folio when a read fills only
+part of it. Every kernel from 7.2 on has it (7.3.x and 7.4-rc1 included).
+The fix is linux-next `dcf8811f63af`.
+Fedora's `7.2.15-200.fc44` rebuilt with only that patch logged no reports. The
+stock build logged 18 reports. Utah plans to ship that rebuild from its kernel
+cache image. Do not convert a btrfs Utah host until the target's kernel
+carries the fix.
 
 ## Maintenance
 

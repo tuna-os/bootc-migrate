@@ -29,7 +29,7 @@ on:
         required: false
         default: btrfs
         type: choice
-        options: [btrfs, ext4, xfs, xfs+crypt, xfs+lvm+crypt]
+        options: [btrfs, ext4, xfs, btrfs+crypt, xfs+crypt, xfs+lvm+crypt]
       disk_size:
         description: Guest disk size (ENOSPC shows up as misleading downstream errors)
         required: false

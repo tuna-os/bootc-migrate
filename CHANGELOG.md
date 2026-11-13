@@ -26,8 +26,19 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 
 ### Added
 - The TUI catalog lists Utah as "Utah (pre-alpha)" with
-  `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
-  composefs host, where its routes have E2E coverage.
+  `ghcr.io/projectbluefin/utah:testing`. The picker offers it on a
+  composefs host, where its routes have E2E coverage, and as the first
+  choice on a Utah host that boots OSTree: the conversion keeps the same
+  image and only changes the backend (`bootc-migrate --target-image
+  ghcr.io/projectbluefin/utah:testing`). A new non-gating cell,
+  `utah -> utah (ostree -> composefs, btrfs on LUKS)`, covers that route.
+  Its first local run stopped at the integrity check: Utah's kernel 7.2.15
+  reports intact fs-verity blocks on btrfs as corrupt, so the README warns
+  against converting a btrfs Utah host for now.
+
+- E2E harness: `FILESYSTEM=btrfs+crypt` installs the source on an ESP, an
+  ext4 `/boot` and btrfs inside a passphrase-unlocked LUKS2 root, the
+  layout fisherman gives a desktop install.
 
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
@@ -192,6 +203,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
+
+- `--dry-run` no longer installs systemd-boot. Phase 5 stopped a dry run
+  only when the ESP already had a `loader/entries` directory, and a first
+  migration has none. The dry run then replaced `EFI/BOOT/BOOTX64.EFI` with
+  systemd-boot, copied a kernel and a rebuilt initrd to the ESP, wrote a
+  BLS entry for a placeholder digest, registered "Linux Boot Manager" and
+  put it first in `BootOrder`. Seen on a real Utah laptop.
 
 - The E2E checks after an OSTree → composefs migration look for the staged
   deployment in `/sysroot/state` first again. A lookup added for
