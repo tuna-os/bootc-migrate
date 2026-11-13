@@ -117,7 +117,8 @@ partition**, the tool handles those automatically — see
 [docs/filesystem-support.md](docs/filesystem-support.md).
 
 > **Status: CI-validated, released, and tested on real hardware.**
-> Fourteen E2E scenarios run in CI on every push to `main`.
+> Each push to `main` runs a round-robin slice of the gating E2E cells.
+> The nightly run does all cells in `.github/e2e-scenarios.yml`.
 > Prebuilt binaries are on the [Releases](https://github.com/tuna-os/bootc-migrate/releases) page.
 
 ## Interactive wizard (TUI)
@@ -640,31 +641,36 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 
 The full matrix is authoritative in `.github/e2e-scenarios.yml`. The nightly
 schedule runs it. Each PR and push to `main` runs a round-robin slice of the
-gating cells (see the [test guide](docs/)):
+gating cells (see the [test guide](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
-| composefs migration | bluefin:stable → dakota:stable | btrfs | 40G |
-| composefs migration | bluefin:lts → dakota:stable | ext4 | 40G |
-| composefs migration | bluefin:lts → dakota:stable | xfs+crypt | 40G |
+| composefs migration | bluefin:stable → dakota:stable | btrfs | 60G |
+| composefs migration | bluefin:lts → dakota:stable | ext4 | 60G |
+| composefs migration | bluefin:lts → dakota:stable | xfs+crypt | 60G |
 | composefs migration | bluefin:lts → dakota:stable | xfs+lvm+crypt | 60G |
 | ostree re-base | bluefin:stable → dakota:stable | btrfs | 40G |
+| GRUB2 → systemd-boot trial (`bootloader-trial`) | bluefin:lts → dakota:stable | xfs+crypt | 60G |
 | ostree re-base, GNOME→KDE (non-gating) | bluefin:stable → aurora:stable | btrfs | 40G |
-| TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 40G |
-| cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
-| cross-family migration (non-gating) | bluefin:stable → bootcrew/debian-bootc:latest | btrfs | 40G |
-| cross-family migration (non-gating) | bluefin:stable → bootcrew/ubuntu-bootc:latest | btrfs | 40G |
-| cross-family migration (non-gating) | bluefin:stable → bootcrew/arch-bootc:latest | btrfs | 40G |
+| TUI-driven migration | bluefin:stable → dakota:stable | btrfs | 60G |
+| cross-family ostree re-base (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 40G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/opensuse-bootc:latest | btrfs | 60G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/debian-bootc:latest | btrfs | 60G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/ubuntu-bootc:latest | btrfs | 60G |
+| cross-family migration (non-gating) | bluefin:stable → bootcrew/arch-bootc:latest | btrfs | 60G |
 | composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
-| composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
+| composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 80G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
+| cross-family image swap (non-gating) | tunaOS marlin:gnome → utah:testing | btrfs | 60G |
+| composefs → ostree, Marlin → Utah (non-gating) | tunaOS marlin:gnome → utah:testing | btrfs | 80G |
 | tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |
 | package install (exploratory) | Fedora Cloud → fedora-bootc:43 | btrfs | 40G |
 | package install (exploratory) | Fedora Workstation → Bluefin | btrfs + separate /boot | 60G |
 | package install (exploratory) | Ubuntu Cloud → fedora-bootc:43 (cross-family) | ext4 | 40G |
 
-Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
-no fs-verity); btrfs and ext4 seal in place.
+Of the composefs migration cells, only the two `xfs*` cells exercise the
+ext4-loopback composefs store (XFS has no fs-verity); btrfs and ext4 seal in
+place.
 
 ## Layout
 
