@@ -25,6 +25,8 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Releases include a static `aarch64-unknown-linux-musl` archive so
+  `bootc-rebase` runs directly on postmarketOS-family ARM64 hosts (#461).
 - The TUI catalog lists Utah as "Utah (pre-alpha)" with
   `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
   composefs host, where its routes have E2E coverage.

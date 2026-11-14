@@ -7,17 +7,16 @@ contract, not ceremony.
 
 ## What ships
 
-`release.yml` packages **`bootc-migrate` only** — the OSTree → ComposeFS
-migrator, covered end to end by the E2E matrix including rollback and commit.
+`release.yml` packages both workspace binaries. `bootc-migrate` is the stable
+OSTree → ComposeFS migrator covered end to end by the E2E matrix. `bootc-rebase`
+is included for package-host and backend re-base testing, but remains
+experimental: `ROADMAP.md`'s "Unvalidated paths" table lists the routes that
+still lack live or real-hardware proof.
 
-`bootc-rebase` is **experimental and deliberately unreleased.** Its
-capabilities are implemented, and several are unvalidated on real hardware:
-`ROADMAP.md`'s "Unvalidated paths" table enumerates them, with a tracking
-issue each. Shipping it under the same stability signal as the proven
-migrator would tell users something untrue about paths that rewrite boot
-configuration. Build it from source if you want to try it.
-
-If that changes, change it here first, then in `release.yml`.
+Release archives are built for x86_64 GNU/Linux, aarch64 GNU/Linux, and static
+aarch64 musl. The musl archive is the package-host entry point for
+postmarketOS-family ARM64 systems; it builds OpenSSL from vendored sources so
+the binaries do not require glibc or a host OpenSSL library.
 
 ## Versioning
 
@@ -58,7 +57,7 @@ merging it to `main` is what cuts the release:
 
 On every push to `main`, `release.yml`'s `resolve` job reads that version and
 asks whether `v<version>` is already tagged. If it is, the run stops there and
-costs seconds. If it is not, the same run builds both targets, creates the
+costs seconds. If it is not, the same run builds all three targets, creates the
 GitHub Release — which creates the tag — and pushes the container image.
 
 So the release checklist below is a **pull-request** checklist. By the time a
@@ -75,9 +74,9 @@ inside the single run that made the decision.
 The release job attaches every binary plus SHA-256 checksums in one
 `gh release create`. That single-shot upload is required: this account
 enforces immutable releases, so assets must all be present at creation and
-cannot be added afterwards. `gh release create` creates the tag itself and
-runs only after both builds succeed, so a failed build leaves no orphan tag
-to clean up — re-running the job is the whole recovery.
+cannot be added afterwards. `gh release create` creates the tag itself and runs
+only after all three builds succeed, so a failed build leaves no orphan tag to
+clean up — re-running the job is the whole recovery.
 
 Pushing a `v*` tag by hand still works and is the escape hatch for releasing
 a commit that is not the head of `main`.
