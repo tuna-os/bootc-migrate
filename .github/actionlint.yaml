@@ -9,3 +9,9 @@ self-hosted-runner:
     # (unreleased); drop these once the pinned image includes it.
     - ubuntu-26.04
     - ubuntu-26.04-arm
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # actionlint does not yet parse GitHub's same-repo `$/` uses: form.
+      - 'reusable workflow call "\$/.+" at "uses" is not following the format'
+      - 'specifying action "\$/.+" in invalid format because ref is missing'

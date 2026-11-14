@@ -18,8 +18,8 @@ tempfile.workspace = true
 tini.workspace = true
 # Layer blobs: decode zstd in-process so `tar` never needs an external `zstd`.
 zstd = "0.14"
-composefs = "0.9"
-composefs-oci = { version = "0.9", optional = true }
+composefs = "0.10"
+composefs-oci = { version = "0.10", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
 # postmarketOS-family hosts use musl.  The static release target cannot link

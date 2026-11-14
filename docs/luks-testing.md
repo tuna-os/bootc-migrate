@@ -1,9 +1,9 @@
 # LUKS end-to-end testing
 
-The `xfs+crypt` scenario in `tests/run-e2e.sh` (`just e2e-luks`) exercises a
-LUKS-encrypted root through the full migrate-then-boot pipeline. This note
-records how it is wired and the known gaps, drawing on the reference LUKS e2e
-in [`projectbluefin/dakota-iso`](https://github.com/projectbluefin/dakota-iso)
+The `xfs+crypt` scenario in `tests/run-e2e.sh` (`just e2e-luks`) tests a
+LUKS root through the migrate-then-boot pipeline. This note describes the
+wiring and known gaps from the reference LUKS test in
+[`projectbluefin/dakota-iso`](https://github.com/projectbluefin/dakota-iso)
 (`docs/luks-testing.md`).
 
 ## How this project's LUKS e2e differs from dakota-iso
@@ -15,17 +15,17 @@ in [`projectbluefin/dakota-iso`](https://github.com/projectbluefin/dakota-iso)
 | Unlock at boot | passphrase typed via QEMU monitor `sendkey` (`luks-unlock.py`) | TPM2 auto-unlock (no interaction) |
 | TPM needed | no | **yes — an emulated TPM (swtpm) must be attached to QEMU** |
 
-Because unlock is non-interactive (TPM2), this project does not need the
-monitor/`sendkey` machinery dakota-iso uses; it needs a working vTPM instead.
+Because unlock is automatic (TPM2), this project does not need the
+monitor or `sendkey` tools from dakota-iso. It needs a vTPM device instead.
 
 ## Current flow (`FILESYSTEM=xfs+crypt`)
 
-1. `bootc install to-disk --block-setup tpm2-luks` using the **target (Dakota)**
-   image as the installer — gives a real `/boot` partition, BLS entries, and a
-   LUKS-encrypted root. SSH key is injected by `bootc install`, so the host-side
-   SSH-injection/mount step is skipped (`SKIP_SETUP=true`).
-2. An emulated TPM is started (swtpm) and attached to QEMU via
-   `SWTPM_QEMU_ARGS` so the encrypted root can enroll/unlock at boot.
+1. `bootc install to-disk --block-setup tpm2-luks` uses the **target (Dakota)**
+   image as the installer. This creates a `/boot` partition, BLS entries, and a
+   LUKS root. `bootc install` injects the SSH key. The script skips the step
+   for SSH injection (`SKIP_SETUP=true`).
+2. The test starts an emulated TPM (swtpm). It attaches swtpm to QEMU with
+   `SWTPM_QEMU_ARGS` so root unlocks at boot.
 3. QEMU boots the migrated disk; the test waits for SSH and runs the in-VM and
    host-side validations.
 
@@ -45,12 +45,12 @@ your distro (`dnf install swtpm swtpm-tools` / `apt install swtpm swtpm-tools`).
 
 ## Root cause: install-TPM vs boot-TPM mismatch
 
-`--block-setup tpm2-luks` enrolls the LUKS key against whatever TPM2 is present
-**during install** — currently inside the podman container, which has the host's
-TPM or none at all. The VM then boots with a **different** TPM (the swtpm), so a
-key sealed at install time cannot be unsealed at boot. The swtpm launch (above)
-is **necessary** for any TPM2 unlock but is **not sufficient** on its own: the
-enrolling TPM and the booting TPM must be the same device.
+`--block-setup tpm2-luks` enrolls the LUKS key against the TPM2 present
+**during install**. Now, that is inside the podman container, which uses the host
+TPM or none at all. The VM then boots with a **different** TPM (the swtpm). The
+VM cannot unseal the key at boot. An swtpm instance is necessary for TPM2
+unlock, but it is not enough alone. The install TPM and the boot TPM must be the
+same device.
 
 ## Chosen direction: fisherman's `bootc install to-filesystem` recipe
 
@@ -63,19 +63,18 @@ already-opened mapper.** bootc then only sees `/dev/mapper/root` and writes
 
 ### The bug in the old code
 
-The pre-`4d21116` host-side LUKS code injected `rd.luks.name=$LUKS_MAPPER` (a
-bare mapper name). That is **malformed** — `rd.luks.name` takes `<UUID>=<name>`.
-Fisherman uses `rd.luks.name=<luksUUID>=root`, which maps the container to
-`/dev/mapper/root` so `systemd-gpt-auto-generator` can find root. Without the
-correct form the initrd cannot locate root and hangs ~90 s before an emergency
-shell (projectbluefin/dakota#270) — the single most likely cause of the failures.
+Host-side LUKS code before commit `4d21116` set `rd.luks.name=$LUKS_MAPPER`
+with a bare mapper name. That format is invalid. `rd.luks.name` takes
+`<UUID>=<name>`. Fisherman uses `rd.luks.name=<luksUUID>=root`, which maps the
+container to `/dev/mapper/root`. Without this form, the initrd cannot find the
+root partition. It hangs for 90 seconds before an emergency shell
+(projectbluefin/dakota#270).
 
 ### What we actually test: GRUB source → migrate to systemd-boot
 
-Bluefin and Bluefin-LTS (the migration **source**) use **GRUB**, so the e2e must
-install the source with GRUB + LUKS and then let `bootc-migrate`
-convert it to systemd-boot + composefs. Installing Dakota directly (as the old
-`--block-setup tpm2-luks` path did) does not exercise the tool at all.
+Bluefin and Bluefin-LTS use **GRUB**. The e2e test must install the source with
+GRUB and LUKS. Then `bootc-migrate` converts the system to systemd-boot with
+composefs. Direct install of Dakota does not exercise the tool.
 
 So the source install uses fisherman's **`DiskLayoutGrub`** — three partitions,
 with a **separate unencrypted ext4 `/boot`**:
@@ -121,15 +120,14 @@ sed -i "s|^\(options .*\)|\1 rd.luks.name=$LUKS_UUID=root rd.luks.key=/keys/luks
 umount /mnt/target/boot/efi /mnt/target/boot /mnt/target && cryptsetup luksClose root
 ```
 
-After boot, `bootc-migrate` migrates to systemd-boot + composefs. The
-migration must **carry the `rd.luks.*` args onto the new systemd-boot BLS entries
-it writes on the ESP** — otherwise the post-migration boot loses LUKS unlock.
-This is the key cross-cutting requirement for migrating an encrypted system and
-should be covered by an e2e assertion.
+After boot, `bootc-migrate` migrates to systemd-boot and composefs. The
+migration must copy the `rd.luks.*` args to the new systemd-boot BLS entries on
+the ESP. Without them, the next boot loses LUKS unlock. An e2e assertion must test
+this requirement for encrypted system migrations.
 
 For the production path, replace the keyfile with fisherman's TPM2 enrollment —
 `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 --unlock-key-file=<key>`
-(PCR 7 = Secure Boot state, stable across boots) keeping a passphrase fallback.
+(PCR 7 = Secure Boot state, stable across boots) and keep a passphrase fallback.
 That step needs a real TPM, so it must run in the VM (with the swtpm wired
 above), not in the podman install container.
 
@@ -139,17 +137,16 @@ above), not in the podman install container.
   `swtpm`/`swtpm-tools`. Prerequisite for the TPM2 path.
 - ✅ Root-caused the boot failure: malformed `rd.luks.name`, missing vTPM, and the
   install/boot TPM mismatch.
-- ⏳ Reimplement the `xfs+crypt` install block with the recipe above (replacing
-  `--block-setup tpm2-luks`). This restructures the fragile `SKIP_SETUP` if/else,
-  so do it carefully and validate across QEMU boots; keep the leg
-  `fail-fast: false` until it is green.
+- ⏳ Rewrite the `xfs+crypt` install block with the recipe above instead of
+  `--block-setup tpm2-luks`.
+- Validate changes across QEMU boots. Keep `fail-fast: false` until the test passes.
 
 ## Lessons carried over from dakota-iso
 
-- **Disk images and OVMF VARS live outside `/tmp`.** `/tmp` is often a small
-  tmpfs; large images fill it mid-run and the VM faults with I/O errors. This
-  project keeps `disk.raw` in the workspace dir.
-- **Poll boot/SSH readiness on a short interval** (seconds, not minutes) so a
-  failure surfaces quickly instead of burning the job timeout.
-- **Always capture the serial log** (`qemu.log`) and upload it on failure — for
-  LUKS, the unlock failure mode is a silent hang, only visible on the console.
+- **Keep disk images and OVMF VARS outside `/tmp`.** `/tmp` often uses a small
+  tmpfs. Large images fill it and the VM fails. Keep `disk.raw` in the
+  workspace directory.
+- **Check boot and SSH status on a short interval** (seconds, not minutes).
+  This reports failures fast before the job timeout.
+- **Always record the serial log** (`qemu.log`) and upload it on failure.
+  Failures to unlock LUKS cause a silent hang on the console.

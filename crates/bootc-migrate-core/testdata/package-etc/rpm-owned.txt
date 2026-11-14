@@ -1,0 +1,6 @@
+/etc/nsswitch.conf
+/etc/pam.d/system-auth
+/etc/ssh/sshd_config.d/10-admin.conf
+/etc/NetworkManager/system-connections/office.nmconnection
+/etc/removed.conf
+/usr/bin/bash

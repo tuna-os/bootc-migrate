@@ -170,6 +170,30 @@ pub fn plan_remap(
     plan.steps = build_steps(&plan.remaps, &used_ids);
     plan
 }
+/// Build a cycle-safe plan for caller-selected id changes.  Package-host
+/// identity merging uses this for human-account collisions, where the target
+/// already owns a source user's numeric id.  `used_ids` must include every id
+/// present on either side so scratch allocation cannot collide with one.
+pub fn plan_explicit(
+    mut remaps: Vec<RemapEntry>,
+    used_ids: impl IntoIterator<Item = u32>,
+) -> RemapPlan {
+    let kind = |entry: &RemapEntry| match entry.kind {
+        IdKind::Uid => 0,
+        IdKind::Gid => 1,
+    };
+    remaps.sort_by(|a, b| {
+        (kind(a), a.old_id, a.new_id, &a.name).cmp(&(kind(b), b.old_id, b.new_id, &b.name))
+    });
+    remaps.dedup_by(|a, b| a.kind == b.kind && a.old_id == b.old_id && a.new_id == b.new_id);
+    let used_ids: BTreeSet<u32> = used_ids.into_iter().collect();
+    let steps = build_steps(&remaps, &used_ids);
+    RemapPlan {
+        remaps,
+        steps,
+        ..Default::default()
+    }
+}
 
 /// Diff one id namespace (uids or gids) by account name, recording remaps
 /// and one-sided names. Only system-range ids (and non-root) are remap

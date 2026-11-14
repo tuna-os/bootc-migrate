@@ -1,0 +1,6 @@
+libc-bin: /etc/nsswitch.conf
+libpam-runtime: /etc/pam.d/system-auth
+openssh-server: /etc/ssh/sshd_config.d/10-admin.conf
+network-manager: /etc/NetworkManager/system-connections/office.nmconnection
+example: /etc/removed.conf
+bash: /usr/bin/bash
