@@ -221,8 +221,10 @@ jobs:
         run: |
           # Run as root: loop mounts, podman --privileged, and OVMF VARS pflash
           # all need it. -E so BASE_IMAGE/TARGET_IMAGE flow through.
+          # sudo resets HOME to root, so rustup would look for a default
+          # toolchain in /root/.rustup and fail; point it at the runner's.
           set -o pipefail
-          sudo -E PATH="$PATH" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
+          sudo -E PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       - name: Disk space after E2E
         if: always()

@@ -18,6 +18,12 @@ ignore = [
   # build: a check that fails for a reason nobody in this repo can fix is a
   # check that gets switched back off. Revisit when indicatif drops it.
   { id = "RUSTSEC-2025-0119", reason = "unmaintained, transitive via indicatif, no fix available upstream" },
+  # RUSTSEC-2026-0543: chrono is unmaintained and every release is affected, so
+  # no upgrade clears it. chrono 0.4.45 is pulled in transitively via
+  # composefs-oci / composefs-storage. Same policy as RUSTSEC-2025-0119: record
+  # the exception with a reason instead of leaving CI red for a fix nobody in
+  # this repo can ship. Revisit when composefs drops chrono.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained, transitive via composefs crates, all chrono versions affected, no fix available" },
 ]
 
 [licenses]

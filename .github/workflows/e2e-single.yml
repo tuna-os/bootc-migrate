@@ -233,7 +233,9 @@ jobs:
           E2E_ALLOWED_MISLABELED: ${{ inputs.allowed_mislabeled }}
         run: |
           set -o pipefail
+          # sudo resets HOME to root; keep rustup on the runner's toolchain.
           sudo -E PATH="$PATH" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
             BASE_IMAGE="$BASE_IMAGE" \
             TARGET_IMAGE="$TARGET_IMAGE" \
             E2E_PACKAGE_BASE="$E2E_PACKAGE_BASE" \
