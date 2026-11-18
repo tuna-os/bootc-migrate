@@ -102,7 +102,7 @@ on:
           Runner override for THIS dispatch only (e.g. ubuntu-24.04, or a
           self-hosted label). Leave empty for the same selection
           e2e-tests.yml uses: E2E_RUNSON_SPEC, else E2E_SELF_HOSTED=true,
-          else ubuntu-latest.
+          else ubuntu-24.04.
         required: false
         default: ""
 
@@ -110,7 +110,7 @@ on:
 # selection as e2e-tests.yml (see its job comment and docs/testing.md
 # "KVM runner options"): RunsOn when E2E_RUNSON_SPEC is set, the
 # "kvm"-labelled self-hosted host when E2E_SELF_HOSTED=true, otherwise
-# ubuntu-latest. An explicit `runner` input overrides all three, and
+# ubuntu-24.04. An explicit `runner` input overrides all three, and
 # KVM_E2E_ENABLED='false' kills both workflows.
 jobs:
   e2e:
@@ -121,7 +121,7 @@ jobs:
           (vars.E2E_RUNSON_SPEC != '' &&
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
           (vars.E2E_SELF_HOSTED == 'true' &&
-           fromJSON('["self-hosted", "kvm"]') || 'ubuntu-latest')) }}
+           fromJSON('["self-hosted", "kvm"]') || 'ubuntu-24.04')) }}
     # Match the matrix's per-scenario budget. A cold hosted runner can spend
     # about an hour compiling before the full TUI migration flow starts.
     timeout-minutes: ${{ inputs.mode == 'tui-migrate' && 150 || 90 }}
