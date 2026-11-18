@@ -28,12 +28,14 @@ jobs:
   validate:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v4
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: extractions/setup-just@v4.0.0  # zizmor: ignore[unpinned-tools] installs the latest just release, as before; a pinned version would have no updater
       - name: Run checks (clippy, rustfmt, unit tests, shellcheck)
         run: just check
 
@@ -44,11 +46,13 @@ jobs:
   coverage:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Coverage with regression floor
         run: |
@@ -71,7 +75,9 @@ jobs:
     env:
       SHELLCHECK_OPTS: --severity=warning
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - name: Run actionlint
         # Pinned to a digest, not :latest. This is a required check, so a
         # mutable tag lets an upstream image replacement turn main red with
@@ -90,8 +96,10 @@ jobs:
   cargo-deny:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           log-level: warn
           # `advisories` must be listed explicitly: `cargo deny check` runs
@@ -132,5 +140,4 @@ jobs:
   e2e:
     needs: [validate]
     if: github.event_name != 'workflow_dispatch'
-    uses: ./.github/workflows/e2e-tests.yml
-    secrets: inherit
+    uses: $/.github/workflows/e2e-tests.yml
