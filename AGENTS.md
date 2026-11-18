@@ -62,25 +62,29 @@ Also available via just: `just watch log="e2e-luks.log"`
 
 | Scenario | Base | Target | Filesystem | Disk size |
 |----------|------|--------|------------|-----------|
-| btrfs + composefs | bluefin:stable | dakota:stable | btrfs | 40G |
-| ext4 + composefs | bluefin:lts | dakota:stable | ext4 | 40G |
-| LUKS + xfs | bluefin:lts | dakota:stable | xfs+crypt | 40G |
+| btrfs + composefs | bluefin:stable | dakota:stable | btrfs | 60G |
+| ext4 + composefs | bluefin:lts | dakota:stable | ext4 | 60G |
+| LUKS + xfs | bluefin:lts | dakota:stable | xfs+crypt | 60G |
 | LVM-on-LUKS + /var | bluefin:lts | dakota:stable | xfs+lvm+crypt | 60G |
 | ostree re-base (`E2E_MODE=ostree-rebase`) | bluefin:stable | dakota:stable | btrfs | 40G |
+| GRUB2 → systemd-boot trial (`E2E_MODE=bootloader-trial`) | bluefin:lts | dakota:stable | xfs+crypt | 60G |
 | ostree re-base GNOME -> KDE (non-gating) | bluefin:stable | aurora:stable | btrfs | 40G |
-| TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 40G |
-| Cross-family migration (`E2E_CROSS_FAMILY=1`, 4 cells, non-gating) | bluefin:stable → bootcrew/opensuse-bootc, debian-bootc, ubuntu-bootc, arch-bootc | btrfs | 40G |
+| TUI-driven migration (`E2E_MODE=tui-migrate`) | bluefin:stable | dakota:stable | btrfs | 60G |
+| Cross-family migration (`E2E_CROSS_FAMILY=1`, 5 cells, non-gating) | bluefin:stable → bootcrew/opensuse-bootc via composefs migration and OSTree re-base; → debian-bootc, ubuntu-bootc, arch-bootc via composefs migration | btrfs | 60G (OSTree re-base: 40G) |
 | composefs → ostree (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | quay.io/fedora/fedora-bootc:44 | btrfs | 40G |
-| Dakota → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
+| Dakota → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 80G |
 | composefs image swap (`E2E_MODE=image-swap`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
+| Cross-family image swap (`E2E_MODE=image-swap`, `E2E_CROSS_FAMILY=1`, non-gating) | tunaOS marlin:gnome (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 60G |
+| Marlin → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | tunaOS marlin:gnome (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 80G |
 | tunaOS desktop ring (`ostree-rebase`, `--de-migrate`, 4 cells, non-gating) | albacore:gnome, :niri, :cosmic, :xfce | the next desktop in the ring | btrfs | 40G |
 | package install: Fedora Cloud → fedora-bootc:43 (exploratory) | official Fedora Cloud | quay.io/fedora/fedora-bootc:43 | btrfs | 40G |
 | package install: Fedora Workstation → Bluefin (exploratory) | official Fedora Cloud + Workstation packages | ghcr.io/projectbluefin/bluefin:stable | btrfs + separate /boot | 60G |
 | package install: Ubuntu Cloud → fedora-bootc:43 (exploratory) | official Ubuntu Cloud | quay.io/fedora/fedora-bootc:43 | ext4 | 40G |
 
-Only the two `xfs*` cells exercise the ext4-loopback composefs store (XFS has
-no fs-verity); btrfs and ext4 seal in place. A bug in the loopback path shows
-up as exactly those two cells failing together.
+Of the composefs migration cells, only the two `xfs*` cells exercise the
+ext4-loopback composefs store (XFS has no fs-verity); btrfs and ext4 seal in
+place. A bug in the loopback path shows up as exactly those two cells failing
+together.
 
 All cells run on GitHub-hosted `ubuntu-latest` (which does provide
 `/dev/kvm`); `E2E_SELF_HOSTED=true` or `E2E_RUNSON_SPEC` switch lanes and

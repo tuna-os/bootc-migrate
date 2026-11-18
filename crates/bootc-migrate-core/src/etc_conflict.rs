@@ -10,11 +10,11 @@
 //! keeping the user's Fedora-era file hides that entirely.
 //!
 //! [`crate::mergetc`] implements the same-lineage rule and is called by the
-//! composefs conversion pipeline. The two routes that can actually be
-//! cross-base — `bootc-rebase`'s `OstreeDeploy` and `ImageSwap` — do not call
-//! it: they stage via `bootc switch`, whose native OSTree merge we neither
-//! own nor want to replace. So the policy cannot be a `mergetc` parameter;
-//! there is no call site to pass it through.
+//! composefs conversion pipeline. The same-family cross-base `OstreeDeploy`
+//! route calls this module after `bootc switch` staging. Genuinely
+//! cross-family switch routes use [`crate::cross_family::plan_etc`] and its
+//! post-finalization reconciliation instead: the target-first policy is
+//! broader than this module's same-family conflict pass.
 //!
 //! # The seam this module uses instead
 //!
