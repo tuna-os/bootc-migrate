@@ -219,6 +219,7 @@ check and still read `EIO` from its composefs root later.
 The cause is in the kernel, not in this tool. Since 7.2, btrfs uses large data
 folios. `btrfs_verify_folio()` verifies the whole folio when a read fills only
 part of it. Every kernel from 7.2 on has it (7.3.x and 7.4-rc1 included).
+
 The fix is linux-next `dcf8811f63af`.
 Fedora's `7.2.15-200.fc44` rebuilt with only that patch logged no reports. The
 stock build logged 18 reports. Utah plans to ship that rebuild from its kernel

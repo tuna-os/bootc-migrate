@@ -297,9 +297,9 @@ ghcr.io/projectbluefin/dakota:stable     # default target
 For other OSTree systems (Aurora, Silverblue), set `--target-image` to the
 composefs equivalent.
 
-**Utah on OSTree → Utah on composefs.** Utah ships systemd-boot and bootc's
-composefs initramfs module, so a Utah install that boots OSTree can convert
-to the composefs backend with the image it already runs. The OS stays the
+**Utah on OSTree → Utah on composefs.** Utah ships systemd-boot and the
+composefs initramfs module of bootc. Thus a Utah install that boots OSTree can
+change to the composefs backend with the image that it runs now. The OS stays the
 same; only the backend and the bootloader (GRUB → systemd-boot) change:
 
 ```bash
@@ -312,9 +312,10 @@ first choice. Utah is pre-alpha, and its `utah -> utah` cell (btrfs on
 LUKS) is non-gating.
 
 > ⚠️ **Not on btrfs until the target's kernel has the btrfs fs-verity fix.**
-> Every kernel from 7.2 on rejects intact fs-verity data on btrfs now and then
-> (`fs-verity ... FILE CORRUPTED!` in `dmesg`), and the composefs store is
-> fs-verity data. The first local run of the cell stopped at the integrity
+>
+> On btrfs, kernels from 7.2 on can reject data that is correct
+> (`fs-verity ... FILE CORRUPTED!` in `dmesg`). The composefs
+> store is fs-verity data. The first local run of the cell stopped at the integrity
 > check before it staged anything. A host that gets past the check can still
 > read `EIO` from its root later. The fix is linux-next `dcf8811f63af`; Utah
 > plans to ship Fedora's kernel rebuilt with it. Details and measurements are
