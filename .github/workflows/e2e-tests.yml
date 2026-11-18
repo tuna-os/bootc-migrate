@@ -35,7 +35,10 @@ concurrency:
 #   retry=when-interrupted because these jobs run 30-90 min). The expression
 #   below prepends the per-run routing key RunsOn requires.
 # - E2E_SELF_HOSTED=true → the "kvm"-labelled self-hosted host (kanpur).
-# - neither → ubuntu-latest (the default).
+# - neither → ubuntu-24.04 (the default). Pinned, not ubuntu-latest: on
+#   ubuntu-26.04 the bluefin LTS fixture fails in `bootc install to-disk`
+#   ("bootupd: Listing device /dev/loop0p3: EOF while parsing a value"),
+#   and 26.04's sudo-rs ignores `sudo -E`, which drops DISK_SIZE/E2E_MODE.
 #
 # KVM_E2E_ENABLED is a kill switch, not an enable switch: set it to 'false'
 # to skip the whole matrix (required-checks treats a skipped job as a
@@ -88,7 +91,7 @@ jobs:
       ${{ vars.E2E_RUNSON_SPEC != '' &&
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
           (vars.E2E_SELF_HOSTED == 'true' &&
-           fromJSON('["self-hosted", "kvm"]') || 'ubuntu-latest') }}
+           fromJSON('["self-hosted", "kvm"]') || 'ubuntu-24.04') }}
     # Keep the normal 90-minute failure bound. The TUI cell overrides it:
     # a cold hosted runner spent 62 minutes building before its full
     # migration/reboot/rollback flow started and was killed at 90 minutes.

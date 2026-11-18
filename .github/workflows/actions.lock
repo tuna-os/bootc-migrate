@@ -80,7 +80,7 @@ dependencies:
         repo_id: 288487894
     'dtolnay/rust-toolchain@stable':
         ref: 'stable'
-        commit: 'sha1-b725eda525362e7cf34af9a7243cac1e3f01a7ec'
+        commit: 'sha1-39008827e6b4319a349e9a42dfc90579dd25f1ca'
         owner_id: 1940490
         repo_id: 260749683
     'embarkstudios/cargo-deny-action@v2.1.1':
@@ -112,7 +112,7 @@ dependencies:
         repo_id: 298565987
     'taiki-e/install-action@cargo-llvm-cov':
         ref: 'cargo-llvm-cov'
-        commit: 'sha1-3f7c3597aa4e6da3f315e128de702ce61e7b2877'
+        commit: 'sha1-5b56535d0239d0a46e7d74f64d83712fad4564d3'
         owner_id: 43724913
         repo_id: 442947557
     'ublue-os/remove-unwanted-software@v9':
