@@ -220,11 +220,33 @@ jobs:
         id: e2e
         run: |
           # Run as root: loop mounts, podman --privileged, and OVMF VARS pflash
-          # all need it. -E so BASE_IMAGE/TARGET_IMAGE flow through.
+          # all need it. The matrix config is passed as explicit `env`
+          # arguments: `sudo -E` is ignored on current runner images ("'-E' is
+          # ignored"), which silently dropped DISK_SIZE and E2E_MODE and ran
+          # every cell on run-e2e.sh's 20G / composefs defaults.
           # sudo resets HOME to root, so rustup would look for a default
           # toolchain in /root/.rustup and fail; point it at the runner's.
           set -o pipefail
-          sudo -E PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
+          sudo env \
+            PATH="$PATH" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            BASE_IMAGE="$BASE_IMAGE" \
+            TARGET_IMAGE="$TARGET_IMAGE" \
+            E2E_PACKAGE_BASE="$E2E_PACKAGE_BASE" \
+            E2E_PACKAGE_CROSS_FAMILY="$E2E_PACKAGE_CROSS_FAMILY" \
+            FILESYSTEM="$FILESYSTEM" \
+            DISK_SIZE="$DISK_SIZE" \
+            E2E_MODE="$E2E_MODE" \
+            E2E_DE_MIGRATE="$E2E_DE_MIGRATE" \
+            E2E_BOOT_ENTRIES="$E2E_BOOT_ENTRIES" \
+            E2E_CROSS_FAMILY="$E2E_CROSS_FAMILY" \
+            E2E_EXPECT_OS_ID="$E2E_EXPECT_OS_ID" \
+            E2E_EXPECT_DM="$E2E_EXPECT_DM" \
+            E2E_ALLOWED_FAILED_UNITS="$E2E_ALLOWED_FAILED_UNITS" \
+            E2E_ALLOWED_MISLABELED="$E2E_ALLOWED_MISLABELED" \
+            E2E_DE_FROM="$E2E_DE_FROM" \
+            E2E_CONSOLE_JOURNAL="$E2E_CONSOLE_JOURNAL" \
+            ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       - name: Disk space after E2E
         if: always()
