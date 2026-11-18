@@ -54,8 +54,9 @@ jobs:
     outputs:
       scenarios: ${{ steps.pick.outputs.scenarios }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
+          persist-credentials: false
           # Exact PR/push ranges can span multiple commits.
           fetch-depth: 0
           sparse-checkout: |
@@ -88,10 +89,10 @@ jobs:
           format('runs-on={0}/{1}', github.run_id, vars.E2E_RUNSON_SPEC) ||
           (vars.E2E_SELF_HOSTED == 'true' &&
            fromJSON('["self-hosted", "kvm"]') || 'ubuntu-latest') }}
-    # 90, not 45: the tui-migrate cell measured 65 min end to end on a
-    # hosted runner (image bake + migration + reboot + rollback + commit,
-    # all driven through the wizard).
-    timeout-minutes: 90
+    # Keep the normal 90-minute failure bound. The TUI cell overrides it:
+    # a cold hosted runner spent 62 minutes building before its full
+    # migration/reboot/rollback flow started and was killed at 90 minutes.
+    timeout-minutes: ${{ matrix.scenario.timeout_minutes || 90 }}
     # Exploratory cells opt into continue-on-error via
     # matrix.scenario.allow_failure so they surface signal without failing
     # the run; only the scheduled and dispatched full matrix runs them.
@@ -102,7 +103,9 @@ jobs:
         scenario: ${{ fromJSON(needs.plan.outputs.scenarios) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       # Bluefin + Dakota are ~5 GB each. The default ubuntu-latest runner has
       # ~14 GB free; that plus a 20-60 GB disk.raw (a sparse file that grows
@@ -110,7 +113,7 @@ jobs:
       # local registry can still blow the disk. Same action projectbluefin/
       # bluefin's own e2e uses (ublue-os/remove-unwanted-software).
       - name: Free disk space
-        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+        uses: ublue-os/remove-unwanted-software@v9
 
       # GitHub-hosted runner images ship a podman storage config whose
       # overlay options leave "Native Overlay Diff: false", so every layer
@@ -174,7 +177,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
 
       - name: Build migration binary
         run: cargo build --release && cargo test --release
@@ -249,7 +252,7 @@ jobs:
 
       - name: Upload TUI walkthrough artifacts
         if: ${{ always() && matrix.scenario.mode == 'tui-migrate' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: tui-walkthrough-${{ strategy.job-index }}
           path: |
@@ -293,7 +296,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-logs-${{ strategy.job-index }}
           path: |
