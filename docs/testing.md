@@ -244,7 +244,8 @@ python3 tests/tui-e2e-driver.py --mode wizard-expect-failure \
 ## KVM runner options
 
 The E2E matrix needs `/dev/kvm`. GitHub-hosted Linux runners provide KVM access.
-`ubuntu-latest` is the default runner.
+`ubuntu-24.04` is the default runner.
+The workflows do not use `ubuntu-latest`. On `ubuntu-26.04`, the fixture for bluefin LTS fails.
 
 Both workflows set up podman storage. The runner image defaults to
 `Native Overlay Diff: "false"`, which causes slow layer builds. The step
@@ -255,7 +256,7 @@ Runner precedence:
 
 1. **`E2E_RUNSON_SPEC` set**: RunsOn EC2 runners with nested virtualization.
 2. **`E2E_SELF_HOSTED=true`**: self-hosted runner with KVM.
-3. **Default**: `ubuntu-latest`.
+3. **Default**: `ubuntu-24.04`.
 
 Use `KVM_E2E_ENABLED='false'` to disable the E2E matrix.
 
@@ -268,7 +269,7 @@ Keep these constraints:
 - Use `spot=false`, or `retry=when-interrupted`, because spot interruption is risky for a 30–90-minute cell.
 2. **`E2E_SELF_HOSTED=true`** → the `kvm`-labelled self-hosted host
    (kanpur), the original setup.
-3. **Neither** → `ubuntu-latest`.
+3. **Neither** → `ubuntu-24.04`.
 
 Set `KVM_E2E_ENABLED='false'` to stop the matrix.
 The `required-checks` job treats a skipped `e2e` job as a pass.
