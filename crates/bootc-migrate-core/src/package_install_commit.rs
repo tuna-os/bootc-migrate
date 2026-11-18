@@ -1036,6 +1036,8 @@ mod tests {
             var_copied: true,
             cross_family: false,
             grub_boot_entry: Some("0001".into()),
+            rollback_available: true,
+            rollback_error: None,
         };
         fs::write(
             live_var.join("lib/bootc-rebase").join(PACKAGE_REPORT_FILE),
