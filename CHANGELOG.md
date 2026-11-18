@@ -25,6 +25,8 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
 ## [Unreleased]
 
 ### Added
+- Releases include a static `aarch64-unknown-linux-musl` archive so
+  `bootc-rebase` runs directly on postmarketOS-family ARM64 hosts (#461).
 - The TUI catalog lists Utah as "Utah (pre-alpha)" with
   `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
   composefs host, where its routes have E2E coverage.
@@ -394,6 +396,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   It now resolves the path the link names on the booted system against
   the target image. openSUSE lost `os-release`, `localtime` and `termcap`
   that way.
+
+### Security
+
+- The lockfile moves `cap-primitives` to 4.0.3 (RUSTSEC-2026-0482),
+  `libz-sys` to 1.1.33 (RUSTSEC-2026-0418), `zstd` 0.13 to 0.13.5
+  (RUSTSEC-2026-0391) and `zstd-safe` 7 to 7.4.1 (RUSTSEC-2026-0395,
+  RUSTSEC-2026-0396).
 
 ---
 

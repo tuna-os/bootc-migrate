@@ -163,7 +163,9 @@ the host system functions. Issue #267 showed D-Bus failures on Dakota → Utah m
 After every reboot into a migrated system, `tests/e2e-health.sh` runs inside the VM:
 
 - The boot must complete with a valid state (`running` or `degraded`).
-- No unit must fail, except patterns in `E2E_ALLOWED_FAILED_UNITS`.
+- No unit must fail, except patterns in `E2E_ALLOWED_FAILED_UNITS`. A cell
+  sets them in `allowed_failed_units`. The reason for each unit is in
+  `.github/e2e-scenarios.yml`.
 - The system bus and logind must answer.
 - For graphical targets, `graphical.target` must be active and the display
   manager must run.
@@ -172,6 +174,11 @@ After every reboot into a migrated system, `tests/e2e-health.sh` runs inside the
   `restorecon -n` must find no new paths to relabel under `/etc` or `/var/home`.
   The harness records existing mislabeled paths before migration.
   Cells can list globs in `allowed_mislabeled` with a reason.
+
+Before each migration, the harness masks `uupd.timer` and
+`fwupd-refresh.timer` on the source. These timers start network updates at
+random times, and the updates can fail in CI or change the deployment. The
+`/etc` merge keeps the masks, so the migrated system does not run them.
 
 In composefs migration mode, the test checks all target `/etc` files.
 Every file shipped by the target in `/etc` must exist after migration.
@@ -237,7 +244,8 @@ python3 tests/tui-e2e-driver.py --mode wizard-expect-failure \
 ## KVM runner options
 
 The E2E matrix needs `/dev/kvm`. GitHub-hosted Linux runners provide KVM access.
-`ubuntu-latest` is the default runner.
+`ubuntu-24.04` is the default runner.
+The workflows do not use `ubuntu-latest`. On `ubuntu-26.04`, the fixture for bluefin LTS fails.
 
 Both workflows set up podman storage. The runner image defaults to
 `Native Overlay Diff: "false"`, which causes slow layer builds. The step
@@ -248,7 +256,7 @@ Runner precedence:
 
 1. **`E2E_RUNSON_SPEC` set**: RunsOn EC2 runners with nested virtualization.
 2. **`E2E_SELF_HOSTED=true`**: self-hosted runner with KVM.
-3. **Default**: `ubuntu-latest`.
+3. **Default**: `ubuntu-24.04`.
 
 Use `KVM_E2E_ENABLED='false'` to disable the E2E matrix.
 
@@ -261,7 +269,7 @@ Keep these constraints:
 - Use `spot=false`, or `retry=when-interrupted`, because spot interruption is risky for a 30–90-minute cell.
 2. **`E2E_SELF_HOSTED=true`** → the `kvm`-labelled self-hosted host
    (kanpur), the original setup.
-3. **Neither** → `ubuntu-latest`.
+3. **Neither** → `ubuntu-24.04`.
 
 Set `KVM_E2E_ENABLED='false'` to stop the matrix.
 The `required-checks` job treats a skipped `e2e` job as a pass.

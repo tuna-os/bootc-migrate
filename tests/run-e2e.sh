@@ -212,6 +212,34 @@ capture_health_baseline() {
         2>&1 | sed 's/^/[health-baseline] /' || true
 }
 
+# hold_timed_updaters: just before a migration, mask the timers that start
+# network jobs on their own schedule. The masks are made live, so the /etc
+# merge carries them to the migrated system the way it carries any admin's
+# mask; a mask baked into the base image would be a factory default and the
+# merge would drop it. A missing unit is masked too: the target may ship a
+# timer the source lacks.
+#   uupd.timer           Universal Blue's updater (Bluefin, Aurora, Dakota):
+#                        OnCalendar 04:00 with Persistent=true, so it fires
+#                        during the first minutes of a VM that missed 04:00.
+#                        It runs `bootc upgrade`, flatpak and brew against
+#                        live registries. Its brew step fails on the stub
+#                        keg seeded below (root-owned Cellar/jq), or when the
+#                        prefix owner, UID 1000, has no account. Until its
+#                        third restart it holds the job queue, so
+#                        `is-system-running --wait` times out.
+#   fwupd-refresh.timer  LVFS metadata download, hourly with up to an hour
+#                        of random delay, enabled on Bluefin LTS. It fails
+#                        when LVFS does not answer the runner.
+# Neither result depends on the migration, and an updater that stages a new
+# deployment during the test changes what the later checks inspect.
+hold_timed_updaters() {
+    ssh $SSH_OPTS root@localhost '
+        systemctl mask uupd.timer fwupd-refresh.timer
+        systemctl stop uupd.timer uupd.service fwupd-refresh.timer fwupd-refresh.service 2>/dev/null
+        ls -l /etc/systemd/system/uupd.timer /etc/systemd/system/fwupd-refresh.timer' \
+        2>&1 | sed 's/^/[updaters] /' || true
+}
+
 # seed_ownership_fixture: plant a small tree in /var whose owner, group, and
 # mtime the post-reboot health check re-verifies (e2e-health.sh section 7).
 # The migration carries /var to the new deployment file by file; a copy that
@@ -1788,6 +1816,7 @@ CROSSBASEFIX
     fi
 
     capture_health_baseline
+    hold_timed_updaters
     step "=== ostree-rebase: running bootc-rebase --target-backend ostree ==="
     if ! ssh $SSH_OPTS root@localhost \
         "/var/tmp/bootc-rebase --target-image '$VM_TARGET_IMAGE' --target-backend ostree $REBASE_FLAGS" \
@@ -2480,6 +2509,7 @@ REVFIX
 
     seed_ownership_fixture
     capture_health_baseline
+    hold_timed_updaters
     step "=== composefs-to-ostree: running bootc-rebase --target-backend ostree ==="
     # Streamed, not buffered: the pull and the OSTree import are the long
     # steps of this mode, and a job that times out inside them must leave
@@ -2815,6 +2845,7 @@ SWAPFIX
 
     seed_ownership_fixture
     capture_health_baseline
+    hold_timed_updaters
     step "=== image-swap: running bootc-rebase --target-backend composefs ${SWAP_FLAGS} ==="
     # Streamed, not buffered: the target pull inside `bootc switch` is the
     # long step of this mode, and a job that times out inside it must leave
@@ -3237,6 +3268,7 @@ fi
 
 seed_ownership_fixture
 capture_health_baseline
+hold_timed_updaters
 step "=== Running migration inside VM ==="
 # Clean composefs state from previous runs so free-space check passes.
 if [ "$IS_PACKAGE_INSTALL" != true ]; then
