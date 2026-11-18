@@ -40,10 +40,15 @@ DEFAULT_ALLOWED_FAILED_UNITS=""
 # or more: what its threads wait on in the kernel, and what it holds open.
 # A unit that then times out (geoclue, #368) usually logs nothing itself, and
 # by the time `systemctl status` runs systemd has already killed it.
+# geoclue and power-profiles-daemon stall together, each blocked on a
+# synchronous bus call (#368). The sample also records who owns which bus
+# name, the state of the peers both talk to early, and the queued jobs, so
+# the report names the peer they wait on.
+BUS_PEERS="polkit.service upower.service power-profiles-daemon.service accounts-daemon.service"
 SAMPLES=$(mktemp -d)
 trap 'rm -rf "$SAMPLES"' EXIT
 sample_slow_units() {
-    local u pid since now
+    local u pid since now p
     while :; do
         now=$(cut -d' ' -f1 /proc/uptime); now=${now%.*}
         for u in $(systemctl list-units --state=activating --no-legend --plain 2>/dev/null | awk '{print $1}'); do
@@ -59,10 +64,27 @@ sample_slow_units() {
                     echo "thread ${t##*/} $(cat "$t/comm" 2>/dev/null): wchan=$(cat "$t/wchan" 2>/dev/null)"
                 done
                 echo "kernel stack:"; cat /proc/"$pid"/stack 2>/dev/null
+                # The kernel stack only says "futex"; the user stack names
+                # the lock or call the thread waits on (#368). Dakota ships
+                # eu-stack. No debuginfod: the VM must not wait on the network.
+                if command -v eu-stack >/dev/null 2>&1; then
+                    echo "user stacks (eu-stack):"
+                    DEBUGINFOD_URLS='' timeout 30 eu-stack -m -b -n 40 -p "$pid" 2>&1
+                fi
                 echo "open files:"; ls -l /proc/"$pid"/fd 2>/dev/null | awk 'NR>1 {print $NF}' | sort | uniq -c
                 echo "queued bus activations:"
                 journalctl -b --no-pager -o cat -u dbus.service -u dbus-broker.service 2>/dev/null \
                     | grep -iE 'activat' | tail -8
+                echo "bus names (busctl --system list, unique names omitted):"
+                busctl --system list --no-pager 2>&1 | grep -v '^:'
+                echo "bus connections of MainPID $pid:"
+                busctl --system list --no-pager 2>&1 | awk -v p="$pid" '$2 == p'
+                echo "bus peers:"
+                for p in $BUS_PEERS; do
+                    echo "$p: $(systemctl show -p ActiveState,SubState,ExecMainStartTimestampMonotonic "$p" 2>&1 | paste -sd' ')"
+                done
+                echo "queued jobs:"
+                systemctl list-jobs --no-pager --no-legend 2>&1
             } > "$SAMPLES/$u" 2>&1
         done
         sleep 5
@@ -77,7 +99,11 @@ echo "  system state: ${state:-<none>}"
 case "$state" in
     running) ok "boot completed (running)" ;;
     degraded) echo "  boot completed degraded; failed units are checked below" ;;
-    *) bad "boot did not complete (systemctl is-system-running: ${state:-<none>})" ;;
+    *)
+        bad "boot did not complete (systemctl is-system-running: ${state:-<none>})"
+        # The jobs still queued are what the boot waits on.
+        systemctl list-jobs --no-pager 2>&1 | sed 's/^/    /'
+        ;;
 esac
 
 # ---- 2. Failed units ---------------------------------------------------------
@@ -86,16 +112,25 @@ esac
 # what it waited for shows up in the bus broker's activation messages and in
 # the warnings other units logged while it was starting.
 describe_failed_unit() {
-    local unit=$1 since
+    local unit=$1 since s p peer_args=()
     echo "    --- journal of $unit (this boot)"
     journalctl -b --no-pager -o short-monotonic -n 40 -u "$unit" 2>&1 | sed 's/^/      /'
-    echo "    --- bus activation messages that name ${unit%.service}"
+    # PowerProfiles and PolicyKit1 next to the unit's own: geoclue and
+    # power-profiles-daemon time out together (#368).
+    echo "    --- bus activation messages that name ${unit%.service}, PowerProfiles or PolicyKit1"
     journalctl -b --no-pager -o short-monotonic -u dbus-broker.service -u dbus.service 2>&1 \
-        | grep -iF "${unit%.service}" | tail -15 | sed 's/^/      /'
+        | grep -iE "${unit%.service}|PowerProfiles|PolicyKit1" | tail -20 | sed 's/^/      /'
     if [ -s "$SAMPLES/$unit" ]; then
         echo "    --- $unit while it was still starting"
         sed 's/^/      /' "$SAMPLES/$unit"
     fi
+    # Any other unit that was slow to start at the same time, so a shared
+    # stall shows up in one report.
+    for s in "$SAMPLES"/*; do
+        [ -s "$s" ] && [ "${s##*/}" != "$unit" ] || continue
+        echo "    --- ${s##*/}, also slow to start"
+        sed 's/^/      /' "$s"
+    done
     # geoclue starts its location sources before it takes its bus name, and
     # each source waits on another service over the bus.
     if [ "$unit" = geoclue.service ]; then
@@ -104,6 +139,10 @@ describe_failed_unit() {
             -u ModemManager.service -u avahi-daemon.service -u wpa_supplicant.service 2>&1 \
             | sed 's/^/      /'
     fi
+    echo "    --- journals of the bus peers ($BUS_PEERS)"
+    for p in $BUS_PEERS; do peer_args+=(-u "$p"); done
+    journalctl -b --no-pager -o short-monotonic -n 40 "${peer_args[@]}" 2>&1 \
+        | sed 's/^/      /'
     since=$(systemctl show -p InactiveExitTimestamp --value "$unit" 2>/dev/null)
     if [ -n "$since" ]; then
         echo "    --- warnings from every unit while $unit was starting (since $since)"
@@ -134,6 +173,11 @@ for unit in $failed_units; do
     fi
 done
 [ "$unexpected" = 0 ] && ok "no unexpected failed units"
+
+# Informational only (#368): the kernel has reported fs-verity corruption in
+# some of these boots. Record it; it does not change the result.
+journalctl -k -b --no-pager -o short-monotonic 2>/dev/null | grep -E 'fs-verity.*FILE CORRUPTED' \
+    | sed 's/^/  info: kernel fs-verity: /'
 
 # ---- 3. System bus and logind ----------------------------------------------
 if systemctl is-active --quiet dbus.service || systemctl is-active --quiet dbus-broker.service; then

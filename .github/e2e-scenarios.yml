@@ -5,11 +5,24 @@
 # default 2, rotated by the CI run number), so every gating cell is exercised
 # every few runs. TUI changes also require the existing tui-migrate cell.
 # The nightly schedule and workflow_dispatch run every cell, exploratory ones included.
+#
+# `allowed_failed_units` on the dakota:stable cells: nfs-idmapd, rpc-statd
+# and nfs-mountd fail on every boot of dakota:stable, migrated or freshly
+# installed (projectbluefin/dakota#1875). The image, built 2026-11-06 from
+# 47897d1, enables nfs-server.service in its own /etc, and that unit pulls
+# in all three. statd looks for /var/lib/nfs/sm, but tmpfiles creates
+# /var/lib/nfs/statd/sm. idmapd looks for its plugins in /usr/lib/libnfsidmap,
+# but they are in the multiarch libdir. On some boots mountd starts before
+# anything has written /var/lib/nfs/etab. projectbluefin/dakota#1876 disables
+# nfs-server.service and fixes both paths. Remove these entries when
+# dakota:stable contains it.
 - name: bluefin -> dakota (systemd-boot + composefs)
   base: ghcr.io/projectbluefin/bluefin:stable
   target: ghcr.io/projectbluefin/dakota:stable
   # Display manager tests/e2e-health.sh requires after the reboot.
   expect_dm: gdm
+  # dakota:stable's own NFS failures; see the top of this file.
+  allowed_failed_units: nfs-idmapd.service rpc-statd.service nfs-mountd.service
   # 20G intermittently ENOSPCs during the Phase-2 podman pull
   # (#42-class; last seen 2026-07-19) — match the other cells.
   # #440's free-space check counts five times the target's compressed
@@ -21,6 +34,8 @@
   target: ghcr.io/projectbluefin/dakota:stable
   # Display manager tests/e2e-health.sh requires after the reboot.
   expect_dm: gdm
+  # dakota:stable's own NFS failures; see the top of this file.
+  allowed_failed_units: nfs-idmapd.service rpc-statd.service nfs-mountd.service
   filesystem: ext4
   # 20G default has intermittently ENOSPC'd (#42) — no XFS loopback
   # is involved here (ext4 natively supports fs-verity), so this is
@@ -34,6 +49,8 @@
   target: ghcr.io/projectbluefin/dakota:stable
   # Display manager tests/e2e-health.sh requires after the reboot.
   expect_dm: gdm
+  # dakota:stable's own NFS failures; see the top of this file.
+  allowed_failed_units: nfs-idmapd.service rpc-statd.service nfs-mountd.service
   filesystem: xfs+crypt
   # 40G stopped being enough when dakota:stable grew (10-08): the
   # phase-5 initrd rebuild hit ENOSPC under /var/tmp in 2 of 3 runs.
@@ -45,6 +62,8 @@
   target: ghcr.io/projectbluefin/dakota:stable
   # Display manager tests/e2e-health.sh requires after the reboot.
   expect_dm: gdm
+  # dakota:stable's own NFS failures; see the top of this file.
+  allowed_failed_units: nfs-idmapd.service rpc-statd.service nfs-mountd.service
   filesystem: xfs+lvm+crypt
   # Was 40G — still ENOSPC'd during Phase-2 image pull twice (#42).
   # The BIOS-boot + ESP + separate /boot partitions and the fixed
@@ -69,6 +88,8 @@
   target: ghcr.io/projectbluefin/dakota:stable
   # Display manager tests/e2e-health.sh requires after the reboot.
   expect_dm: gdm
+  # dakota:stable's own NFS failures; see the top of this file.
+  allowed_failed_units: nfs-idmapd.service rpc-statd.service nfs-mountd.service
   mode: ostree-rebase
   # bootc switch pulls the full target into ostree storage inside
   # the guest — needs headroom beyond the tracer's 20G.
@@ -125,6 +146,8 @@
   target: ghcr.io/projectbluefin/dakota:stable
   # Display manager tests/e2e-health.sh requires after the reboot.
   expect_dm: gdm
+  # dakota:stable's own NFS failures; see the top of this file.
+  allowed_failed_units: nfs-idmapd.service rpc-statd.service nfs-mountd.service
   # The composefs pipeline with a simulated human at the
   # controls: tests/tui-e2e-driver.py drives the interactive
   # Config Drift Review checklist (#15) and then the whole

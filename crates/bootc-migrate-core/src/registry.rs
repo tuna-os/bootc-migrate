@@ -271,14 +271,12 @@ pub fn extract_paths_into_dir_with(
         let staging = scratch.path().join("staging");
         let _ = fs::remove_dir_all(&staging);
         fs::create_dir_all(&staging)?;
-        let mut members: Vec<String> = Vec::new();
-        for path in paths {
-            // OCI layer tarballs store paths with or without a leading `./`;
-            // ask for both.
-            members.push(format!("./{path}"));
-            members.push((*path).to_string());
-        }
-        members.extend(link_targets);
+        // `layer_member_args` prefixes the member list with a `--`
+        // end-of-options marker. `link_targets` are read from the untrusted
+        // image's own tar listing, so a crafted hard-link target that begins
+        // with `-` (e.g. `--to-command=…`) must reach tar as a member name,
+        // never as an option that would execute while the image is scanned.
+        let members = layer_member_args(paths, &link_targets);
         // tar exits non-zero when a member is absent from this layer, which
         // is the common case, so its status is deliberately not checked.
         let _ = Command::new("tar")
@@ -425,6 +423,31 @@ fn hardlink_targets_from_listing(listing: &str, paths: &[&str]) -> Vec<String> {
         }
     }
     targets
+}
+
+/// Trailing argument list for the per-layer extraction `tar` call: a `--`
+/// end-of-options marker, then every member name (each wanted path in both its
+/// `./`-prefixed and bare form, then the hard-link targets).
+///
+/// The `--` is a security boundary, not a nicety. `link_targets` are taken
+/// verbatim from the untrusted image's own `tar -tv` listing
+/// ([`hardlink_targets_from_listing`]). GNU tar permutes its arguments, so a
+/// member name beginning with `-` is parsed as an option wherever it appears.
+/// A crafted hard-link whose target is `--to-command=<cmd>` (or
+/// `--checkpoint-action=exec=<cmd>`) would then run `<cmd>` as this process —
+/// root, during the preflight scan, before the user has agreed to anything.
+/// Ending option parsing with `--` turns every such target back into a
+/// (non-matching) member name.
+fn layer_member_args(paths: &[&str], link_targets: &[String]) -> Vec<String> {
+    let mut members = vec!["--".to_string()];
+    for path in paths {
+        // OCI layer tarballs store paths with or without a leading `./`;
+        // ask for both.
+        members.push(format!("./{path}"));
+        members.push((*path).to_string());
+    }
+    members.extend(link_targets.iter().cloned());
+    members
 }
 
 /// Probe paths [`fetch_probe_files_via_registry`] pulls out of a target image.
@@ -1330,6 +1353,29 @@ mod tests {
         fs::write(&blob, &bad).unwrap();
         assert!(decompress_zstd_in_place(&blob).is_err());
         assert!(!blob.with_extension("tar").exists());
+    }
+
+    #[test]
+    fn layer_member_args_end_option_parsing_before_untrusted_targets() {
+        // A hard-link target lifted from an untrusted image's tar listing that
+        // happens to look like a tar option (`--to-command=…` runs a command
+        // per extracted file).
+        let injected = "--to-command=touch /tmp/pwned".to_string();
+        let args = layer_member_args(&["usr/lib/os-release"], std::slice::from_ref(&injected));
+
+        // The `--` marker is mandatory and must come first, so GNU tar stops
+        // parsing options before it ever sees the untrusted target.
+        assert_eq!(args.first().map(String::as_str), Some("--"));
+        let dashdash = args.iter().position(|a| a == "--").unwrap();
+        let injected_at = args.iter().position(|a| *a == injected).unwrap();
+        assert!(
+            dashdash < injected_at,
+            "`--` must precede any untrusted member so it cannot be read as an option"
+        );
+
+        // The legitimate members are still present in both forms.
+        assert!(args.iter().any(|a| a == "./usr/lib/os-release"));
+        assert!(args.iter().any(|a| a == "usr/lib/os-release"));
     }
 
     #[test]
