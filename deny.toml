@@ -18,6 +18,11 @@ ignore = [
   # build: a check that fails for a reason nobody in this repo can fix is a
   # check that gets switched back off. Revisit when indicatif drops it.
   { id = "RUSTSEC-2025-0119", reason = "unmaintained, transitive via indicatif, no fix available upstream" },
+  # RUSTSEC-2026-0543: chrono is unmaintained (chronotope/chrono#1768), every
+  # version is affected and there is no release to move to. It comes in only
+  # through composefs-oci -> ocidir. The move to jiff or time is tracked in
+  # #501; drop this entry when ocidir drops chrono.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no patched release; via composefs-oci -> ocidir — migrate to jiff or time (#501); review by 2027-01-01" },
 ]
 
 [licenses]
