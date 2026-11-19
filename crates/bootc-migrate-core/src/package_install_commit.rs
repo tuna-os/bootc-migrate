@@ -1026,19 +1026,21 @@ mod tests {
         let boot_link = sysroot.join("ostree/boot.1/default/abc/0");
         fs::create_dir_all(boot_link.parent().unwrap()).unwrap();
         symlink(&deploy, &boot_link).unwrap();
-        let report = PackageInstallReport {
-            target_image: "quay.io/fedora/fedora-bootc:43".into(),
-            deployment: deployment.into(),
-            esp: boot.display().to_string(),
-            boot_snapshot_dir: "/var/lib/bootc-rebase/pre-install-boot".into(),
-            boot_snapshot_paths: Vec::new(),
-            etc_merge: "merged".into(),
-            var_copied: true,
-            cross_family: false,
-            grub_boot_entry: Some("0001".into()),
-            rollback_available: true,
-            rollback_error: None,
-        };
+        // Built from JSON, as `find_report` reads it: fields added to the
+        // report later default instead of breaking this fixture.
+        let report: PackageInstallReport = serde_json::from_value(serde_json::json!({
+            "target_image": "quay.io/fedora/fedora-bootc:43",
+            "deployment": deployment,
+            "esp": boot.display().to_string(),
+            "boot_snapshot_dir": "/var/lib/bootc-rebase/pre-install-boot",
+            "boot_snapshot_paths": [],
+            "etc_merge": "merged",
+            "var_copied": true,
+            "cross_family": false,
+            "grub_boot_entry": "0001",
+            "rollback_available": true,
+        }))
+        .unwrap();
         fs::write(
             live_var.join("lib/bootc-rebase").join(PACKAGE_REPORT_FILE),
             serde_json::to_string(&report).unwrap(),
