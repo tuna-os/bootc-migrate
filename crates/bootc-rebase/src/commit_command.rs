@@ -63,6 +63,10 @@ fn run_composefs(args: &CommitArgs) -> Result<()> {
         println!("Not confirmed — nothing was deleted.");
         return Ok(());
     }
+    // The first successful OSTree boot is the trust boundary.  Only now make
+    // its firmware entry persistent; the staging run used BootNext and kept
+    // the composefs loader first for automatic fallback.
+    bootc_migrate_core::ostree_install::promote_committed_boot_order()?;
     let outcome = compose_commit::execute_host(&plan, args.force)?;
     println!(
         "Commit complete: {} path(s) deleted, {} reclaimed. The OSTree deployment is now the \
@@ -106,6 +110,9 @@ fn run_package(args: &CommitArgs) -> Result<()> {
         println!("Not confirmed — nothing was deleted.");
         return Ok(());
     }
+    // Record the commit in the boot transaction before anything is deleted:
+    // the reclaim removes the "Previous system" entry the journal tracks.
+    bootc_migrate_core::ostree_install::record_package_commit()?;
     let outcome = package_commit::execute_host(&plan, args.force)?;
     println!(
         "Commit complete: {} path(s) deleted, {} reclaimed. The old package OS and its \
