@@ -187,5 +187,81 @@ uname() { echo fixture-kernel; }
             self.assertNotIn("REACHED", result.stdout)
 
 
+GEOCLUE_TIMEOUT_LOG = """\
+\x1b[1;34m[e2e 21:16:01] === post-migration: system health ===\x1b[0m
+[health]   system state: degraded
+[health]   boot completed degraded; failed units are checked below
+[health] FAIL: unit failed: geoclue.service
+[health]     \u00d7 geoclue.service - Location Lookup Service
+[health]          Loaded: loaded (/usr/lib/systemd/system/geoclue.service; static)
+[health]          Active: failed (Result: timeout) since Fri 2026-11-13 21:16:58 UTC; 3min ago
+[health]         Process: 3726 ExecStart=/usr/libexec/geoclue (code=killed, signal=TERM)
+[health]   ok: system D-Bus is active
+FAIL: the migrated system is not healthy (see the [health] lines above)
+"""
+
+
+class KnownFlakeSignature(unittest.TestCase):
+    """tests/e2e-known-flake.sh decides the one e2e retry (#368)."""
+
+    def matches(self, log):
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as handle:
+            handle.write(log)
+        try:
+            result = subprocess.run(
+                [str(ROOT / "tests/e2e-known-flake.sh"), handle.name], check=False
+            )
+        finally:
+            os.unlink(handle.name)
+        return result.returncode == 0
+
+    def test_geoclue_timeout_alone_matches(self):
+        self.assertTrue(self.matches(GEOCLUE_TIMEOUT_LOG))
+        # A baseline health report of the same unit does not change that.
+        baseline = "[health] FAIL: unit failed: geoclue.service\n"
+        baseline += "NOTE: baseline health findings above are reported, not asserted\n"
+        self.assertTrue(self.matches(baseline + GEOCLUE_TIMEOUT_LOG))
+
+    def test_every_other_failure_does_not_match(self):
+        verdict = "FAIL: the migrated system is not healthy (see the [health] lines above)\n"
+        cases = {
+            "empty log": "",
+            "passing run": "OK: migration complete\n",
+            "a second failed unit": GEOCLUE_TIMEOUT_LOG.replace(
+                verdict,
+                "[health] FAIL: unit failed: power-profiles-daemon.service\n"
+                "[health]          Active: failed (Result: timeout)\n" + verdict,
+            ),
+            "another unit times out": GEOCLUE_TIMEOUT_LOG.replace(
+                "geoclue.service", "gdm.service"
+            ),
+            "geoclue crashed, not timed out": GEOCLUE_TIMEOUT_LOG.replace(
+                "Result: timeout", "Result: core-dump"
+            ),
+            "another assertion failed": GEOCLUE_TIMEOUT_LOG
+            + "FAIL: /home did not survive\n",
+            "an earlier assertion failed": "FAIL: the ESP was not restored\n"
+            + GEOCLUE_TIMEOUT_LOG,
+            "an error elsewhere": "ERROR: bootc install failed\n" + GEOCLUE_TIMEOUT_LOG,
+            "a panic elsewhere": "thread 'main' panicked at src/main.rs\n"
+            + GEOCLUE_TIMEOUT_LOG,
+            "no health verdict": GEOCLUE_TIMEOUT_LOG.replace(verdict, ""),
+            "health failed for another check": GEOCLUE_TIMEOUT_LOG.replace(
+                verdict, "[health] FAIL: logind does not answer\n" + verdict
+            ),
+        }
+        for name, log in cases.items():
+            with self.subTest(name):
+                self.assertFalse(self.matches(log))
+
+    def test_workflow_retries_once_and_only_on_the_signature(self):
+        workflow = (ROOT / ".github/workflows/e2e-tests.yml").read_text()
+        step = workflow[workflow.index("- name: Run E2E test suite") :]
+        step = step[: step.index("\n      - name:", 1)]
+        self.assertEqual(step.count("./tests/run-e2e.sh"), 2)
+        self.assertIn("./tests/e2e-known-flake.sh e2e-run.log", step)
+        self.assertIn("#368", step)
+
+
 if __name__ == "__main__":
     unittest.main()
