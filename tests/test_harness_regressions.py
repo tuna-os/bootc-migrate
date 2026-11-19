@@ -62,6 +62,16 @@ class HarnessRegressions(unittest.TestCase):
         self.assertIn("e2e-package-manager-edit", marker)
         self.assertIn("package-manager sidecar does not contain the source edit", HARNESS)
 
+    def test_package_install_asserts_status_and_commit_reminder(self):
+        block = HARNESS.split("assert_package_install() {", 1)[1].split("assert_system_healthy", 1)[1]
+        self.assertIn('assert_l2_present "package-install" "/var/tmp/bootc-rebase" "package -> ostree via PackageInstall"', block)
+        self.assertIn("Migrated from:", block)
+        self.assertIn("Rollback entry:", block)
+        self.assertIn("Software report:", block)
+        self.assertIn("run \\`bootc-rebase commit\\` when ready", block)
+        self.assertIn("carried-etc.txt", block)
+        self.assertIn("package-host migration follow-up pending", block)
+
     def test_bootloader_trial_uses_writable_staging_through_undo(self):
         block = HARNESS.split('if [ "$E2E_MODE" = "bootloader-trial" ]; then', 1)[1]
         block = block.split('step "===', 1)[0]

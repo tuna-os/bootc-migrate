@@ -19,6 +19,28 @@ const FRAGMENT_NAME: &str = "85-bootc-migrate";
 pub fn write_migration_reminder(verity_hex: &str) -> Result<()> {
     write_migration_reminder_at(Path::new(MOTD_DIR), verity_hex)
 }
+/// Write the package host migration reminder fragment after a successful migration.
+pub fn write_package_migration_reminder(target_image: &str) -> Result<()> {
+    write_package_migration_reminder_at(Path::new(MOTD_DIR), target_image)
+}
+
+/// Write the package host migration reminder fragment to an explicit `motd_dir`.
+pub fn write_package_migration_reminder_at(motd_dir: &Path, target_image: &str) -> Result<()> {
+    fs::create_dir_all(motd_dir)
+        .with_context(|| format!("failed to create {}", motd_dir.display()))?;
+    let contents = format!(
+        "\n\
+         *** bootc-migrate: this system was migrated from a package host to bootc ({target_image}) ***\n\
+         Once you've confirmed it boots and works, run:\n\
+         \n\
+         \tsudo bootc-rebase commit\n\
+         \n\
+         to finalize the switch and reclaim the old operating system.\n\
+         This reminder clears itself once you do.\n"
+    );
+    fs::write(motd_dir.join(FRAGMENT_NAME), contents)
+        .with_context(|| format!("failed to write reminder to {}", motd_dir.display()))
+}
 
 /// Remove the reminder fragment. Idempotent — a missing file is not an
 /// error, since `commit` may run without a prior reminder ever having been
@@ -68,6 +90,21 @@ mod tests {
         let contents = fs::read_to_string(&fragment).unwrap();
         assert!(contents.contains("deadbeef"));
         assert!(contents.contains("bootc-migrate commit"));
+
+        clear_migration_reminder_at(&motd_dir).unwrap();
+        assert!(!fragment.exists());
+    }
+    #[test]
+    fn write_package_migration_reminder_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let motd_dir = tmp.path().join("motd.d");
+
+        write_package_migration_reminder_at(&motd_dir, "quay.io/fedora/fedora-bootc:43").unwrap();
+        let fragment = motd_dir.join(FRAGMENT_NAME);
+        assert!(fragment.exists());
+        let contents = fs::read_to_string(&fragment).unwrap();
+        assert!(contents.contains("quay.io/fedora/fedora-bootc:43"));
+        assert!(contents.contains("bootc-rebase commit"));
 
         clear_migration_reminder_at(&motd_dir).unwrap();
         assert!(!fragment.exists());
