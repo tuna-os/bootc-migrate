@@ -145,9 +145,11 @@ tool does not support a return from ComposeFS to OSTree.
 
 The wizard starts in dry-run mode. Press Enter to accept each screen, use ↑/↓
 to choose an image, and press Space on the options page to change a setting.
-For a live run, turn off dry-run there. The final review needs `CONFIRM` and
-Enter before anything changes. You need root for a migration, but you can
-browse the catalog without it.
+For a live run, turn off dry-run there, or press Enter after a successful
+dry-run to review and apply in the same session. The wizard then clears the
+old confirmation and does the readiness checks again. The final review needs
+`CONFIRM` and Enter before anything changes. You need root for a migration,
+but you can browse the catalog without it.
 
 ## Coming from a regular (non-bootc) install
 
@@ -299,6 +301,30 @@ ghcr.io/projectbluefin/dakota:stable     # default target
 
 For other OSTree systems (Aurora, Silverblue), set `--target-image` to the
 composefs equivalent.
+
+**Utah on OSTree → Utah on composefs.** Utah ships systemd-boot and the
+composefs initramfs module of bootc. Thus a Utah install that boots OSTree can
+change to the composefs backend with the image that it runs now. The OS stays the
+same; only the backend and the bootloader (GRUB → systemd-boot) change:
+
+```bash
+sudo bootc-migrate --target-image ghcr.io/projectbluefin/utah:testing --dry-run
+sudo bootc-migrate --target-image ghcr.io/projectbluefin/utah:testing
+```
+
+On such a host, `sudo bootc-migrate tui` offers this conversion as the
+first choice. Utah is pre-alpha, and its `utah -> utah` cell (btrfs on
+LUKS) is non-gating.
+
+> ⚠️ **Not on btrfs until the target's kernel has the btrfs fs-verity fix.**
+>
+> On btrfs, kernels from 7.2 on can reject data that is correct
+> (`fs-verity ... FILE CORRUPTED!` in `dmesg`). The composefs
+> store is fs-verity data. The first local run of the cell stopped at the integrity
+> check before it staged anything. A host that gets past the check can still
+> read `EIO` from its root later. The fix is linux-next `dcf8811f63af`; Utah
+> plans to ship Fedora's kernel rebuilt with it. Details and measurements are
+> in [docs/support-matrix.md](docs/support-matrix.md#utah-ostree--utah-composefs).
 
 The target must share a base lineage with the source: its `ID_LIKE` must
 overlap yours, or both images must ship the same package manager. Bluefin,
@@ -645,8 +671,9 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `E2E_PACKAGE_CROSS_FAMILY`.
 
 The full matrix is authoritative in `.github/e2e-scenarios.yml`. The nightly
-schedule runs it. Each PR and push to `main` runs a round-robin slice of the
-gating cells (see the [test guide](docs/testing.md)):
+schedule runs alternate cells, so each cell runs every other night. Each PR
+and push to `main` runs a round-robin slice of the gating cells (see the
+[test guide](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
@@ -666,6 +693,7 @@ gating cells (see the [test guide](docs/testing.md)):
 | composefs → ostree (non-gating) | dakota:stable → fedora-bootc:44 | btrfs | 40G |
 | composefs → ostree, Dakota → Utah (non-gating) | dakota:stable → utah:testing | btrfs | 80G |
 | composefs image swap (non-gating) | dakota:stable → utah:testing | btrfs | 40G |
+| ostree → composefs, Utah → Utah (non-gating) | utah:testing → utah:testing | btrfs on LUKS | 60G |
 | cross-family image swap (non-gating) | tunaOS marlin:gnome → utah:testing | btrfs | 60G |
 | composefs → ostree, Marlin → Utah (non-gating) | tunaOS marlin:gnome → utah:testing | btrfs | 80G |
 | tunaOS desktop ring, ostree re-base with `--de-migrate` (4 cells, non-gating) | albacore gnome → niri → cosmic → xfce → gnome | btrfs | 40G |
@@ -707,7 +735,7 @@ cargo build --release -p bootc-rebase
 
 | Subcommand | What it does | Status |
 |---|---|---|
-| `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. On a package host it also compares installed software with the target image. `--json` includes the software report for machine consumers. | Done |
+| `scan <image>` | Registry-streamed capability probe of a target image — composefs/ostree readiness, fs-verity requirement, transient root/etc, bootloader payload, desktops, base OS identity, sysusers, initramfs flavor, filesystem expectation, and a `Compatible: YES/NO` verdict with reasons. On a package host it also prints a host overview (distribution and family, package manager and count, filesystem layout, boot mode, Secure Boot and SELinux — #371) and compares installed software with the target image. `--json` includes the host overview and software report for machine consumers. | Done |
 | `rebase --target-image <image>` | Re-base the running system, routing on `--source-backend`/`--target-backend` through the strategy table below. `--plan` prints the route, selected phases, and bootloader policy, then exits without touching the system. | Implemented for ostree→composefs (the MVP pipeline), composefs→composefs (image swap), ostree→ostree (native `bootc switch`, with cross-base UID/GID remap when host and target disagree on distro family — pass `--accept-cross-base` to proceed past the report), and composefs→ostree (`OstreeInstall`, #260: the target's own `bootc install to-existing-root` builds an OSTree deployment beside the composefs root; `/etc` merged, `/var` copied, composefs ESP artifacts restored and its firmware entry kept as rollback; exploratory, one non-gating cell). `--accept-cross-base` also accepts a cross-family target on all three migration routes and selects the cross-family `/etc` policy (#256/#259) |
 | `rollback [--reboot]` | Re-order UEFI `BootOrder` back to the previous deployment. | Done |
 | `undo [--reboot]` | Make the staged package-host `Previous system` entry the bootloader default without removing the new bootc deployment. `--dry-run` prints the exact action. | Core rollback support is implemented for the snapshot produced by PackageInstall; engine wiring is tracked separately in #373 |
@@ -775,6 +803,13 @@ distrobox, or a derived image.
 The report shows third-party package repositories and enabled services that the
 target lacks. If the registry pass is incomplete, the report does not make
 absence claims. It does not treat missing evidence as an empty image.
+
+On a package host, `scan` also prints a host overview (#371). The overview
+shows the facts that the migration sees on this machine, apart from the
+target image. These facts are the distribution, the package manager, and
+the package count. They also include the layout of `/`, `/home`, `/boot`
+and `/var` with LUKS/LVM, the boot mode, Secure Boot, and SELinux.
+`--json` puts the overview under `host`.
 
 A non-dry package-host invocation writes the machine-readable report and its
 Markdown twin to `/var/lib/bootc-rebase/software-report.json` and

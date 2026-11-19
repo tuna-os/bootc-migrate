@@ -4,7 +4,8 @@
 # main run a round-robin slice of the gating cells (E2E_ROUND_ROBIN_SIZE,
 # default 2, rotated by the CI run number), so every gating cell is exercised
 # every few runs. TUI changes also require the existing tui-migrate cell.
-# The nightly schedule and workflow_dispatch run every cell, exploratory ones included.
+# The nightly schedule runs alternate cells (index + days-since-epoch even), so each
+# cell runs every other night; workflow_dispatch runs every cell, exploratory ones included.
 #
 # `allowed_failed_units` on the dakota:stable cells: nfs-idmapd, rpc-statd
 # and nfs-mountd fail on every boot of dakota:stable, migrated or freshly
@@ -375,6 +376,24 @@
   # and serial goes quiet after ~7 s (#383). Forward the first
   # boot's journal to serial so the stalling unit shows in qemu.log.
   console_journal: true
+  allow_failure: true
+- name: "utah -> utah (ostree -> composefs, btrfs on LUKS)"
+  # A Utah user converting the OSTree install to the composefs backend
+  # with the same image: the full conversion (CoreMigration) with no OS
+  # change. Utah ships systemd-boot and bootc's composefs initramfs
+  # module, so the converted host boots composefs through systemd-boot.
+  # The layout is fisherman's desktop default: ESP + ext4 /boot + btrfs
+  # on a passphrase-unlocked LUKS2 root. Non-gating while Utah is
+  # pre-alpha and publishes only :testing.
+  # The first local run (2026-11-06) stopped at the Phase 3 integrity
+  # check: kernel 7.2.15 reported intact btrfs fs-verity blocks as
+  # corrupt (docs/support-matrix.md, "Utah OSTree -> Utah composefs").
+  base: ghcr.io/projectbluefin/utah:testing
+  target: ghcr.io/projectbluefin/utah:testing
+  # Display manager tests/e2e-health.sh requires after the reboot.
+  expect_dm: gdm
+  filesystem: btrfs+crypt
+  disk_size: 60G
   allow_failure: true
 - name: "tunaOS marlin gnome -> utah (cross-family composefs, ImageSwap)"
   # A TunaOS Marlin user's move to Utah. Marlin is Arch-based
