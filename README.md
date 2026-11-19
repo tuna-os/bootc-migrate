@@ -666,8 +666,9 @@ Overridable via env: `BASE_IMAGE`, `TARGET_IMAGE`, `DISK_SIZE`,
 `E2E_PACKAGE_CROSS_FAMILY`.
 
 The full matrix is authoritative in `.github/e2e-scenarios.yml`. The nightly
-schedule runs it. Each PR and push to `main` runs a round-robin slice of the
-gating cells (see the [test guide](docs/testing.md)):
+schedule runs alternate cells, so each cell runs every other night. Each PR
+and push to `main` runs a round-robin slice of the gating cells (see the
+[test guide](docs/testing.md)):
 
 | Cell | Base → target | Filesystem | Disk |
 |---|---|---|---|
