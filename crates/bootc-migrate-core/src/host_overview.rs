@@ -94,9 +94,11 @@ mod tests {
             var: None,
             root_read_only: false,
             free_root_bytes: None,
+            free_boot_bytes: None,
             package_managers_running: Vec::new(),
             pacman_lock: false,
             selinux: SelinuxMode::Enforcing,
+            ext4_has_verity: None,
         }
     }
 
