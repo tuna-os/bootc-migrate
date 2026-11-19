@@ -247,6 +247,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "=== RETRY 1/1 after the known geoclue timeout (#368) ==="
           mv e2e-run.log e2e-run.attempt-1.log
+          # Start the retry as fresh as the first attempt. The first attempt
+          # saved a pre-migration checkpoint; with it, run-e2e.sh takes its
+          # checkpoint-restore path, which a fresh runner never takes (it
+          # stopped on "LOOP_DEV: unbound variable" in run 44452462031).
+          sudo rm -f disk.raw.pre-migration
           sudo -E PATH="$PATH" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       - name: Disk space after E2E
