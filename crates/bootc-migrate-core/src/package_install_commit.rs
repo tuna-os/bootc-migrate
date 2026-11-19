@@ -73,6 +73,9 @@ impl Layout {
 pub struct HostFacts {
     pub cmdline: String,
     pub proc_mounts: String,
+    /// /proc/self/mountinfo: unlike /proc/mounts it names the bind source
+    /// (root field) and the backing device (major:minor).
+    pub mountinfo: String,
     pub verify_result: String,
 }
 
@@ -81,6 +84,7 @@ impl HostFacts {
         Self {
             cmdline: fs::read_to_string("/proc/cmdline").unwrap_or_default(),
             proc_mounts: fs::read_to_string("/proc/mounts").unwrap_or_default(),
+            mountinfo: fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
             verify_result: fs::read_to_string(layout.live_var.join(VERIFY_RESULT_REL))
                 .unwrap_or_default(),
         }
@@ -435,13 +439,34 @@ fn fstab_has_root_home_bind(fstab: &str) -> bool {
     })
 }
 
-fn mount_source(mounts: &str, mountpoint: &Path) -> Option<String> {
+/// (device major:minor, root within that filesystem) of the mount in effect at
+/// `mountpoint`, from mountinfo(5): `id parent maj:min root mount-point ...`.
+/// The last matching line wins because later mounts shadow earlier ones.
+fn mountinfo_entry(mountinfo: &str, mountpoint: &Path) -> Option<(String, String)> {
     let mountpoint = mountpoint.to_string_lossy();
-    mounts.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let source = fields.next()?;
-        (fields.next()? == mountpoint).then(|| source.to_string())
-    })
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let (_id, _parent) = (f.next()?, f.next()?);
+            let dev = f.next()?;
+            let root = f.next()?;
+            (f.next()? == mountpoint).then(|| (dev.to_string(), root.to_string()))
+        })
+        .next_back()
+}
+
+/// True when `live_home` is a bind of `<sysroot>/home`: same backing device as
+/// the sysroot mount and a root equal to the sysroot's root plus `/home`.
+fn home_bound_from_sysroot(mountinfo: &str, sysroot: &Path, live_home: &Path) -> bool {
+    let (Some((sys_dev, sys_root)), Some((home_dev, home_root))) = (
+        mountinfo_entry(mountinfo, sysroot),
+        mountinfo_entry(mountinfo, live_home),
+    ) else {
+        return false;
+    };
+    let expected = format!("{}/home", sys_root.trim_end_matches('/'));
+    sys_dev == home_dev && home_root == expected
 }
 
 fn plan_home_move(
@@ -467,17 +492,15 @@ fn plan_home_move(
         source_exists,
         format!("{}", source.display()),
     ));
-    let mounted_from_source = mount_source(&facts.proc_mounts, &layout.live_home)
-        .is_some_and(|mounted| mounted == source.to_string_lossy());
+    let mounted_from_source =
+        home_bound_from_sysroot(&facts.mountinfo, &layout.sysroot, &layout.live_home);
     checks.push(check(
         "/var/home is the old-home bind",
         mounted_from_source,
         format!(
-            "{} is mounted from {}",
+            "{} is bind-mounted from {}",
             layout.live_home.display(),
-            mount_source(&facts.proc_mounts, &layout.live_home)
-                .as_deref()
-                .unwrap_or("<unknown>")
+            source.display()
         ),
     ));
     let destination_empty = !destination.exists()
@@ -1056,6 +1079,7 @@ mod tests {
         let facts = HostFacts {
             cmdline,
             proc_mounts: String::new(),
+            mountinfo: String::new(),
             verify_result: "OK\n".into(),
         };
         let layout = Layout {
@@ -1175,9 +1199,10 @@ mod tests {
             "UUID=root / ext4 defaults 0 1\n/sysroot/home /var/home none bind,x-systemd.requires-mounts-for=/sysroot/home 0 0\n",
         )
         .unwrap();
-        facts.proc_mounts = format!(
-            "{} {} none rw,bind 0 0\n",
-            layout.old("home").display(),
+        // Real kernel shape: /proc/mounts would show the device, not the path.
+        facts.mountinfo = format!(
+            "20 1 8:2 / {} rw - ext4 /dev/sda2 rw\n31 20 8:2 /home {} rw - ext4 /dev/sda2 rw\n",
+            layout.sysroot.display(),
             layout.live_home.display()
         );
         let plan = plan(&layout, &facts, true).unwrap();
