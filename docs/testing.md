@@ -11,7 +11,7 @@ automates validation. This text complements `ROADMAP.md` and
 | Unit | Pure logic: parsers, planners, mergetc tables, routing, digest handling, probe classification | `just test` / CI `validate`, every push | seconds |
 | Feature-matrix | Same, with every cargo feature on (`composefs-native` is invisible to the default build) | `just test-all-features` (part of `just check`) | seconds |
 | Integration (host) | Real repositories on loopback filesystems, real podman probes of real images — no VM | developer machines + scheduled canary | minutes |
-| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml, called from ci.yml's `e2e` job: a round-robin slice of the gating cells per PR/push, the full matrix nightly | ~30 min/cell |
+| E2E (VM) | Full migrations in QEMU: partition → install → migrate → reboot → assert | e2e-tests.yml, called from ci.yml's `e2e` job: a round-robin slice of the gating cells per PR/push, alternate cells each night (every cell every other night) | ~30 min/cell |
 
 Rules of thumb:
 
@@ -44,6 +44,7 @@ Current (the four **MVP gates for regressions, which must stay**, plus the M1 ad
 | dakota stable (composefs-native) → fedora-bootc 44 (`composefs-to-ostree` mode) | the reverse backend switch (#260): `--plan` resolves `OstreeInstall`, the target's `bootc install to-existing-root` runs alongside, `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in the OSTree deployment, and the composefs "Linux Boot Manager" entry and ESP kernel remain as rollback. Then `bootc-rebase commit` (#315) runs as a dry run that deletes nothing, and with `--apply` it removes `/sysroot/state` and `/sysroot/composefs` but keeps the OSTree repo, the deployment and the forensics; a reboot follows, then the health check | active, non-gating |
 | dakota stable (composefs-native) → utah testing (`composefs-to-ostree` mode) | the Dakota → Utah migration through `OstreeInstall` (#302): the same assertions as the fedora-bootc cell, plus the shim/GRUB entry first in `BootOrder`, the booted os-release `ID=hummingbird` and GDM running | active, non-gating |
 | dakota stable (composefs-native) → utah testing (`image-swap` mode) | a composefs image swap across distributions: `--plan` resolves `ImageSwap`, the host's `bootc switch` stages Utah (Bluefin on Fedora Hummingbird), `/etc` + `/var` + `/var/home` fixtures survive, the reboot lands in Utah and the Dakota deployment stays as rollback | active, non-gating |
+| utah testing (OSTree, `btrfs+crypt`) → utah testing | the full conversion with the same image: ESP + ext4 `/boot` + btrfs in a passphrase-unlocked LUKS2 root, the reboot lands in Utah booted from composefs through systemd-boot, and the composefs-migrate fixtures survive | active, non-gating |
 | tunaOS marlin gnome (composefs-native, Arch) → utah testing (`image-swap` mode, `E2E_CROSS_FAMILY=1`) | a cross-family image swap: the swap is refused without `--accept-cross-base`, then the host's `bootc switch` stages Utah, and the same fixture, reboot and rollback checks as the Dakota cell run | active, non-gating |
 | tunaOS marlin gnome (composefs-native, Arch) → utah testing (`composefs-to-ostree` mode) | the OstreeInstall route from a host with no `efibootmgr` and no SELinux: NVRAM through the target's `efibootmgr`, `/boot` labelled with Utah's policy, the apps Marlin preinstalled still installed after Utah's first-boot `flatpak preinstall`, and the commit dry run's `/var` check | active, non-gating |
 | bluefin stable → bootcrew/opensuse-bootc (`composefs-migrate`, `E2E_CROSS_FAMILY=1`) | cross-family gate and `/etc` policy: target defaults, sidecars, machine state and identity merge | active, non-gating |
@@ -289,7 +290,8 @@ also need the existing `tui-migrate` cell. The path list is in
 PRs compare the merge base with the head. Pushes compare `before` with `after`.
 
 A failed diff stops the plan. Tests run with `just test-ci-selection`.
-The nightly schedule and `workflow_dispatch` run every cell.
+The nightly schedule runs alternate cells, so each cell runs every other night.
+`workflow_dispatch` runs every cell.
 
 ### Timeouts, and why they are what they are
 

@@ -8,12 +8,14 @@
 //! like that. So a package host is detected positively, by its package
 //! database, and only when no ostree or composefs deployment state exists.
 
+use serde::Serialize;
 use std::path::Path;
 
 use crate::rebase_plan::Backend;
 
 /// The package database that manages a package host's root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PackageDb {
     Rpm,
     Dpkg,
