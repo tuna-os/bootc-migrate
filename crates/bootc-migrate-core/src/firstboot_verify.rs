@@ -114,6 +114,52 @@ if [ -f "$MARKER" ]; then
         warn machine-id "live machine-id $live_id still equals the source's (kept on purpose by the in-place migration)"
     fi
 fi
+# 4. SELinux: check for unlabeled or mislabeled files under /etc and /var/home
+if command -v restorecon >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enforcing ]; then
+    mislabeled=$(restorecon -Rnv /etc /var/home 2>/dev/null | sed -n 's/^Would relabel \([^ ]*\) from.*/\1/p' | head -20)
+    for p in $mislabeled; do
+        note selinux-label "$p has mislabeled SELinux context"
+    done
+fi
+
+# 5. Core system services (if systemd has reached multi-user / basic target)
+if command -v systemctl >/dev/null 2>&1; then
+    sys_state=$(systemctl is-system-running 2>/dev/null || true)
+    if [ "$sys_state" = running ] || [ "$sys_state" = degraded ]; then
+        if ! systemctl is-active --quiet dbus.service && ! systemctl is-active --quiet dbus-broker.service; then
+            note dbus-inactive "system D-Bus is not active"
+        fi
+        if command -v busctl >/dev/null 2>&1 && ! busctl list --system >/dev/null 2>&1; then
+            note dbus-failed "the system bus does not answer"
+        fi
+        if command -v loginctl >/dev/null 2>&1 && ! loginctl list-sessions >/dev/null 2>&1; then
+            note logind-failed "logind does not answer"
+        fi
+        def_target=$(systemctl get-default 2>/dev/null || true)
+        if [ "$def_target" = graphical.target ]; then
+            dm=$(systemctl show -p Id --value display-manager.service 2>/dev/null || true)
+            if [ -n "$dm" ] && [ "$dm" != display-manager.service ] && ! systemctl is-active --quiet display-manager.service; then
+                note dm-failed "display manager $dm is not active"
+            fi
+        fi
+    fi
+fi
+
+# 6. Carried /etc files: check whether any unit reading a carried /etc file failed
+CARRIED_ETC=/var/lib/bootc-rebase/carried-etc.txt
+[ -f "$CARRIED_ETC" ] || CARRIED_ETC=/var/lib/bootc-migrate/carried-etc.txt
+if [ -f "$CARRIED_ETC" ] && command -v systemctl >/dev/null 2>&1; then
+    failed_units=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}')
+    for u in $failed_units; do
+        udef=$(systemctl cat "$u" 2>/dev/null || true)
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if echo "$udef" | grep -qF "$f" 2>/dev/null; then
+                note carried-etc-failed "failed unit $u references carried /etc file $f"
+            fi
+        done < "$CARRIED_ETC"
+    done
+fi
 
 {
     printf '{\n  "generated": "%s",\n  "findings": [\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -250,7 +296,11 @@ ostree_followup=0
 if [ -f "$REBASE_STATE_DIR/ostree-install-report.json" ] && grep -q 'ostree=' "$CMDLINE" 2>/dev/null; then
     ostree_followup=1
 fi
-if [ "$commit_pending" = 0 ] && [ "$ostree_followup" = 0 ] \
+package_followup=0
+if [ -f "$REBASE_STATE_DIR/package-install-report.json" ] && grep -q 'ostree=' "$CMDLINE" 2>/dev/null; then
+    package_followup=1
+fi
+if [ "$commit_pending" = 0 ] && [ "$ostree_followup" = 0 ] && [ "$package_followup" = 0 ] \
     && { [ "$result" = OK ] || [ "$result" = MISSING ]; }; then
     exit 0
 fi
@@ -258,21 +308,44 @@ fi
 # Headless, or no dialog tool: say it once for the journal and leave the
 # stamp alone — the next graphical login still gets the prompt.
 if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-    if [ "$ostree_followup" = 1 ]; then
+    if [ "$package_followup" = 1 ]; then
+        echo "bootc-rebase: package-host migration follow-up pending (verify: $result); run 'bootc-rebase status'." >&2
+    elif [ "$ostree_followup" = 1 ]; then
         echo "bootc-migrate: OstreeInstall follow-up pending (verify: $result); see $REBASE_STATE_DIR/ostree-install-report.json and run 'bootc-rebase status'." >&2
     else
         echo "bootc-migrate: migration follow-up pending (verify: $result, commit: $commit_pending); run 'bootc-migrate status'." >&2
     fi
     exit 0
 fi
+
+notified=0
+if command -v notify-send >/dev/null 2>&1; then
+    if [ "$package_followup" = 1 ]; then
+        notify-send --app-name=bootc-rebase "System migration complete" \
+            "Migrated to bootc. The old system remains as a rollback entry. Verify status and run 'bootc-rebase commit' when ready."
+        notified=1
+    elif [ "$ostree_followup" = 1 ]; then
+        notify-send --app-name=bootc-rebase "System migration complete" \
+            "Migrated from composefs to OSTree. Review day-2 checks and run 'bootc-rebase status'."
+        notified=1
+    elif [ "$commit_pending" = 1 ]; then
+        notify-send --app-name=bootc-migrate "System migration complete" \
+            "Migration finished. The old system is still on disk. Run 'bootc-migrate commit' when ready."
+        notified=1
+    fi
+fi
 DIALOG=""
 if command -v zenity >/dev/null 2>&1; then DIALOG=zenity
 elif command -v kdialog >/dev/null 2>&1; then DIALOG=kdialog
 fi
-[ -n "$DIALOG" ] || {
+if [ -z "$DIALOG" ]; then
+    if [ "$notified" = 1 ]; then
+        stamp
+        exit 0
+    fi
     echo "bootc-migrate: migration follow-up pending but no dialog tool found; run 'bootc-migrate status'." >&2
     exit 0
-}
+fi
 
 BIN=""
 for c in bootc-migrate /usr/local/bin/bootc-migrate /var/tmp/bootc-migrate; do
@@ -298,7 +371,11 @@ fi
 
 # OstreeInstall follow-up, findings, or a pending commit with no binary to
 # run it: inform, with the manual command for the commit case.
-if [ "$ostree_followup" = 1 ]; then
+if [ "$package_followup" = 1 ]; then
+    check=$result
+    [ "$check" = MISSING ] && check="not run"
+    TEXT="This system was migrated from a package-managed base to bootc. The old system remains on disk as a rollback entry. First-boot check: $check. Run 'bootc-rebase commit' when ready to reclaim disk space. Report: $REBASE_STATE_DIR/package-install-report.json. Or run 'bootc-rebase status'."
+elif [ "$ostree_followup" = 1 ]; then
     check=$result
     [ "$check" = MISSING ] && check="not run"
     TEXT="This system was migrated from composefs to OSTree. The composefs boot entry stays as a rollback. First-boot check: $check. Check by hand: the ESP has an /etc/fstab entry; the bootloader default is the OSTree entry; service data under /var has the SELinux labels of the new policy (restorecon); container storage belongs to its users. Report: $REBASE_STATE_DIR/ostree-install-report.json. Or run 'bootc-rebase status'."
@@ -567,5 +644,52 @@ mod tests {
                 check.keyword
             );
         }
+    }
+
+    #[test]
+    fn prompt_covers_the_package_install_direction() {
+        const PACKAGE_REPORT: (&str, &str) =
+            ("package-install-report.json", r#"{"target_image": "t"}"#);
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, &[(&str, &str)], &[(&str, &str)], &str, Option<&str>)] = &[
+            (
+                "PackageInstall, booted ostree, clean verify",
+                &[("verify-result", "OK\n")],
+                &[PACKAGE_REPORT],
+                "ostree=/ostree/boot.1/x/y/0 rw\n",
+                Some("package-host migration follow-up pending (verify: OK)"),
+            ),
+            (
+                "PackageInstall, booted ostree, probe never ran",
+                &[],
+                &[PACKAGE_REPORT],
+                "ostree=/ostree/boot.1/x/y/0\n",
+                Some("package-host migration follow-up pending (verify: MISSING)"),
+            ),
+            (
+                "PackageInstall, booted rollback without ostree karg",
+                &[("verify-result", "OK\n")],
+                &[PACKAGE_REPORT],
+                "root=UUID=abc rw\n",
+                None,
+            ),
+        ];
+        for (case, migrate, rebase, cmdline, want) in cases {
+            let (stderr, stamped) = run_prompt_headless(migrate, rebase, cmdline);
+            match want {
+                Some(needle) => {
+                    assert!(stderr.contains(needle), "{case}: {stderr:?}");
+                    assert!(
+                        stderr.contains("bootc-rebase status"),
+                        "{case}: must point to status: {stderr:?}"
+                    );
+                }
+                None => assert!(stderr.is_empty(), "{case}: expected silence: {stderr:?}"),
+            }
+            assert!(!stamped, "{case}: headless run stamped");
+        }
+        assert!(PROMPT_SCRIPT.contains("package-install-report.json"));
+        assert!(PROMPT_SCRIPT.contains("bootc-rebase commit"));
+        assert!(PROMPT_SCRIPT.contains("bootc-rebase status"));
     }
 }
