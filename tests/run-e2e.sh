@@ -7,8 +7,8 @@ set -euo pipefail
 # Unique LUKS mapper name per run to avoid stale dm device conflicts
 UUID_SUFFIX=$(date +%s)_$$  # timestamp + PID should be unique enough
 LUKS_MAPPER="e2e-root_${UUID_SUFFIX}"
-# Passphrase for the LUKS root in the xfs+crypt scenario; injected over the
-# serial console at the boot unlock prompt.
+# Passphrase for the LUKS root in the encrypted (*+crypt) scenarios; injected
+# over the serial console at the boot unlock prompt.
 LUKS_PASSPHRASE="testpassphrase"
 
 # Configurable parameters
@@ -58,17 +58,22 @@ if [ "$E2E_MODE" = "package-install" ]; then
         *) echo "ERROR: E2E_PACKAGE_BASE must be fedora-cloud, fedora-workstation, or ubuntu-cloud"; exit 1 ;;
     esac
 fi
-# Scenario capability flags derived from FILESYSTEM. Both encrypted scenarios
+# Scenario capability flags derived from FILESYSTEM. The encrypted scenarios
 # share all the LUKS plumbing (swtpm, serial passphrase injection, BLS karg
 # patching, skipping host-side SSH injection); the lvm variant additionally
 # carves a VG with separate root + /var logical volumes inside the LUKS
 # container, reproducing a dedicated-/var layout (e.g. anaconda's default).
+# btrfs+crypt is the fisherman desktop layout: ESP + ext4 /boot + btrfs on a
+# passphrase-unlocked LUKS2 root.
 IS_LUKS=false
 IS_LVM=false
 case "$FILESYSTEM" in
-    xfs+crypt) IS_LUKS=true ;;
+    xfs+crypt|btrfs+crypt) IS_LUKS=true ;;
     xfs+lvm+crypt) IS_LUKS=true; IS_LVM=true ;;
 esac
+# Filesystem made on the root (and dedicated /var) device: "btrfs" for
+# btrfs+crypt, "xfs" for xfs+crypt and xfs+lvm+crypt, FILESYSTEM otherwise.
+ROOT_FSTYPE="${FILESYSTEM%%+*}"
 # Volume group + logical volume names for the LVM scenario.
 LVM_VG="e2e_vg_${UUID_SUFFIX}"
 # Test variant: "migrate" (default — migrate, commit, rollback round-trip) or
@@ -827,8 +832,8 @@ SFDISK
     # --privileged + /dev exposes the loop partitions and the opened LUKS mapper.
     sudo podman run --privileged --rm -v /dev:/dev "$INSTALL_IMAGE" bash -c "
         set -e
-        mkfs.xfs -f $ROOT_DEV
-        ${VAR_DEV:+mkfs.xfs -f $VAR_DEV}
+        mkfs.$ROOT_FSTYPE -f $ROOT_DEV
+        ${VAR_DEV:+mkfs.$ROOT_FSTYPE -f $VAR_DEV}
         mkfs.ext4 -F $BOOT_PART
         mkfs.vfat -F32 $ESP_PART"
     # Use /var/tmp (not /tmp, which is tmpfs on many hosts) as the mount point.
@@ -879,8 +884,13 @@ SFDISK
     # systemd-gpt-auto-generator needs to locate the encrypted root (the bare
     # mapper-name form silently fails — projectbluefin/dakota#270). For the lvm
     # variant we also activate the root LV (rd.lvm.lv=<vg>/root) — but NOT the
-    # var LV, mirroring the real-world source layout.
-    luks_args="rd.luks.name=$LUKS_UUID=root${lvm_root_arg:+ $lvm_root_arg}"
+    # var LV, mirroring the real-world source layout. Plymouth is off so the
+    # passphrase prompt reaches the serial console the injector watches: an
+    # image whose initrd ships plymouth (Utah) otherwise takes the prompt to
+    # its splash and the boot waits forever. The migration carries these
+    # arguments onto the composefs entry, so the second boot prompts on serial
+    # too.
+    luks_args="rd.luks.name=$LUKS_UUID=root${lvm_root_arg:+ $lvm_root_arg} rd.plymouth=0 plymouth.enable=0"
     for bls in "$INSTALL_ROOT"/boot/loader/entries/*.conf; do
         [ -f "$bls" ] || continue
         if ! grep -q 'rd.luks' "$bls"; then
@@ -897,7 +907,7 @@ SFDISK
         for fstab in "$INSTALL_ROOT"/ostree/deploy/*/deploy/*/etc/fstab; do
             [ -f "$fstab" ] || continue
             if ! grep -qE '[[:space:]]/var[[:space:]]' "$fstab"; then
-                echo "UUID=$VAR_UUID /var xfs defaults 0 0" | sudo tee -a "$fstab" >/dev/null
+                echo "UUID=$VAR_UUID /var $ROOT_FSTYPE defaults 0 0" | sudo tee -a "$fstab" >/dev/null
                 echo "  added /var entry (UUID=$VAR_UUID) to $(basename "$(dirname "$fstab")")/etc/fstab"
             fi
         done

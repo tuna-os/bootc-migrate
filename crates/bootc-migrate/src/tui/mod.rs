@@ -133,12 +133,30 @@ fn image_choices_from_catalog(
     if backend == Some(Backend::Package) {
         choices.retain(|choice| choice.backend == "ostree");
     }
-    // Utah's tested routes start from a composefs host (ImageSwap,
-    // OstreeInstall). The catalog lists it, but from an OSTree host its
-    // `composefs` backend would select the full conversion, which no E2E
-    // cell covers, so only composefs hosts are offered it (below).
+    // An OSTree host booted from a catalog image that also boots composefs
+    // (Utah) can convert in place to the same image: the full conversion with
+    // an unchanged OS, covered by the `utah -> utah` cell. Lead with it.
+    let current_converts = backend == Some(Backend::Ostree)
+        && booted_image.is_some_and(|current| {
+            choices
+                .iter()
+                .any(|c| c.image == current && c.backend == "composefs")
+        });
+    // Utah's other tested routes start from a composefs host (ImageSwap,
+    // OstreeInstall). From another OSTree image its `composefs` backend
+    // would select the full conversion to a different OS, which no E2E cell
+    // covers, so only composefs hosts and Utah itself are offered it.
     if backend != Some(Backend::Composefs) {
-        choices.retain(|choice| choice.image != UTAH_TESTING);
+        choices.retain(|choice| {
+            choice.image != UTAH_TESTING || (current_converts && booted_image == Some(UTAH_TESTING))
+        });
+    }
+    if current_converts && let Some(current) = booted_image {
+        let at = choices.iter().position(|c| c.image == current);
+        if let Some(mut row) = at.map(|at| choices.remove(at)) {
+            row.note = "currently booted on OSTree; converts it to composefs".into();
+            choices.insert(0, row);
+        }
     }
     // On an existing composefs system, keep the current image as the first
     // one-click choice. Otherwise Dakota remains the known conversion path.
