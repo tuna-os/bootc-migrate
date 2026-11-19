@@ -222,12 +222,32 @@ jobs:
       - name: Disk space before E2E
         run: df -h /
 
+      # One retry, for one known failure only: geoclue.service timed out in
+      # the health check and nothing else failed. That is the geoclue
+      # lock-order bug in the target image (#368), not a migration fault.
+      # tests/e2e-known-flake.sh decides; any other failure, or a second
+      # failure of any kind, fails the cell. The gate stays strict.
       - name: Run E2E test suite
         id: e2e
         run: |
           # Run as root: loop mounts, podman --privileged, and OVMF VARS pflash
           # all need it. -E so BASE_IMAGE/TARGET_IMAGE flow through.
           set -o pipefail
+          rc=0
+          sudo -E PATH="$PATH" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log || rc=$?
+          [ "$rc" = 0 ] && exit 0
+          if ! ./tests/e2e-known-flake.sh e2e-run.log; then
+            exit "$rc"
+          fi
+          msg="geoclue.service timed out in the health check and nothing else failed: the known geoclue lock-order bug (#368, https://github.com/tuna-os/bootc-migrate/issues/368). Retrying this cell once; a second failure fails it."
+          echo "::warning title=E2E cell retried once (geoclue timeout, #368)::$msg"
+          {
+            echo "## E2E retry: geoclue timeout (#368)"
+            echo "$msg"
+            echo "The first attempt's log is in the job log above this line."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "=== RETRY 1/1 after the known geoclue timeout (#368) ==="
+          mv e2e-run.log e2e-run.attempt-1.log
           sudo -E PATH="$PATH" ./tests/run-e2e.sh 2>&1 | tee e2e-run.log
 
       - name: Disk space after E2E

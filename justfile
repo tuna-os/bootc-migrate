@@ -263,7 +263,7 @@ lint: lint-shell lint-rust
 # Lint shell scripts with shellcheck (warnings + errors only, skip info/style)
 lint-shell:
     @echo "=== shellcheck ==="
-    shellcheck --severity=warning tests/run-e2e.sh tests/package-base.sh
+    shellcheck --severity=warning tests/run-e2e.sh tests/package-base.sh tests/e2e-known-flake.sh
 
 # Lint the Python E2E driver with ruff (config in ruff.toml). Not part of
 # `check`: ruff is not provisioned on the CI runner or assumed present on a
