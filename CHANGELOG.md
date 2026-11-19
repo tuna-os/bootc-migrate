@@ -36,12 +36,42 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   target in `BootOrder` only after an OSTree boot has been observed. Two
   non-gating fault-injection cells cover interruption after the ESP wipe and
   immediately before arming.
+- The package → OSTree route journals its cutover in the same transaction
+  file. The journal records the `/boot` snapshot hashes and each step of the
+  "Previous system" rollback staging (#462). A run that stops after the
+  deployment is prepared resumes that staging from the journal. A run that
+  stops earlier refuses until `--force` starts over.
+- `bootc-rebase scan` host overview on a package-managed source (#371,
+  completes the #370 acceptance criteria started by #384): distribution and
+  package-manager family, installed package count, root/`/home`/`/boot`/`/var`
+  filesystem layout with LUKS/LVM, boot mode, Secure Boot, and SELinux — what
+  the `package → ostree` migration will see, independent of the target image
+  `scan` also probes. `--json` nests it under `host`.
 - Releases include a static `aarch64-unknown-linux-musl` archive so
   `bootc-rebase` runs directly on postmarketOS-family ARM64 hosts (#461).
 - The TUI catalog lists Utah as "Utah (pre-alpha)" with
-  `ghcr.io/projectbluefin/utah:testing`. The picker offers it only on a
-  composefs host, where its routes have E2E coverage.
+  `ghcr.io/projectbluefin/utah:testing`. The picker offers it on a
+  composefs host, where its routes have E2E coverage, and as the first
+  choice on a Utah host that boots OSTree: the conversion keeps the same
+  image and only changes the backend (`bootc-migrate --target-image
+  ghcr.io/projectbluefin/utah:testing`). A new non-gating cell,
+  `utah -> utah (ostree -> composefs, btrfs on LUKS)`, covers that route.
+  Its first local run stopped at the integrity check: Utah's kernel 7.2.15
+  reports intact fs-verity blocks on btrfs as corrupt, so the README warns
+  against converting a btrfs Utah host for now.
 
+- E2E harness: `FILESYSTEM=btrfs+crypt` installs the source on an ESP, an
+  ext4 `/boot` and btrfs inside a passphrase-unlocked LUKS2 root, the
+  layout fisherman gives a desktop install.
+
+- Reversible migration support for postmarketOS-family ARM64 laptops (#461):
+  - Detect apk-managed package hosts via `/lib/apk/db/installed`.
+  - Accept LUKS roots in preflight when `/boot` is on an unencrypted partition or ESP, and derive `rd.luks.name` / `root=` from the live device-mapper identity, `/etc/crypttab`, or `pmos_root_uuid=`, binding the UUID and mapper name to the volume that actually backs `/`. A LUKS root with no derivable `root=` is refused before any change.
+  - Implement full-ESP snapshot and restore for layouts where `/boot` is the ESP, preserving foreign vendor boot files (`vmlinuz`, `initramfs`, `*.dtb`, `dtbs/`, `loader/`).
+  - Provide a bind plan that mounts `/boot` at `/boot/efi` under the physical root for package-host alongside installs.
+  - Parse and preserve `devicetree` BLS lines and arm64 kernel arguments (`arm64.*`, `clk_ignore_unused`, `pd_ignore_unused`), and refuse when a devicetree host targets a kernel that ships no DTB — or none for the host's own board.
+  - Extend hardware inventory to inspect the `platform` bus and match `/proc/device-tree/compatible` against the target kernel's DTB names, read from the layer listing instead of extracting every blob. Collect `aa64` and `ia32` EFI payloads too, so the Secure Boot preflight inspects something on arm64.
+  - Support `Previous system` rollback staging and `bootc-rebase undo`: the rollback state is mirrored into the new stateroot's `/var` so `undo` still finds it after the reboot, the pre-install `BootOrder` is captured and restored, and a failure to stage it is reported instead of leaving a migration that only looks reversible.
 - Secure Boot / UEFI CA preflight (#386): the preflight checks the target
   `systemd-boot` and bootupd shim payloads. It compares their Authenticode
   issuers with the firmware's `db` CA generations. It refuses known mismatches
@@ -82,6 +112,11 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   this binary or on `PATH`, and surfaces the source-build hint when missing.
 - The Utah testing image is offered on composefs hosts with an honest
   maturity note ("pre-alpha; E2E status unknown", docs/support-matrix.md).
+- After a successful dry-run, the TUI can open a live review in the same
+  session. The live run must match the command of the preview. The wizard
+  clears the old confirmation, `--force` and `--skip-preflight`, and does the
+  readiness checks again. You must type `CONFIRM` again. Unknown and package
+  sources stay preview-only.
 - Standalone `migrate-bootloader` now stages a systemd-boot kernel/BLS
   generation as a one-boot `BootNext` trial while preserving GRUB, with
   guarded `--promote` and `--undo` actions and a `kernel-install` ESP resync
@@ -206,6 +241,13 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   `--plan` for composefs → ostree prints `OstreeInstall`.
 
 ### Fixed
+
+- `--dry-run` no longer installs systemd-boot. Phase 5 stopped a dry run
+  only when the ESP already had a `loader/entries` directory, and a first
+  migration has none. The dry run then replaced `EFI/BOOT/BOOTX64.EFI` with
+  systemd-boot, copied a kernel and a rebuilt initrd to the ESP, wrote a
+  BLS entry for a placeholder digest, registered "Linux Boot Manager" and
+  put it first in `BootOrder`. Seen on a real Utah laptop.
 
 - The E2E checks after an OSTree → composefs migration look for the staged
   deployment in `/sysroot/state` first again. A lookup added for

@@ -48,11 +48,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cross_family;
+use crate::hardware;
 use crate::mergetc::{self, IdentityMergePolicy, MergePolicy};
 use crate::migration::rollback;
 use crate::migration::{MountGuard, PodmanImageMount, acquire_lock, find_esp_or_mount};
 use crate::ostree_install_txn::{
     self as boot_txn, BootObservation, BootTransaction, BootTxnPhase, InstallClassification,
+    PackageObservation, PackageRollbackStaging, RollbackStagingPhase, TxnSource,
 };
 use crate::preflight;
 use crate::rebase_controller::validate_target_image;
@@ -418,16 +420,39 @@ pub fn package_boot_snapshot_paths<'a>(listing: impl IntoIterator<Item = &'a str
             let top_level = !path.contains('/');
             (top_level
                 && (path.starts_with("vmlinuz-")
+                    || *path == "vmlinuz"
+                    || path.starts_with("vmlinux-")
+                    || *path == "vmlinux"
+                    || path.starts_with("kernel-")
+                    || *path == "kernel"
                     || path.starts_with("initramfs-")
-                    || path.starts_with("initrd.img-")))
+                    || *path == "initramfs"
+                    || path.starts_with("initrd.img-")
+                    || *path == "initrd.img"
+                    || path.starts_with("initrd-")
+                    || *path == "initrd"
+                    || path.ends_with(".dtb")))
+                || path.starts_with("dtbs/")
                 || (path.starts_with("loader/entries/") && path.ends_with(".conf"))
-                || matches!(*path, "grub/grub.cfg" | "grub2/grub.cfg")
+                || *path == "loader/loader.conf"
+                || matches!(*path, "grub/grub.cfg" | "grub2/grub.cfg" | "grub.cfg")
         })
         .map(str::to_string)
         .collect();
     paths.sort();
     paths.dedup();
     paths
+}
+
+/// Whether `path` is a kernel executable under `/boot`.
+pub fn is_package_kernel_path(path: &str) -> bool {
+    let p = path.trim_start_matches('/');
+    p == "vmlinuz"
+        || p.starts_with("vmlinuz-")
+        || p == "vmlinux"
+        || p.starts_with("vmlinux-")
+        || p == "kernel"
+        || p.starts_with("kernel-")
 }
 
 /// Pick the deployment `bootc install` just created from the names under
@@ -456,9 +481,225 @@ fn filtered_kargs(cmdline: &str, include_root: bool) -> Vec<String> {
                 || w.starts_with("rd.lvm.lv=")
                 || w.starts_with("rd.luks.")
                 || w.starts_with("systemd.log_level=")
+                || w.starts_with("arm64.")
+                || *w == "clk_ignore_unused"
+                || w.starts_with("clk_ignore_unused=")
+                || *w == "pd_ignore_unused"
+                || w.starts_with("pd_ignore_unused=")
+                || w.starts_with("devicetree=")
         })
         .map(str::to_string)
         .collect()
+}
+
+/// The dm-crypt mapping that backs the root filesystem: the LUKS header
+/// UUID the initramfs unlocks, and the mapper name it opens it as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootLuksMapping {
+    pub uuid: String,
+    pub name: String,
+}
+
+/// Parse a device-mapper identity (`/sys/dev/block/<maj:min>/dm/uuid` plus
+/// `dm/name`) into the mapping it describes. cryptsetup writes
+/// `CRYPT-LUKS2-<the header UUID's 32 hex digits, dashes removed>-<mapper
+/// name>`; `CRYPT-PLAIN-…` carries no UUID and yields `None`.
+pub fn parse_crypt_dm_identity(dm_uuid: &str, dm_name: &str) -> Option<RootLuksMapping> {
+    let dm_uuid = dm_uuid.trim();
+    let rest = dm_uuid
+        .strip_prefix("CRYPT-LUKS2-")
+        .or_else(|| dm_uuid.strip_prefix("CRYPT-LUKS1-"))?;
+    if rest.len() < 32 || !rest.as_bytes()[..32].iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let (hex, tail) = rest.split_at(32);
+    let name = match dm_name.trim() {
+        "" => tail.strip_prefix('-').unwrap_or(""),
+        live => live,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let hex = hex.to_ascii_lowercase();
+    Some(RootLuksMapping {
+        uuid: format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..],
+        ),
+        name: name.to_string(),
+    })
+}
+
+/// One `/etc/crypttab` mapping: `<mapper name> <device> <key file> <options>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrypttabEntry {
+    /// The name the volume is opened as (`/dev/mapper/<name>`).
+    pub name: String,
+    /// The volume's UUID, when the entry names one.
+    pub uuid: Option<String>,
+    /// A swap mapping: re-keyed every boot, so never the root filesystem.
+    pub swap: bool,
+}
+
+/// Parse `/etc/crypttab` content into its mappings, in file order.
+pub fn parse_crypttab(content: &str) -> Vec<CrypttabEntry> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            let device = fields.next()?;
+            // Field 3 is the key file; field 4 the options.
+            let options = fields.nth(1).unwrap_or("");
+            Some(CrypttabEntry {
+                name: name.to_string(),
+                uuid: device
+                    .strip_prefix("UUID=")
+                    .or_else(|| device.strip_prefix("/dev/disk/by-uuid/"))
+                    .map(str::to_string),
+                swap: name.contains("swap")
+                    || options.split(',').any(|option| option.trim() == "swap"),
+            })
+        })
+        .collect()
+}
+
+/// Pick the crypttab entry that backs `/`: the one opened as the root
+/// device's mapper name, or — when that name is unknown — the single
+/// non-swap mapping that names a UUID. A crypttab is a list of volumes, not
+/// a root locator: taking the first `luks` line names the swap volume on
+/// every host that lists swap first, and a `root=/dev/mapper/…` built from
+/// it does not boot.
+pub fn select_root_crypttab_entry<'a>(
+    entries: &'a [CrypttabEntry],
+    root_mapper: Option<&str>,
+) -> Option<&'a CrypttabEntry> {
+    if let Some(name) = root_mapper {
+        return entries.iter().find(|entry| entry.name == name);
+    }
+    let mut candidates = entries
+        .iter()
+        .filter(|entry| !entry.swap && entry.uuid.is_some());
+    let only = candidates.next()?;
+    candidates.next().is_none().then_some(only)
+}
+
+/// The mapper name in `/dev/mapper/<name>`; `None` for any other device.
+fn mapper_name(device: &str) -> Option<&str> {
+    device
+        .strip_prefix("/dev/mapper/")
+        .filter(|name| !name.is_empty())
+}
+
+/// Where the root-mapping derivation reads its facts from. Separated from
+/// the derivation itself so the whole chain — root mount, device-mapper
+/// identity, crypttab — is testable against a temporary directory instead of
+/// whatever the machine running the tests happens to boot from.
+#[derive(Debug, Clone, Copy)]
+struct RootProbe<'a> {
+    /// The host root whose `etc/crypttab` is consulted.
+    root: &'a Path,
+    /// Where that root is mounted in `mounts`.
+    mount_point: &'a str,
+    /// `/proc/mounts`-shaped text.
+    mounts: &'a str,
+    /// A `/sys/class/block`-shaped directory.
+    sys_class_block: &'a Path,
+}
+
+impl<'a> RootProbe<'a> {
+    /// The live host, installing to the physical root `root`.
+    fn live(root: &'a Path, mounts: &'a str) -> Self {
+        Self {
+            root,
+            mount_point: root.to_str().unwrap_or("/"),
+            mounts,
+            sys_class_block: Path::new("/sys/class/block"),
+        }
+    }
+
+    /// The mapper name the root filesystem is mounted from, when it is a
+    /// device-mapper volume at all.
+    fn root_mapper_name(&self) -> Option<String> {
+        esp_resident::mount_source(self.mounts, self.mount_point)
+            .or_else(|| esp_resident::mount_source(self.mounts, "/"))
+            .and_then(|device| mapper_name(&device).map(str::to_string))
+    }
+
+    /// The sysfs block directory of the device-mapper volume named `name`.
+    fn dm_dir(&self, name: &str) -> Option<PathBuf> {
+        fs::read_dir(self.sys_class_block)
+            .ok()?
+            .flatten()
+            .find_map(|entry| {
+                let dir = entry.path();
+                fs::read_to_string(dir.join("dm/name"))
+                    .is_ok_and(|live| live.trim() == name)
+                    .then_some(dir)
+            })
+    }
+
+    /// Whether `dir` is a dm-crypt mapping or sits on one — the stacked
+    /// case (LVM on LUKS) the preflight's dm walk also follows.
+    fn on_crypt(&self, dir: &Path, depth: u8) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        if fs::read_to_string(dir.join("dm/uuid"))
+            .is_ok_and(|uuid| esp_resident::is_crypt_dm_uuid(&uuid))
+        {
+            return true;
+        }
+        fs::read_dir(dir.join("slaves"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|slave| {
+                let child = self.sys_class_block.join(slave.file_name());
+                self.on_crypt(&child, depth + 1)
+            })
+    }
+
+    /// Whether the root filesystem is unlocked from a dm-crypt volume.
+    fn root_on_crypt(&self) -> bool {
+        self.root_mapper_name()
+            .and_then(|name| self.dm_dir(&name))
+            .is_some_and(|dir| self.on_crypt(&dir, 0))
+    }
+}
+
+/// The LUKS mapping that backs the root filesystem, from the facts that
+/// describe *that* volume: the live device-mapper identity first (it names
+/// both the header UUID and the mapper name in one string), then the
+/// `pmos_root_uuid=` the source bootloader passed, then the crypttab entry
+/// tied to the root mapper.
+fn derive_root_luks(probe: RootProbe, cmdline: &str) -> Option<RootLuksMapping> {
+    let mapper = probe.root_mapper_name();
+    if let Some(name) = mapper.as_deref()
+        && let Some(dir) = probe.dm_dir(name)
+        && let Ok(dm_uuid) = fs::read_to_string(dir.join("dm/uuid"))
+        && let Some(mapping) = parse_crypt_dm_identity(&dm_uuid, name)
+    {
+        return Some(mapping);
+    }
+    let crypttab = fs::read_to_string(probe.root.join("etc/crypttab")).unwrap_or_default();
+    let entries = parse_crypttab(&crypttab);
+    let entry = select_root_crypttab_entry(&entries, mapper.as_deref());
+    let uuid = cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("pmos_root_uuid="))
+        .map(str::to_string)
+        .or_else(|| entry.and_then(|entry| entry.uuid.clone()))?;
+    let name = mapper
+        .or_else(|| entry.map(|entry| entry.name.clone()))
+        .unwrap_or_else(|| "root".to_string());
+    Some(RootLuksMapping { uuid, name })
 }
 
 /// Kernel arguments needed beyond those bootc inherits on a composefs host.
@@ -468,9 +709,39 @@ pub fn carry_over_kargs(cmdline: &str) -> Vec<String> {
 
 /// Kernel arguments needed to mount and diagnose a package host's old root.
 /// Kernel image paths, initrd paths and backend locators are deliberately
-/// excluded.
+/// excluded. Derives `rd.luks.name` / `root=` if missing from cmdline when
+/// root is on LUKS.
 pub fn package_carry_over_kargs(cmdline: &str) -> Vec<String> {
-    filtered_kargs(cmdline, true)
+    package_carry_over_kargs_with_root(cmdline, Path::new("/"))
+}
+
+/// Same as [`package_carry_over_kargs`], deriving the root locator from
+/// `root`'s own `/etc/crypttab` and the live device-mapper state.
+pub fn package_carry_over_kargs_with_root(cmdline: &str, root: &Path) -> Vec<String> {
+    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+    package_carry_over_kargs_probed(cmdline, RootProbe::live(root, &mounts))
+}
+
+fn package_carry_over_kargs_probed(cmdline: &str, probe: RootProbe) -> Vec<String> {
+    let mut kargs = filtered_kargs(cmdline, true);
+    let has_root = kargs.iter().any(|k| k.starts_with("root="));
+    let has_luks = kargs.iter().any(|k| k.starts_with("rd.luks."));
+    // `root=` must name the mapper the root volume is actually opened as:
+    // a host whose initramfs opens it as `cryptroot` boots nowhere from
+    // `/dev/mapper/root`.
+    let mut mapper = kargs
+        .iter()
+        .find_map(|k| k.strip_prefix("rd.luks.name="))
+        .and_then(|value| value.split_once('='))
+        .map(|(_, name)| name.to_string());
+    if !has_luks && let Some(mapping) = derive_root_luks(probe, cmdline) {
+        kargs.push(format!("rd.luks.name={}={}", mapping.uuid, mapping.name));
+        mapper = Some(mapping.name);
+    }
+    if !has_root && let Some(name) = mapper {
+        kargs.push(format!("root=/dev/mapper/{name}"));
+    }
+    kargs
 }
 
 /// What the run did, written as JSON under [`STATE_DIR`] so it survives the
@@ -505,6 +776,7 @@ fn transaction_paths() -> Vec<PathBuf> {
         boot_txn::journal_path(
             &Path::new(PHYSICAL_ROOT).join("state/os/default/var/lib/bootc-rebase"),
         ),
+        boot_txn::journal_path(&Path::new(PACKAGE_OSTREE_STATEROOT_VAR).join("lib/bootc-rebase")),
     ];
     paths.dedup();
     paths
@@ -524,8 +796,12 @@ fn read_host_transaction() -> Result<Option<BootTransaction>> {
 fn persist_transaction(txn: &BootTransaction) -> Result<()> {
     let paths = transaction_paths();
     boot_txn::write_journal(&paths[0], txn)?;
-    let carried = boot_txn::journal_path(&Path::new(OSTREE_STATEROOT_VAR).join("lib/bootc-rebase"));
-    if carried != paths[0] && Path::new(OSTREE_STATEROOT_VAR).is_dir() {
+    let stateroot_var = match txn.source {
+        TxnSource::Composefs => OSTREE_STATEROOT_VAR,
+        TxnSource::Package => PACKAGE_OSTREE_STATEROOT_VAR,
+    };
+    let carried = boot_txn::journal_path(&Path::new(stateroot_var).join("lib/bootc-rebase"));
+    if carried != paths[0] && Path::new(stateroot_var).is_dir() {
         boot_txn::write_journal(&carried, txn)?;
     }
     Ok(())
@@ -587,13 +863,35 @@ fn observe_transaction(txn: &BootTransaction) -> Result<BootObservation> {
     })
 }
 
+/// Observe a package-host transaction: its `/boot` snapshot and the rollback
+/// staging it journaled. Reads files only; never touches firmware.
+fn observe_package_transaction(txn: &BootTransaction) -> PackageObservation {
+    let exists = |p: Option<&str>| p.is_some_and(|p| Path::new(p).exists());
+    let staging = txn.package_rollback.as_ref();
+    PackageObservation {
+        snapshot_intact: boot_txn::snapshot_intact(txn),
+        entry_present: exists(staging.and_then(|s| s.entry_path.as_deref())),
+        state_present: exists(staging.map(|s| s.state_dir.as_str())),
+        mirror_present: exists(staging.and_then(|s| s.mirrored_to.as_deref())),
+    }
+}
+
+/// Classify a journaled transaction by its source route.
+fn classify_transaction(txn: &BootTransaction) -> Result<InstallClassification> {
+    Ok(match txn.source {
+        TxnSource::Composefs => boot_txn::classify_install(txn, &observe_transaction(txn)?),
+        TxnSource::Package => {
+            boot_txn::classify_package_install(txn, &observe_package_transaction(txn))
+        }
+    })
+}
+
 /// Read and classify a boot transaction without changing the machine.
 pub fn inspect_boot_transaction() -> Result<Option<(BootTransaction, InstallClassification)>> {
     let Some(txn) = read_host_transaction()? else {
         return Ok(None);
     };
-    let observed = observe_transaction(&txn)?;
-    let classification = boot_txn::classify_install(&txn, &observed);
+    let classification = classify_transaction(&txn)?;
     Ok(Some((txn, classification)))
 }
 
@@ -714,12 +1012,16 @@ fn arm_transaction(txn: &mut BootTransaction) -> Result<()> {
     Ok(())
 }
 
-fn handle_existing_transaction(target_image: &str, dry_run: bool) -> Result<bool> {
+fn handle_existing_transaction(
+    source: InstallSource,
+    target_image: &str,
+    dry_run: bool,
+    force: bool,
+) -> Result<bool> {
     let Some(mut txn) = read_host_transaction()? else {
         return Ok(false);
     };
-    let observed = observe_transaction(&txn)?;
-    let classification = boot_txn::classify_install(&txn, &observed);
+    let classification = classify_transaction(&txn)?;
     println!(
         "[boot-txn] existing transaction: phase={:?}, classification={}",
         txn.phase,
@@ -736,6 +1038,26 @@ fn handle_existing_transaction(target_image: &str, dry_run: bool) -> Result<bool
             txn.target_image,
             target_image
         );
+    }
+    let journal_source = match source {
+        InstallSource::Composefs => TxnSource::Composefs,
+        InstallSource::Package => TxnSource::Package,
+    };
+    if txn.source != journal_source {
+        if matches!(
+            classification,
+            InstallClassification::Complete | InstallClassification::Failed
+        ) {
+            return Ok(false);
+        }
+        bail!(
+            "unfinished {:?} boot transaction found; this {:?} run will not touch it",
+            txn.source,
+            journal_source
+        );
+    }
+    if txn.source == TxnSource::Package {
+        return handle_existing_package_transaction(&mut txn, classification, dry_run, force);
     }
     match classification {
         InstallClassification::Resumable if dry_run => {
@@ -764,6 +1086,138 @@ fn handle_existing_transaction(target_image: &str, dry_run: bool) -> Result<bool
     }
 }
 
+/// A package-host journal found at start-up: resume the rollback staging and
+/// bootloader step it records, or refuse until the operator decides.
+fn handle_existing_package_transaction(
+    txn: &mut BootTransaction,
+    classification: InstallClassification,
+    dry_run: bool,
+    force: bool,
+) -> Result<bool> {
+    match classification {
+        InstallClassification::Complete | InstallClassification::Failed => Ok(false),
+        InstallClassification::Resumable if dry_run => bail!(
+            "package boot transaction is prepared and resumable; dry-run will not stage the \
+             rollback entry or change the boot order"
+        ),
+        InstallClassification::Resumable => {
+            resume_package_transaction(txn)?;
+            println!(
+                "[boot-txn] resumed the interrupted package-host cutover; reboot to enter the \
+                 OSTree deployment"
+            );
+            Ok(true)
+        }
+        InstallClassification::NeedsRepair | InstallClassification::InProgress if force => {
+            let journal = boot_txn::journal_path(Path::new(STATE_DIR));
+            let kept =
+                journal.with_extension(format!("json.abandoned-{}", txn.updated_at_unix_secs));
+            fs::rename(&journal, &kept)
+                .with_context(|| format!("moving {} to {}", journal.display(), kept.display()))?;
+            eprintln!(
+                "Warning: --force given; abandoning the interrupted package boot transaction \
+                 (phase {:?}), kept at {}. The /boot snapshot it journaled stays at {}.",
+                txn.phase,
+                kept.display(),
+                txn.snapshot_dir
+            );
+            Ok(false)
+        }
+        InstallClassification::NeedsRepair | InstallClassification::InProgress => bail!(
+            "an interrupted package-host cutover (phase {:?}) cannot be resumed: either the \
+             deployment was not finished or the /boot snapshot at {} no longer matches its \
+             journaled hashes. Inspect it, then rerun with --force to start over.",
+            txn.phase,
+            txn.snapshot_dir
+        ),
+    }
+}
+
+/// Drive the package rollback staging recorded in `txn` against the live
+/// system: snapshot into the rollback state, stage the entry, mirror the
+/// state into the carried `/var`. Each step is journaled.
+fn drive_journaled_package_rollback(txn: &mut BootTransaction) -> Result<()> {
+    let snapshot_dir = PathBuf::from(&txn.snapshot_dir);
+    boot_txn::drive_package_rollback(
+        txn,
+        Path::exists,
+        |staging| {
+            stage_package_rollback(
+                &snapshot_dir,
+                Path::new(&staging.state_dir),
+                &staging.cmdline,
+                staging.nvram.as_deref(),
+                Path::new(&staging.target_boot),
+                staging.target_supports_bls.unwrap_or(false),
+            )
+            .map(|staged| staged.entry_path)
+        },
+        |staging| mirror_rollback_state(Path::new(&staging.state_dir), &staging.stateroot_var),
+        persist_transaction,
+    )?;
+    let staging = txn
+        .package_rollback
+        .as_ref()
+        .context("package boot transaction has no rollback staging record")?;
+    match staging.phase {
+        RollbackStagingPhase::Staged | RollbackStagingPhase::Mirrored => {
+            if let Some(entry) = staging.entry_path.as_deref() {
+                println!("[rollback] staged Previous system entry at {entry}");
+            }
+            if let Some(carried) = staging.mirrored_to.as_deref() {
+                println!("[rollback] rollback state mirrored to {carried} for post-reboot `undo`");
+            }
+        }
+        RollbackStagingPhase::Failed | RollbackStagingPhase::Pending => eprintln!(
+            "Warning: no \"Previous system\" rollback is available ({}). The boot chain has \
+             already been replaced, so `bootc-rebase undo` cannot return this host to the \
+             package system; its boot artifacts are kept in {} and can be put back by hand.",
+            staging
+                .error
+                .as_deref()
+                .unwrap_or("staging did not complete"),
+            txn.snapshot_dir
+        ),
+    }
+    Ok(())
+}
+
+/// Finish a package-host cutover that was interrupted after `Prepared`:
+/// re-drive the journaled rollback staging, select the target's bootloader,
+/// and refresh the report's rollback fields.
+fn resume_package_transaction(txn: &mut BootTransaction) -> Result<()> {
+    if txn.esp == "/boot" {
+        let restored = restore_esp(Path::new(&txn.snapshot_dir), Path::new(&txn.esp))?;
+        println!("[esp] {} artifact(s) restored", restored.len());
+    }
+    drive_journaled_package_rollback(txn)?;
+    let grub_entry = put_grub_first(&txn.target_image)?;
+    let staging = txn
+        .package_rollback
+        .clone()
+        .unwrap_or_else(|| PackageRollbackStaging::new(Path::new(""), "", Path::new(""), "", None));
+    let report_paths = [
+        Path::new(STATE_DIR).join(PACKAGE_REPORT_FILE),
+        carried_report_path(InstallSource::Package),
+    ];
+    for path in &report_paths {
+        let Ok(data) = fs::read(path) else {
+            continue;
+        };
+        let mut report: PackageInstallReport =
+            serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display()))?;
+        report.rollback_available = staging.available();
+        report.rollback_error = staging.error.clone();
+        if grub_entry.is_some() {
+            report.grub_boot_entry = grub_entry.clone();
+        }
+        let rendered =
+            serde_json::to_string_pretty(&report).expect("PackageInstallReport serializes");
+        fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))?;
+    }
+    advance_transaction(txn, BootTxnPhase::Committed)
+}
+
 fn injected_fault(point: &str) -> Result<()> {
     if std::env::var("BOOTC_REBASE_FAULT_POINT").as_deref() == Ok(point) {
         bail!("fault injection at {point}");
@@ -777,6 +1231,22 @@ pub fn promote_committed_boot_order() -> Result<()> {
     let Some(mut txn) = read_host_transaction()? else {
         bail!("no boot transaction journal found under {STATE_DIR}");
     };
+    if txn.source == TxnSource::Package {
+        // The package route makes the target first in BootOrder when it
+        // finishes; there is no one-shot entry to promote. Refuse only an
+        // unfinished cutover, whose rollback staging is still undecided.
+        let classification = classify_transaction(&txn)?;
+        if !matches!(
+            classification,
+            InstallClassification::Complete | InstallClassification::Failed
+        ) {
+            bail!(
+                "package boot transaction is {}, not finished; rerun the migration to resume it",
+                classification.as_str()
+            );
+        }
+        return Ok(());
+    }
     let observed = observe_transaction(&txn)?;
     if boot_txn::classify_install(&txn, &observed) != InstallClassification::Complete {
         bail!(
@@ -811,6 +1281,16 @@ pub struct PackageInstallReport {
     pub var_copied: bool,
     pub cross_family: bool,
     pub grub_boot_entry: Option<String>,
+    /// Whether `bootc-rebase undo` can return this host to the package
+    /// system: the "Previous system" entry was staged *and* its state is
+    /// where the booted system will look for it. False means the old boot
+    /// chain was replaced with no automatic way back. Defaulted so reports
+    /// written before this field still load.
+    #[serde(default)]
+    pub rollback_available: bool,
+    /// Why `rollback_available` is false, verbatim.
+    #[serde(default)]
+    pub rollback_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -869,9 +1349,7 @@ impl InstallConfig<'_> {
         } else {
             Some(acquire_lock()?)
         };
-        if self.source == InstallSource::Composefs
-            && handle_existing_transaction(self.target_image, self.dry_run)?
-        {
+        if handle_existing_transaction(self.source, self.target_image, self.dry_run, self.force)? {
             return Ok(());
         }
         println!("Checking system state...");
@@ -947,6 +1425,23 @@ impl InstallConfig<'_> {
                 preflight::secure_boot::TargetBootloaderKind::Shim,
                 self.force,
             )?;
+        }
+        // Same condition, and the same guard, as `hardware::assess`: a
+        // partially-read image inventory makes an absence unproven, so a
+        // skipped layer is not evidence that the kernel ships no devicetree.
+        if hardware::boots_with_devicetree(Path::new("/"))
+            && let Some(caps) = &caps
+            && let Some(target_kernel) = &caps.kernel
+            && !target_kernel.has_devicetree
+            && target_kernel.layers_skipped == 0
+            && !self.force
+        {
+            bail!(
+                "the host boots with a devicetree, but the target kernel ({}) \
+                 ships no devicetree or DTB files under /usr/lib/modules; refusing \
+                 rather than booting a device-tree platform with ACPI. Use --force to override.",
+                target_kernel.kver
+            );
         }
 
         // #256/#258: lineage gate. No /etc policy can be applied to what
@@ -1082,6 +1577,17 @@ impl InstallConfig<'_> {
         let sleep_reason = format!("bootc {} re-base in progress", self.source.route_name());
         let _sleep_guard = crate::migration::SleepGuard::new(&sleep_reason);
 
+        // The firmware half of the old boot chain, read before anything
+        // touches it: `bootc install` registers the target's own entry and
+        // `put_grub_first` below rewrites BootOrder, so this is the last
+        // moment the pre-install order is observable. `undo` puts it back
+        // from the rollback snapshot (#461).
+        let nvram_before = if self.source == InstallSource::Package {
+            efibootmgr_verbose()
+        } else {
+            None
+        };
+
         // ---- Pull ----
         println!(
             "{}",
@@ -1117,7 +1623,7 @@ impl InstallConfig<'_> {
                 .unwrap_or(0)
         ));
         let snapshot_paths = if self.source == InstallSource::Package {
-            snapshot_package_boot(Path::new("/boot"), &snapshot_dir)?
+            snapshot_package_boot(Path::new("/boot"), &snapshot_dir, esp == "/boot")?
         } else {
             snapshot_esp(Path::new(&esp), &snapshot_dir)?
         };
@@ -1137,7 +1643,7 @@ impl InstallConfig<'_> {
             );
         }
         if self.source == InstallSource::Package
-            && !snapshot_paths.iter().any(|p| p.starts_with("vmlinuz-"))
+            && !snapshot_paths.iter().any(|p| is_package_kernel_path(p))
         {
             bail!(
                 "no package-host kernel was found under /boot; refusing before \
@@ -1173,6 +1679,36 @@ impl InstallConfig<'_> {
         } else {
             None
         };
+        // The package route journals its cutover too: the /boot snapshot's
+        // hashes and every input of the rollback staging that has to happen
+        // after `bootc install` has replaced /boot (#462).
+        let mut package_transaction = if self.source == InstallSource::Package {
+            let transaction = BootTransaction::new_package(
+                self.target_image,
+                Path::new(&esp),
+                &snapshot_dir,
+                boot_txn::snapshot_hashes(&snapshot_dir, &snapshot_paths)?,
+                nvram_before
+                    .as_deref()
+                    .and_then(rollback::parse_boot_order)
+                    .unwrap_or_default(),
+                PackageRollbackStaging::new(
+                    Path::new(crate::package_rollback::STATE_DIR),
+                    self.source.stateroot_var(),
+                    Path::new("/boot"),
+                    &cmdline,
+                    nvram_before.as_deref(),
+                ),
+            );
+            persist_transaction(&transaction)?;
+            println!(
+                "[boot-txn] package cutover begun; journaled {} /boot snapshot hash(es)",
+                transaction.esp_file_hashes.len()
+            );
+            Some(transaction)
+        } else {
+            None
+        };
 
         // A previous failed attempt may have removed the stateroot /var while
         // the repo layout survives; `bootc install` reuses extant layouts
@@ -1198,16 +1734,32 @@ impl InstallConfig<'_> {
             )
         );
         println!("[deploy] streaming `bootc install` output below (OSTree import takes minutes)…");
-        let _boot_binds = if self.source == InstallSource::Composefs {
-            Some(bind_boot_into_physical_root(&esp)?)
-        } else {
-            None
-        };
         let kargs = if self.source == InstallSource::Package {
-            package_carry_over_kargs(&cmdline)
+            let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+            let probe = RootProbe::live(Path::new(self.source.physical_root()), &mounts);
+            let kargs = package_carry_over_kargs_probed(&cmdline, probe);
+            // A LUKS root with no derivable locator would deploy kargs with
+            // no `root=` at all and stop in the initramfs — after the ESP
+            // has been replaced. Refuse while nothing is mutated yet.
+            if probe.root_on_crypt() && !kargs.iter().any(|k| k.starts_with("root=")) {
+                bail!(
+                    "the root filesystem is unlocked from a LUKS volume, but no root locator \
+                     could be derived for the new deployment: the kernel command line carries \
+                     neither rd.luks.* nor root=, the root device's device-mapper identity \
+                     names no LUKS header, and {}etc/crypttab has no entry for the root \
+                     mapping. Installing now would deploy a kernel that stops in the \
+                     initramfs. Add the root mapping to /etc/crypttab and re-run, or install \
+                     with the values for this host passed by hand \
+                     (`--karg rd.luks.name=<luks-uuid>=<mapper-name> --karg \
+                     root=/dev/mapper/<mapper-name>`).",
+                    self.source.physical_root()
+                );
+            }
+            kargs
         } else {
             carry_over_kargs(&cmdline)
         };
+        let _boot_binds = bind_boot_into_physical_root(&esp, self.source.physical_root())?;
         let argv = install_command_for_root(self.target_image, &kargs, self.source.physical_root());
         println!("[deploy] {}", argv.join(" "));
         let status = Command::new(&argv[0])
@@ -1219,6 +1771,10 @@ impl InstallConfig<'_> {
             if let Some(transaction) = boot_transaction.as_mut() {
                 rollback_interrupted_transaction(transaction, &cause)?;
                 bail!("{cause} (composefs boot path restored and observed)");
+            }
+            if let Some(transaction) = package_transaction.as_mut() {
+                transaction.error = Some(cause.clone());
+                persist_transaction(transaction)?;
             }
             bail!(
                 "{cause}; the pre-install boot snapshot is at {}",
@@ -1275,6 +1831,10 @@ impl InstallConfig<'_> {
         })?;
         let deploy_root = Path::new(self.source.deploy_dir()).join(&deployment);
         println!("[deploy] new deployment: {}", deploy_root.display());
+        if let Some(transaction) = package_transaction.as_mut() {
+            transaction.deployment = Some(deployment.clone());
+            advance_transaction(transaction, BootTxnPhase::EntryCreated)?;
+        }
 
         // ---- /etc ----
         println!(
@@ -1394,6 +1954,40 @@ impl InstallConfig<'_> {
                 }
             )
         );
+        // Package hosts: the "Previous system" rollback is staged here, after
+        // bootc replaced /boot, and the journaled transaction drives it so an
+        // interrupted run resumes the same staging (#462 with #387).
+        let mut rollback_available = false;
+        let mut rollback_error = None;
+        if let Some(transaction) = package_transaction.as_mut() {
+            // Read before the restore below: `restore_esp` puts the source's
+            // own `loader/entries/*.conf` and `loader/loader.conf` back, after
+            // which this describes the source's loader rather than the target's.
+            let target_boot = Path::new("/boot");
+            let target_supports_bls = target_boot.join("loader/entries").is_dir()
+                || target_boot.join("loader/loader.conf").is_file();
+            let staging = transaction
+                .package_rollback
+                .as_mut()
+                .context("package boot transaction has no rollback staging record")?;
+            staging.target_supports_bls = Some(target_supports_bls);
+            // The /var copy above ran before this state existed, so without
+            // the mirror the booted system has no package-rollback directory
+            // and `undo` fails exactly when it is needed.
+            staging.mirror = var_copied;
+            advance_transaction(transaction, BootTxnPhase::Prepared)?;
+            if esp == "/boot" {
+                let restored = restore_esp(&snapshot_dir, Path::new(&esp))?;
+                println!("[esp] {} artifact(s) restored", restored.len());
+            }
+            drive_journaled_package_rollback(transaction)?;
+            let staging = transaction
+                .package_rollback
+                .as_ref()
+                .context("package boot transaction has no rollback staging record")?;
+            rollback_available = staging.available();
+            rollback_error = staging.error.clone();
+        }
         let mut esp_resident_entry = None;
         let (grub_entry, systemd_boot_entry) = if let Some(transaction) = boot_transaction.as_mut()
         {
@@ -1475,6 +2069,8 @@ impl InstallConfig<'_> {
                 var_copied,
                 cross_family: cross.is_some(),
                 grub_boot_entry: grub_entry.clone(),
+                rollback_available,
+                rollback_error,
             })
             .expect("PackageInstallReport serializes")
         } else {
@@ -1536,13 +2132,26 @@ impl InstallConfig<'_> {
             injected_fault("before-arm")?;
             arm_transaction(transaction)?;
         }
+        if let Some(transaction) = package_transaction.as_mut() {
+            advance_transaction(transaction, BootTxnPhase::Committed)?;
+        }
         if self.source == InstallSource::Package {
-            println!(
-                "OSTree deployment staged. Reboot to enter it. The old package system remains \
-                 on disk, and its boot artifacts are retained in {} for the Previous system \
-                 rollback entry (#374).",
-                snapshot_dir.display()
-            );
+            if rollback_available {
+                println!(
+                    "OSTree deployment staged. Reboot to enter it. The old package system \
+                     remains on disk; `bootc-rebase undo` returns to it through the \
+                     \"Previous system\" entry, and its boot artifacts are retained in {}.",
+                    snapshot_dir.display()
+                );
+            } else {
+                println!(
+                    "OSTree deployment staged. Reboot to enter it. The old package system's \
+                     files remain on disk, but no \"Previous system\" entry is in place, so \
+                     `bootc-rebase undo` cannot return to it; its boot artifacts are retained \
+                     in {}.",
+                    snapshot_dir.display()
+                );
+            }
         } else if esp_resident_entry.is_some() {
             println!(
                 "OSTree deployment staged for one boot through systemd-boot; the composefs \
@@ -1601,6 +2210,92 @@ fn efibootmgr(target_image: &str) -> Command {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd
+}
+
+/// `efibootmgr -v` output, or `None` with a warning — a boot order that
+/// cannot be read is simply one `undo` will not restore, never a reason to
+/// stop a migration.
+fn efibootmgr_verbose() -> Option<String> {
+    match Command::new("efibootmgr").arg("-v").output() {
+        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(out) => {
+            eprintln!(
+                "Warning: efibootmgr -v failed ({}); `undo` will not be able to restore the \
+                 pre-install BootOrder.",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: could not run efibootmgr ({e}); `undo` will not be able to restore \
+                 the pre-install BootOrder."
+            );
+            None
+        }
+    }
+}
+
+/// Snapshot the package host's boot artifacts into the persistent rollback
+/// state and stage the "Previous system" entry on the target's boot
+/// filesystem. Every step here has reachable failure modes (no kernel under
+/// the snapshot, no matching initramfs, an empty command line, a missing
+/// artifact, a full ESP), and by this point the old boot chain is already
+/// gone: the caller reports the failure rather than announcing a reversible
+/// migration it cannot reverse.
+fn stage_package_rollback(
+    snapshot_dir: &Path,
+    state_dir: &Path,
+    cmdline: &str,
+    nvram: Option<&str>,
+    target_boot: &Path,
+    target_supports_bls: bool,
+) -> Result<crate::package_rollback::StageReport> {
+    let source_id = crate::package_rollback::source_identity_from_root(Path::new("/"))
+        .context("reading the source system's identity")?;
+    let _ = fs::remove_dir_all(state_dir);
+    let snapshot = crate::package_rollback::snapshot_source_boot(
+        snapshot_dir,
+        state_dir,
+        source_id,
+        cmdline,
+        nvram,
+    )
+    .with_context(|| {
+        format!(
+            "snapshotting the source boot artifacts from {}",
+            snapshot_dir.display()
+        )
+    })?;
+    println!(
+        "[rollback] snapshotted package host rollback artifacts ({})",
+        snapshot.source.label()
+    );
+    crate::package_rollback::stage_rollback(state_dir, target_boot, target_supports_bls)
+        .with_context(|| format!("staging the entry on {}", target_boot.display()))
+}
+
+/// Mirror the rollback state into the stateroot `/var`, which becomes `/var`
+/// after the reboot. The live `/var` was copied into the stateroot before
+/// this state existed, so on a host without a `/var` filesystem of its own
+/// the booted system would otherwise have no rollback state at all. Both
+/// copies are kept: the live one still serves a run that never reboots.
+fn mirror_rollback_state(state_dir: &Path, stateroot_var: &str) -> Result<PathBuf> {
+    let relative = crate::package_rollback::STATE_DIR
+        .strip_prefix("/var/")
+        .ok_or_else(|| {
+            anyhow!(
+                "rollback state {} is not on /var",
+                crate::package_rollback::STATE_DIR
+            )
+        })?;
+    let carried = Path::new(stateroot_var).join(relative);
+    if carried.exists() {
+        fs::remove_dir_all(&carried).with_context(|| format!("replacing {}", carried.display()))?;
+    }
+    xattr::copy_dir_all_with_xattrs(state_dir, &carried)
+        .with_context(|| format!("copying {} to {}", state_dir.display(), carried.display()))?;
+    Ok(carried)
 }
 
 /// Whether `efibootmgr -v` lists a "Linux Boot Manager" entry.
@@ -1940,10 +2635,20 @@ fn snapshot_esp(esp: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
 }
 
 /// Snapshot the package host's boot artifacts for the rollback-entry stage.
-fn snapshot_package_boot(boot: &Path, snapshot_dir: &Path) -> Result<Vec<String>> {
+fn snapshot_package_boot(boot: &Path, snapshot_dir: &Path, whole_esp: bool) -> Result<Vec<String>> {
     let mut listing = Vec::new();
     walk_files(boot, boot, &mut listing)?;
-    let paths = package_boot_snapshot_paths(listing.iter().map(String::as_str));
+    let paths = if whole_esp {
+        let mut p: Vec<String> = listing
+            .into_iter()
+            .map(|s| s.trim_start_matches('/').to_string())
+            .collect();
+        p.sort();
+        p.dedup();
+        p
+    } else {
+        package_boot_snapshot_paths(listing.iter().map(String::as_str))
+    };
     for rel in &paths {
         let src = boot.join(rel);
         let dst = snapshot_dir.join(rel);
@@ -2013,12 +2718,29 @@ fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
 /// E2E run). For that layout the ESP is bound at `/target/boot/efi` and
 /// `/target/boot` stays the root filesystem's own directory, where bootc
 /// then puts the OSTree kernels and BLS entries.
-struct BootBinds(Vec<PathBuf>);
+struct BootBinds(Vec<BoundDir>);
+
+/// One bind the install needed, and whether its mountpoint directory had to
+/// be created for it. On the package route with the ESP at `/boot`, that
+/// directory is `efi` *on the ESP*: leaving it there would add a file to a
+/// boot chain `undo` has to restore as it was.
+struct BoundDir {
+    path: PathBuf,
+    created: bool,
+}
 
 impl Drop for BootBinds {
     fn drop(&mut self) {
-        for p in self.0.iter().rev() {
-            let _ = Command::new("umount").arg(p).status();
+        for bind in self.0.iter().rev() {
+            let _ = Command::new("umount").arg(&bind.path).status();
+            // Only when the bind created it and nothing else moved in:
+            // an empty directory is this module's leftover, a populated
+            // one is the host's.
+            if bind.created
+                && fs::read_dir(&bind.path).is_ok_and(|mut entries| entries.next().is_none())
+            {
+                let _ = fs::remove_dir(&bind.path);
+            }
         }
     }
 }
@@ -2053,21 +2775,25 @@ fn live_boot_mounts(esp: &str) -> Vec<&str> {
         .collect()
 }
 
-fn bind_boot_into_physical_root(esp: &str) -> Result<BootBinds> {
+fn bind_boot_into_physical_root(esp: &str, physical_root: &str) -> Result<BootBinds> {
     let live_mounts = live_boot_mounts(esp);
     let mut bound = Vec::new();
     for (live, rel) in boot_bind_plan(esp, &live_mounts) {
-        let target = Path::new(PHYSICAL_ROOT).join(&rel);
+        let target = Path::new(physical_root).join(&rel);
         if is_mountpoint(&target) {
             continue;
         }
+        let created = !target.exists();
         fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
         run_checked(
             Command::new("mount").args(["--bind", &live, &target.display().to_string()]),
             "bind-mounting the boot partition into the physical root",
         )?;
         println!("[deploy] bound {live} at {}", target.display());
-        bound.push(target);
+        bound.push(BoundDir {
+            path: target,
+            created,
+        });
     }
     Ok(BootBinds(bound))
 }
@@ -2852,6 +3578,231 @@ mod tests {
         }
     }
 
+    #[test]
+    fn package_boot_snapshot_paths_matches_pmos_files() {
+        let listing = [
+            "vmlinuz",
+            "initramfs",
+            "sc8280xp-lenovo-thinkpad-x13s.dtb",
+            "dtbs/sc8280xp.dtb",
+            "loader/entries/pmos.conf",
+            "loader/loader.conf",
+            "random-junk.txt",
+        ];
+        assert_eq!(
+            package_boot_snapshot_paths(listing),
+            vec![
+                "dtbs/sc8280xp.dtb",
+                "initramfs",
+                "loader/entries/pmos.conf",
+                "loader/loader.conf",
+                "sc8280xp-lenovo-thinkpad-x13s.dtb",
+                "vmlinuz",
+            ]
+        );
+    }
+
+    /// A probe over a temporary directory: no fact comes from the machine
+    /// running the tests.
+    fn probe<'a>(root: &'a Path, mounts: &'a str, sys_class_block: &'a Path) -> RootProbe<'a> {
+        RootProbe {
+            root,
+            mount_point: "/",
+            mounts,
+            sys_class_block,
+        }
+    }
+
+    /// Write a `/sys/class/block`-shaped device-mapper device.
+    fn dm_device(sys_class_block: &Path, kernel_name: &str, dm_name: &str, dm_uuid: &str) {
+        let dm = sys_class_block.join(kernel_name).join("dm");
+        fs::create_dir_all(&dm).unwrap();
+        fs::write(dm.join("name"), format!("{dm_name}\n")).unwrap();
+        fs::write(dm.join("uuid"), format!("{dm_uuid}\n")).unwrap();
+    }
+
+    #[test]
+    fn package_carry_over_kargs_with_pmos_arm64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmdline = "arm64.nopauth clk_ignore_unused pd_ignore_unused \
+                       pmos_root_uuid=550e8400-e29b-41d4-a716-446655440000 pmos_boot_uuid=1111-2222";
+        // Nothing mounted, no sysfs, no crypttab: the bootloader's own
+        // argument is the only locator, and the mapper name it implies is
+        // the initramfs default.
+        let kargs = package_carry_over_kargs_probed(
+            cmdline,
+            probe(tmp.path(), "", &tmp.path().join("absent-sys")),
+        );
+        assert_eq!(
+            kargs,
+            vec![
+                "arm64.nopauth",
+                "clk_ignore_unused",
+                "pd_ignore_unused",
+                "rd.luks.name=550e8400-e29b-41d4-a716-446655440000=root",
+                "root=/dev/mapper/root",
+            ]
+        );
+    }
+
+    #[test]
+    fn crypttab_parser_table() {
+        let content = "# comments\n\
+            \n\
+            swap UUID=1111-2222 /dev/urandom swap,cipher=aes-xts-plain64\n\
+            cryptroot UUID=550e8400-e29b-41d4-a716-446655440000 none luks\n\
+            byuuid /dev/disk/by-uuid/3333-4444 none luks\n\
+            plain /dev/sda3 none luks\n\
+            cryptswap UUID=5555-6666 none luks\n";
+        let entries = parse_crypttab(content);
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].name, "swap");
+        assert!(entries[0].swap);
+        assert_eq!(
+            entries[1].uuid.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(!entries[1].swap);
+        assert_eq!(entries[2].uuid.as_deref(), Some("3333-4444"));
+        assert_eq!(entries[3].uuid, None);
+        // Named like swap without the option: still never the root volume.
+        assert!(entries[4].swap);
+
+        // Swap first: the root volume is chosen by mapper name, and with no
+        // name to go on the lone non-swap UUID entry wins — but two of them
+        // are a guess, so nothing is returned.
+        assert_eq!(
+            select_root_crypttab_entry(&entries, Some("cryptroot"))
+                .map(|entry| entry.name.as_str()),
+            Some("cryptroot")
+        );
+        assert_eq!(select_root_crypttab_entry(&entries, Some("absent")), None);
+        assert_eq!(select_root_crypttab_entry(&entries, None), None);
+        let single = parse_crypttab("swap UUID=1 /dev/urandom swap\nroot UUID=2222 none luks\n");
+        assert_eq!(
+            select_root_crypttab_entry(&single, None).and_then(|entry| entry.uuid.as_deref()),
+            Some("2222")
+        );
+    }
+
+    #[test]
+    fn crypt_dm_identity_parser_table() {
+        let cases = [
+            (
+                "CRYPT-LUKS2-550e8400e29b41d4a716446655440000-cryptroot\n",
+                "cryptroot",
+                Some(("550e8400-e29b-41d4-a716-446655440000", "cryptroot")),
+            ),
+            (
+                "CRYPT-LUKS1-550E8400E29B41D4A716446655440000-root",
+                "",
+                Some(("550e8400-e29b-41d4-a716-446655440000", "root")),
+            ),
+            // The live dm name wins over the one baked into the uuid.
+            (
+                "CRYPT-LUKS2-550e8400e29b41d4a716446655440000-old-name",
+                "renamed",
+                Some(("550e8400-e29b-41d4-a716-446655440000", "renamed")),
+            ),
+            // No header UUID to carry.
+            ("CRYPT-PLAIN-root", "root", None),
+            ("LVM-abcdef", "vg-root", None),
+        ];
+        for (uuid, name, want) in cases {
+            assert_eq!(
+                parse_crypt_dm_identity(uuid, name),
+                want.map(|(uuid, name)| RootLuksMapping {
+                    uuid: uuid.to_string(),
+                    name: name.to_string(),
+                }),
+                "{uuid:?}"
+            );
+        }
+    }
+
+    /// The whole derivation over a temporary root: a crypttab that lists
+    /// swap first must not hand the swap volume's UUID (and the mapper name
+    /// `root`) to a deployment whose root is `cryptroot`.
+    #[test]
+    fn root_locator_is_the_root_volumes_not_the_first_crypttab_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(
+            root.join("etc/crypttab"),
+            "swap UUID=11111111-1111-1111-1111-111111111111 /dev/urandom swap\n\
+             cryptroot UUID=550e8400-e29b-41d4-a716-446655440000 none luks\n",
+        )
+        .unwrap();
+        let mounts = "/dev/mapper/cryptroot / ext4 rw,relatime 0 0\n\
+                      /dev/nvme0n1p1 /boot vfat rw 0 0\n";
+        let sys = tmp.path().join("sys/class/block");
+        let cmdline = "console=tty0 quiet";
+
+        // Without sysfs the crypttab still has to be read through the root
+        // mapper name, never by position.
+        assert_eq!(
+            package_carry_over_kargs_probed(cmdline, probe(&root, mounts, &sys)),
+            vec![
+                "console=tty0",
+                "rd.luks.name=550e8400-e29b-41d4-a716-446655440000=cryptroot",
+                "root=/dev/mapper/cryptroot",
+            ]
+        );
+
+        // With the live mapping present it is authoritative, crypttab or not.
+        dm_device(
+            &sys,
+            "dm-0",
+            "cryptroot",
+            "CRYPT-LUKS2-99999999888877776666555544443333-cryptroot",
+        );
+        let kargs = package_carry_over_kargs_probed(cmdline, probe(&root, mounts, &sys));
+        let want = "rd.luks.name=99999999-8888-7777-6666-555544443333=cryptroot";
+        assert!(kargs.contains(&want.to_string()), "{kargs:?}");
+        assert!(probe(&root, mounts, &sys).root_on_crypt());
+    }
+
+    /// A LUKS root with no derivable locator must be visible as such: no
+    /// `root=` karg, and the dm facts still say the root is encrypted, which
+    /// is what makes the install refuse instead of deploying a kernel that
+    /// stops in the initramfs.
+    #[test]
+    fn luks_root_without_any_locator_yields_no_root_karg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        // Names a device node, not a UUID: nothing to build rd.luks.name from.
+        let crypttab = "cryptroot /dev/sda2 none luks\n";
+        fs::write(root.join("etc/crypttab"), crypttab).unwrap();
+        let mounts = "/dev/mapper/cryptroot / ext4 rw 0 0\n";
+        let sys = tmp.path().join("sys/class/block");
+        dm_device(&sys, "dm-0", "cryptroot", "CRYPT-PLAIN-cryptroot");
+        let probe = probe(&root, mounts, &sys);
+
+        let kargs = package_carry_over_kargs_probed("console=tty0 quiet", probe);
+        assert_eq!(kargs, vec!["console=tty0"]);
+        assert!(probe.root_on_crypt());
+
+        // LVM on LUKS is the same refusal: the stack is walked, not guessed.
+        let stacked = tmp.path().join("stacked/class/block");
+        dm_device(&stacked, "dm-1", "vg-root", "LVM-abcdef");
+        fs::create_dir_all(stacked.join("dm-1/slaves/dm-0")).unwrap();
+        dm_device(
+            &stacked,
+            "dm-0",
+            "luks-x",
+            "CRYPT-LUKS2-00112233445566778899aabbccddeeff-luks-x",
+        );
+        let stacked_probe = RootProbe {
+            root: &root,
+            mount_point: "/",
+            mounts: "/dev/mapper/vg-root / ext4 rw 0 0\n",
+            sys_class_block: &stacked,
+        };
+        assert!(stacked_probe.root_on_crypt());
+    }
+
     /// Snapshot then restore over a "wiped" ESP that bootupd has partially
     /// repopulated: composefs artifacts come back, bootupd's files are never
     /// overwritten, and an unrelated file is not touched.
@@ -2906,6 +3857,73 @@ mod tests {
         assert_eq!(r("EFI/BOOT/BOOTX64.EFI"), "shim-fallback");
         assert_eq!(r("loader/loader.conf"), "written-by-something-else");
         assert_eq!(r("EFI/fedora/shimx64.efi"), "shim");
+    }
+
+    /// The pmOS-shaped layout: the ESP *is* `/boot`, so the snapshot is the
+    /// whole filesystem rather than the kernel/BLS filter, and the restore
+    /// has to bring back the devicetree blobs, the `dtbs/` tree, the loader
+    /// configuration and a foreign BLS entry over an ESP `bootc install`
+    /// emptied — without touching anything the install put there.
+    #[test]
+    fn whole_esp_snapshot_restores_dtbs_and_foreign_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let esp = tmp.path().join("esp");
+        let w = |p: &str, c: &str| {
+            let full = esp.join(p);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, c).unwrap();
+        };
+        w("vmlinuz", "pmos kernel");
+        w("initramfs", "pmos initrd");
+        w("sc8280xp-lenovo-thinkpad-x13s.dtb", "board dtb");
+        w("dtbs/qcom/sc8280xp.dtb", "vendor dtb");
+        w(
+            "loader/entries/pmos.conf",
+            "title postmarketOS\nlinux /vmlinuz\n",
+        );
+        w("loader/loader.conf", "default pmos.conf\ntimeout 3\n");
+        w("EFI/systemd/systemd-bootaa64.efi", "sd-boot");
+
+        let snap = tmp.path().join("snap");
+        let taken = snapshot_package_boot(&esp, &snap, true).unwrap();
+        // Whole-ESP mode keeps everything, including the paths the
+        // kernel/BLS filter drops (`dtbs/qcom/…` is two levels down, the
+        // EFI binary is not a boot artifact by that filter's rules).
+        assert_eq!(
+            taken,
+            vec![
+                "EFI/systemd/systemd-bootaa64.efi",
+                "dtbs/qcom/sc8280xp.dtb",
+                "initramfs",
+                "loader/entries/pmos.conf",
+                "loader/loader.conf",
+                "sc8280xp-lenovo-thinkpad-x13s.dtb",
+                "vmlinuz",
+            ]
+        );
+
+        // `bootc install` empties the ESP and writes its own boot chain.
+        fs::remove_dir_all(&esp).unwrap();
+        w("vmlinuz", "target kernel");
+        w("loader/entries/ostree-1.conf", "title Fedora\n");
+        w("loader/loader.conf", "default ostree-1.conf\n");
+
+        let restored = restore_esp(&snap, &esp).unwrap();
+        let r = |p: &str| fs::read_to_string(esp.join(p)).unwrap();
+        assert_eq!(r("sc8280xp-lenovo-thinkpad-x13s.dtb"), "board dtb");
+        assert_eq!(r("dtbs/qcom/sc8280xp.dtb"), "vendor dtb");
+        assert_eq!(
+            r("loader/entries/pmos.conf"),
+            "title postmarketOS\nlinux /vmlinuz\n"
+        );
+        assert_eq!(r("initramfs"), "pmos initrd");
+        assert_eq!(r("EFI/systemd/systemd-bootaa64.efi"), "sd-boot");
+        // What the install wrote stays as the install left it.
+        assert_eq!(r("vmlinuz"), "target kernel");
+        assert_eq!(r("loader/loader.conf"), "default ostree-1.conf\n");
+        assert_eq!(r("loader/entries/ostree-1.conf"), "title Fedora\n");
+        assert!(!restored.contains(&"vmlinuz".to_string()));
+        assert!(restored.contains(&"loader/entries/pmos.conf".to_string()));
     }
 
     #[test]

@@ -76,6 +76,7 @@ Also available via just: `just watch log="e2e-luks.log"`
 | boot transaction resume (`E2E_BOOT_TXN_FAULT=before-arm`, non-gating) | dakota:stable (composefs-native) | quay.io/fedora/fedora-bootc:44 | btrfs | 40G |
 | Dakota → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 80G |
 | composefs image swap (`E2E_MODE=image-swap`, non-gating) | dakota:stable (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 40G |
+| Utah ostree → composefs (non-gating) | utah:testing (OSTree) | utah:testing | btrfs+crypt | 60G |
 | Cross-family image swap (`E2E_MODE=image-swap`, `E2E_CROSS_FAMILY=1`, non-gating) | tunaOS marlin:gnome (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 60G |
 | Marlin → Utah (`E2E_MODE=composefs-to-ostree`, non-gating) | tunaOS marlin:gnome (composefs-native) | utah:testing (Fedora Hummingbird) | btrfs | 80G |
 | tunaOS desktop ring (`ostree-rebase`, `--de-migrate`, 4 cells, non-gating) | albacore:gnome, :niri, :cosmic, :xfce | the next desktop in the ring | btrfs | 40G |
