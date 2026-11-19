@@ -261,6 +261,14 @@ class KnownFlakeSignature(unittest.TestCase):
         self.assertEqual(step.count("./tests/run-e2e.sh"), 2)
         self.assertIn("./tests/e2e-known-flake.sh e2e-run.log", step)
         self.assertIn("#368", step)
+        # The retry must not restore the first attempt's checkpoint.
+        checkpoint = (
+            HARNESS.split('CHECKPOINT="$WORKSPACE_DIR/', 1)[1].split('"', 1)[0]
+        )
+        retry = step[step.index("RETRY 1/1") :]
+        self.assertLess(
+            retry.index(f"rm -f {checkpoint}"), retry.index("./tests/run-e2e.sh")
+        )
 
 
 if __name__ == "__main__":
