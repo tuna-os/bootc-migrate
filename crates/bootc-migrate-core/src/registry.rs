@@ -381,6 +381,57 @@ pub(crate) fn listing_names(listing: &str) -> Vec<String> {
         .collect()
 }
 
+/// Apply one image layer's member `names` below `prefix` to `set`, the way an
+/// OCI runtime applies a layer over the layers before it. Call it once per
+/// layer, oldest layer first. `set` holds `key(path below prefix)` for every
+/// member that is still present.
+///
+/// A layer's whiteouts act only on the layers below it, so they are applied
+/// before the layer's own members, in whatever order the listing has them:
+/// - `.wh.<name>` removes `<name>` and everything below it;
+/// - `.wh..wh..opq` removes everything below its directory.
+///
+/// Then each other member for which `keep(path below prefix)` is true is
+/// added. Directory members (a trailing `/`) and whiteout markers are never
+/// added.
+///
+/// This is the one implementation of the OCI whiteout rules in this crate.
+pub(crate) fn apply_layer_listing(
+    set: &mut std::collections::BTreeSet<String>,
+    names: &[String],
+    prefix: &str,
+    key: impl Fn(&str) -> String,
+    keep: impl Fn(&str) -> bool,
+) {
+    let rels: Vec<&str> = names
+        .iter()
+        .filter_map(|raw| raw.trim_start_matches("./").strip_prefix(prefix))
+        .collect();
+    for rel in &rels {
+        let (dir, base) = match rel.rsplit_once('/') {
+            Some((d, b)) => (Some(d), b),
+            None => (None, *rel),
+        };
+        if base == ".wh..wh..opq" {
+            let below = dir.map(|d| format!("{d}/")).unwrap_or_default();
+            set.retain(|k| !k.starts_with(&below));
+        } else if let Some(gone) = base.strip_prefix(".wh.") {
+            let gone = key(&match dir {
+                Some(d) => format!("{d}/{gone}"),
+                None => gone.to_string(),
+            });
+            let below = format!("{gone}/");
+            set.retain(|k| k != &gone && !k.starts_with(&below));
+        }
+    }
+    for rel in rels {
+        let base = rel.rsplit_once('/').map_or(rel, |(_, b)| b);
+        if !base.is_empty() && !base.starts_with(".wh.") && keep(rel) {
+            set.insert(key(rel));
+        }
+    }
+}
+
 /// The hard-link targets of every archive member under one of `paths`, read
 /// from a `tar -tv` listing, which prints a hard link as
 /// `h... <name> link to <target>`. Empty when the layer has none.
@@ -1360,6 +1411,68 @@ fn extract_one_from_layer(blob: &Path, src: &Path, dst: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OCI whiteout rules, applied layer by layer, oldest first. Keys are
+    /// paths below `usr/`, unchanged.
+    #[test]
+    fn layer_listing_applies_oci_whiteouts() {
+        // (what, each layer's member names oldest first, the keys left)
+        type Case = (
+            &'static str,
+            &'static [&'static [&'static str]],
+            &'static [&'static str],
+        );
+        let cases: &[Case] = &[
+            (
+                "a later layer deletes a file",
+                &[&["usr/a", "usr/b"], &["usr/.wh.a"]],
+                &["b"],
+            ),
+            (
+                "a whiteout of a directory deletes everything below it",
+                &[&["usr/d/x", "usr/d/y/z", "usr/dx"], &["usr/.wh.d"]],
+                &["dx"],
+            ),
+            (
+                "an opaque directory hides lower content but keeps its own",
+                &[
+                    &["usr/d/old", "usr/e/keep"],
+                    &["usr/d/new", "usr/d/.wh..wh..opq"],
+                ],
+                &["d/new", "e/keep"],
+            ),
+            (
+                "an opaque marker at the prefix root clears every lower member",
+                &[&["usr/a", "usr/d/b"], &["usr/.wh..wh..opq", "usr/c"]],
+                &["c"],
+            ),
+            (
+                "a whiteout acts on lower layers, never on its own layer",
+                &[&["usr/a"], &["usr/a", "usr/.wh.a"]],
+                &["a"],
+            ),
+            (
+                "a deleted path comes back when a later layer adds it again",
+                &[&["usr/a"], &["usr/.wh.a"], &["./usr/a"]],
+                &["a"],
+            ),
+            (
+                "markers, directories and members outside the prefix are never added",
+                &[&["usr/.wh.gone", "usr/d/", "usr/d/.wh..wh..opq", "etc/x"]],
+                &[],
+            ),
+        ];
+        for (what, layers, want) in cases {
+            let mut set = std::collections::BTreeSet::new();
+            for layer in *layers {
+                let names: Vec<String> = layer.iter().map(|s| s.to_string()).collect();
+                apply_layer_listing(&mut set, &names, "usr/", str::to_string, |_| true);
+            }
+            let want: std::collections::BTreeSet<String> =
+                want.iter().map(|s| s.to_string()).collect();
+            assert_eq!(set, want, "{what}");
+        }
+    }
 
     /// ostree-exported layers: the real path is a hard link to the object.
     #[test]

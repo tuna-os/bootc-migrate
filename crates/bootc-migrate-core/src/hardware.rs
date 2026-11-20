@@ -227,32 +227,10 @@ fn class_match(p: &[char], c: char) -> Option<(bool, usize)> {
 
 /// Apply one layer's `usr/lib/firmware` listing to the firmware set, oldest
 /// layer first: OCI whiteouts (`.wh.<name>`, `.wh..wh..opq`) remove what
-/// earlier layers added.
+/// earlier layers added. The whiteout rules are
+/// `crate::registry::apply_layer_listing`'s.
 pub fn apply_firmware_listing(set: &mut BTreeSet<String>, names: &[String]) {
-    const PREFIX: &str = "usr/lib/firmware/";
-    for raw in names {
-        let name = raw.trim_start_matches("./");
-        let Some(rel) = name.strip_prefix(PREFIX) else {
-            continue;
-        };
-        let (dir, base) = match rel.rsplit_once('/') {
-            Some((d, b)) => (Some(d), b),
-            None => (None, rel),
-        };
-        if base == ".wh..wh..opq" {
-            let prefix = dir.map(|d| format!("{d}/")).unwrap_or_default();
-            set.retain(|f| !f.starts_with(&prefix));
-        } else if let Some(gone) = base.strip_prefix(".wh.") {
-            let gone = match dir {
-                Some(d) => format!("{d}/{gone}"),
-                None => gone.to_string(),
-            };
-            let gone = norm_firmware(&gone);
-            set.retain(|f| f != &gone && !f.starts_with(&format!("{gone}/")));
-        } else if !base.is_empty() {
-            set.insert(norm_firmware(rel));
-        }
-    }
+    crate::registry::apply_layer_listing(set, names, "usr/lib/firmware/", norm_firmware, |_| true);
 }
 
 /// Apply one layer's `usr/lib/modules` listing to the DTB set, oldest layer
@@ -265,26 +243,11 @@ pub fn apply_firmware_listing(set: &mut BTreeSet<String>, names: &[String]) {
 /// host, so the registry scan reads them from the layer listing and extracts
 /// none of them.
 pub fn apply_dtb_listing(set: &mut BTreeSet<String>, names: &[String]) {
-    const PREFIX: &str = "usr/lib/modules/";
-    for raw in names {
-        let name = raw.trim_start_matches("./");
-        let Some(rel) = name.strip_prefix(PREFIX) else {
-            continue;
-        };
-        // A bare `<kver>` member holds nothing; every DTB is below it.
-        let Some((dir, base)) = rel.rsplit_once('/') else {
-            continue;
-        };
-        if base == ".wh..wh..opq" {
-            let prefix = format!("{dir}/");
-            set.retain(|d| !d.starts_with(&prefix));
-        } else if let Some(gone) = base.strip_prefix(".wh.") {
-            let gone = format!("{dir}/{gone}");
-            set.retain(|d| d != &gone && !d.starts_with(&format!("{gone}/")));
-        } else if base.ends_with(".dtb") {
-            set.insert(rel.to_string());
-        }
-    }
+    // A member directly under `usr/lib/modules` is a `<kver>` directory, not
+    // a DTB: every DTB is below its kernel's directory.
+    crate::registry::apply_layer_listing(set, names, "usr/lib/modules/", str::to_string, |rel| {
+        rel.contains('/') && rel.ends_with(".dtb")
+    });
 }
 
 /// A device that is bound to a driver on this machine today.
@@ -1689,6 +1652,56 @@ mod tests {
             set,
             ["6.16.0/dtb/rockchip/rk3399-pinephone-pro.dtb".to_string()].into()
         );
+    }
+
+    /// Both inventories share the registry's whiteout rules: a kernel
+    /// directory removed by a later layer takes its DTBs with it, and an
+    /// opaque marker never hides the members of its own layer, whatever
+    /// order the layer's listing has.
+    #[test]
+    fn inventories_apply_whiteouts_at_every_level_and_in_any_order() {
+        let names = |l: &[&str]| -> Vec<String> { l.iter().map(|s| s.to_string()).collect() };
+
+        let mut dtbs = BTreeSet::new();
+        apply_dtb_listing(
+            &mut dtbs,
+            &names(&[
+                "usr/lib/modules/6.16.0/dtb/qcom/sc8280xp-crd.dtb",
+                "usr/lib/modules/6.17.1/dtb/qcom/sc8280xp-crd.dtb",
+            ]),
+        );
+        // `dnf upgrade kernel` in a derived image: the old kernel's directory
+        // is a whiteout directly under usr/lib/modules.
+        apply_dtb_listing(&mut dtbs, &names(&["usr/lib/modules/.wh.6.16.0"]));
+        assert_eq!(
+            dtbs,
+            ["6.17.1/dtb/qcom/sc8280xp-crd.dtb".to_string()].into()
+        );
+        apply_dtb_listing(
+            &mut dtbs,
+            &names(&[
+                "usr/lib/modules/6.18.0/dtb/qcom/sc8280xp-crd.dtb",
+                "usr/lib/modules/.wh..wh..opq",
+            ]),
+        );
+        assert_eq!(
+            dtbs,
+            ["6.18.0/dtb/qcom/sc8280xp-crd.dtb".to_string()].into()
+        );
+
+        let mut firmware = BTreeSet::new();
+        apply_firmware_listing(
+            &mut firmware,
+            &names(&["usr/lib/firmware/nvidia/tu102/gsp.bin.zst"]),
+        );
+        apply_firmware_listing(
+            &mut firmware,
+            &names(&[
+                "usr/lib/firmware/nvidia/ad102/gsp.bin.zst",
+                "usr/lib/firmware/nvidia/.wh..wh..opq",
+            ]),
+        );
+        assert_eq!(firmware, ["nvidia/ad102/gsp.bin".to_string()].into());
     }
 
     #[test]
