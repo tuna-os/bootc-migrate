@@ -65,28 +65,38 @@ pub fn run(args: &ScanArgs) -> Result<()> {
 }
 
 fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabilities) {
-    println!("=== Target image capabilities ===");
-    println!("Image:                 {image}");
-    println!(
-        "Composefs:             {}",
-        if caps.composefs_capable {
-            "capable"
-        } else {
-            "not enabled in prepare-root.conf"
-        }
-    );
-    println!(
-        "OSTree capable:        {}",
-        if caps.ostree_capable { "yes" } else { "no" }
-    );
-    println!(
-        "Bootloader payload:    {}",
-        if caps.systemd_boot_payload {
-            "systemd-boot ✓"
-        } else {
-            "none"
-        }
-    );
+    for line in capabilities_table_lines(image, caps) {
+        println!("{line}");
+    }
+}
+
+/// The capability table, one entry per output line, so tests can assert on it.
+fn capabilities_table_lines(
+    image: &str,
+    caps: &bootc_migrate_core::scan::Capabilities,
+) -> Vec<String> {
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    let mut lines = vec![
+        "=== Target image capabilities ===".to_string(),
+        format!("Image:                 {image}"),
+        format!(
+            "Composefs:             {}",
+            if caps.composefs_capable {
+                "capable"
+            } else {
+                "not enabled in prepare-root.conf"
+            }
+        ),
+        format!("OSTree capable:        {}", yes_no(caps.ostree_capable)),
+        format!(
+            "Bootloader payload:    {}",
+            if caps.systemd_boot_payload {
+                "systemd-boot ✓"
+            } else {
+                "none"
+            }
+        ),
+    ];
     let target_loaders = caps
         .target_bootloaders
         .iter()
@@ -99,78 +109,77 @@ fn print_capabilities_table(image: &str, caps: &bootc_migrate_core::scan::Capabi
             format!("{} ({authorities})", loader.path)
         })
         .collect::<Vec<_>>();
-    println!(
+    lines.push(format!(
         "Target EFI loaders:  {}",
         if target_loaders.is_empty() {
             "none".to_string()
         } else {
             target_loaders.join(", ")
         }
-    );
-    println!(
+    ));
+    lines.push(format!(
         "bootc present:         {}",
-        if caps.bootc_present { "yes" } else { "no" }
-    );
-    println!(
+        yes_no(caps.bootc_present)
+    ));
+    lines.push(format!(
         "bootupd present:       {}",
-        if caps.bootupd_present { "yes" } else { "no" }
-    );
-    println!(
+        yes_no(caps.bootupd_present)
+    ));
+    lines.push(format!(
         "Desktops:              {}",
         if caps.desktops.is_empty() {
             "none".to_string()
         } else {
             caps.desktops.join(", ")
         }
-    );
+    ));
     if let Some(base) = &caps.base {
-        println!(
+        lines.push(format!(
             "Base OS:               {} {}",
             base.id,
             base.version_id.as_deref().unwrap_or("")
-        );
+        ));
     } else {
-        println!("Base OS:               unknown");
+        lines.push("Base OS:               unknown".to_string());
     }
-    println!(
+    lines.push(format!(
         "Sysusers:              {} static allocation(s)",
         caps.sysusers.len()
-    );
-    println!(
+    ));
+    lines.push(format!(
         "Transient root/etc:    {} / {}",
-        if caps.root_transient { "yes" } else { "no" },
-        if caps.etc_transient { "yes" } else { "no" }
-    );
-    println!(
+        yes_no(caps.root_transient),
+        yes_no(caps.etc_transient)
+    ));
+    lines.push(format!(
         "fs-verity required:    {}",
-        if caps.fs_verity_required { "yes" } else { "no" }
-    );
-    println!(
+        yes_no(caps.fs_verity_required)
+    ));
+    lines.push(format!(
         "Initramfs composefs:   {}",
         if caps.initramfs_has_composefs_module {
             "module present"
         } else {
             "not present (may need regeneration for a composefs boot)"
         }
-    );
-    println!(
+    ));
+    lines.push(format!(
         "Filesystem expected:   {}",
         caps.filesystem_expectation.as_deref().unwrap_or("unknown")
-    );
-    println!(
+    ));
+    lines.push(format!(
         "Kernel:                {}",
         caps.kernel_version
             .as_deref()
             .unwrap_or("no kernel modules found")
-    );
+    ));
     let issues = bootc_migrate_core::scan::compatibility_issues(caps);
-    println!(
+    lines.push(format!(
         "Compatible:            {}",
         if issues.is_empty() { "YES" } else { "NO" }
-    );
-    for issue in &issues {
-        println!("  - {issue}");
-    }
+    ));
+    lines.extend(issues.iter().map(|issue| format!("  - {issue}")));
+    lines
 }
 
 /// This host's own facts (issue #371), when `scan` is run ahead of a
@@ -274,4 +283,176 @@ fn format_host_mount(mount: &bootc_migrate_core::package_host::MountFacts) -> St
         parts.push(format!("on {}", layers.join("+")));
     }
     parts.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bootc_migrate_core::package_host::MountFacts;
+    use bootc_migrate_core::preflight::{TargetBootloader, TargetBootloaderKind};
+    use bootc_migrate_core::scan::{ProbeFiles, assemble};
+
+    fn table(probe: &ProbeFiles) -> Vec<String> {
+        capabilities_table_lines("ghcr.io/example/image:latest", &assemble(probe))
+    }
+
+    /// The value printed after `label`, or a panic naming the missing row.
+    fn row<'a>(lines: &'a [String], label: &str) -> &'a str {
+        lines
+            .iter()
+            .find_map(|line| line.strip_prefix(label))
+            .unwrap_or_else(|| panic!("no {label:?} row in {lines:#?}"))
+            .trim()
+    }
+
+    fn capable_probe() -> ProbeFiles {
+        ProbeFiles {
+            os_release: Some("ID=fedora\nVERSION_ID=43\n".to_string()),
+            prepare_root: Some("[composefs]\nenabled = maybe\n[root]\ntransient = true\n".into()),
+            sysusers: vec!["u foo 123\ng bar 456\n".to_string()],
+            session_files: vec!["gnome.desktop".to_string()],
+            has_systemd_boot_payload: true,
+            target_bootloaders: vec![
+                TargetBootloader {
+                    kind: TargetBootloaderKind::Shim,
+                    path: "usr/lib/shim/shimx64.efi".to_string(),
+                    signature_present: true,
+                    authorities: vec!["2011".to_string(), "2023".to_string()],
+                    inspection_error: None,
+                },
+                TargetBootloader {
+                    kind: TargetBootloaderKind::SystemdBoot,
+                    path: "usr/lib/systemd/boot/efi/systemd-bootx64.efi".to_string(),
+                    signature_present: false,
+                    authorities: vec![],
+                    inspection_error: None,
+                },
+            ],
+            has_bootc: true,
+            has_bootupd: true,
+            dracut_module_dir_names: vec!["90composefs".to_string()],
+            bootc_install_config: Some("[install.filesystem.root]\ntype = \"xfs\"\n".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn capable_image_reports_every_capability_and_is_compatible() {
+        let lines = table(&capable_probe());
+        assert_eq!(lines[0], "=== Target image capabilities ===");
+        let expected: &[(&str, &str)] = &[
+            ("Image:", "ghcr.io/example/image:latest"),
+            ("Composefs:", "capable"),
+            ("OSTree capable:", "yes"),
+            ("Bootloader payload:", "systemd-boot ✓"),
+            (
+                "Target EFI loaders:",
+                "usr/lib/shim/shimx64.efi (UEFI CA 2011/2023), \
+                 usr/lib/systemd/boot/efi/systemd-bootx64.efi (unrecognized signer)",
+            ),
+            ("bootc present:", "yes"),
+            ("bootupd present:", "yes"),
+            ("Desktops:", "gnome"),
+            ("Base OS:", "fedora 43"),
+            ("Sysusers:", "2 static allocation(s)"),
+            ("Transient root/etc:", "yes / no"),
+            ("fs-verity required:", "yes"),
+            ("Initramfs composefs:", "module present"),
+            ("Compatible:", "YES"),
+        ];
+        for (label, want) in expected {
+            assert_eq!(row(&lines, label), *want, "row {label:?}");
+        }
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Compatible:            YES"),
+            "a compatible image lists no issues after the verdict"
+        );
+    }
+
+    #[test]
+    fn empty_probe_reports_absent_capabilities_and_lists_the_issue() {
+        let lines = table(&ProbeFiles::default());
+        let expected: &[(&str, &str)] = &[
+            ("Composefs:", "not enabled in prepare-root.conf"),
+            ("OSTree capable:", "no"),
+            ("Bootloader payload:", "none"),
+            ("Target EFI loaders:", "none"),
+            ("bootc present:", "no"),
+            ("bootupd present:", "no"),
+            ("Desktops:", "none"),
+            ("Base OS:", "unknown"),
+            ("Sysusers:", "0 static allocation(s)"),
+            ("Transient root/etc:", "no / no"),
+            ("fs-verity required:", "no"),
+            (
+                "Initramfs composefs:",
+                "not present (may need regeneration for a composefs boot)",
+            ),
+            ("Filesystem expected:", "unknown"),
+            ("Kernel:", "no kernel modules found"),
+            ("Compatible:", "NO"),
+        ];
+        for (label, want) in expected {
+            assert_eq!(row(&lines, label), *want, "row {label:?}");
+        }
+        let verdict = lines
+            .iter()
+            .position(|line| line.starts_with("Compatible:"))
+            .expect("verdict row");
+        assert_eq!(
+            lines[verdict + 1..],
+            [
+                "  - no usr/lib/ostree/prepare-root.conf found — not an ostree/bootc image"
+                    .to_string()
+            ],
+            "every compatibility issue is listed right after the verdict"
+        );
+    }
+
+    #[test]
+    fn base_without_version_id_prints_the_id_alone() {
+        let probe = ProbeFiles {
+            os_release: Some("ID=arch\n".to_string()),
+            ..capable_probe()
+        };
+        assert_eq!(row(&table(&probe), "Base OS:"), "arch");
+    }
+
+    #[test]
+    fn host_mounts_name_subvolume_and_device_layers() {
+        let mount = |fs: &str, subvol: Option<&str>, luks, lvm| MountFacts {
+            fs_type: fs.to_string(),
+            btrfs_subvol: subvol.map(str::to_string),
+            on_luks: luks,
+            on_lvm: lvm,
+            ..Default::default()
+        };
+        let cases = [
+            (mount("ext4", None, false, false), "ext4"),
+            (
+                mount("btrfs", Some("root"), false, false),
+                "btrfs, subvol=root",
+            ),
+            (mount("xfs", None, true, false), "xfs, on LUKS"),
+            (mount("xfs", None, true, true), "xfs, on LUKS+LVM"),
+            (
+                mount("btrfs", Some("home"), false, true),
+                "btrfs, subvol=home, on LVM",
+            ),
+        ];
+        for (facts, want) in cases {
+            assert_eq!(format_host_mount(&facts), want);
+        }
+    }
+
+    #[test]
+    fn host_submount_falls_back_to_the_root_filesystem() {
+        assert_eq!(format_host_submount(&None), "part of the root filesystem");
+        let var = MountFacts {
+            fs_type: "xfs".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(format_host_submount(&Some(var)), "xfs");
+    }
 }
