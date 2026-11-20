@@ -1267,6 +1267,36 @@ pub fn promote_committed_boot_order() -> Result<()> {
     Ok(())
 }
 
+/// Record in a package-host boot transaction that `commit --apply` is about
+/// to reclaim the old package OS, including the "Previous system" entry the
+/// journal tracks; afterwards the cutover classifies as complete without it.
+/// Refuses an unfinished cutover. A host with no package journal (installed
+/// before the package route was journaled) has nothing to record.
+pub fn record_package_commit() -> Result<()> {
+    let Some(mut txn) = read_host_transaction()? else {
+        return Ok(());
+    };
+    if txn.source != TxnSource::Package {
+        return Ok(());
+    }
+    let classification = classify_transaction(&txn)?;
+    if !matches!(
+        classification,
+        InstallClassification::Complete | InstallClassification::Failed
+    ) {
+        bail!(
+            "package boot transaction is {}, not finished; rerun the migration to resume it \
+             before committing",
+            classification.as_str()
+        );
+    }
+    txn.boot_order_promoted = true;
+    txn.advance(BootTxnPhase::Committed);
+    persist_transaction(&txn)?;
+    println!("[boot-txn] package cutover committed; the rollback entry is no longer tracked");
+    Ok(())
+}
+
 // ---- I/O -----------------------------------------------------------------
 /// Package-source install report. The boot snapshot is intentionally retained
 /// for the rollback entry implemented by issue #374.

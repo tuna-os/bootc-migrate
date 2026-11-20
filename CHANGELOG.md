@@ -64,6 +64,12 @@ The binary embeds the git SHA at build time (`bootc-migrate --version`).
   ext4 `/boot` and btrfs inside a passphrase-unlocked LUKS2 root, the
   layout fisherman gives a desktop install.
 
+- Guided package-host commit (#378): `bootc-rebase commit` recognizes a
+  package-install report, requires the reported OSTree deployment and a clean
+  first-boot verdict, lists every old-root path and allocated size, and removes
+  only verified carried data, disposable package state, and managed rollback
+  artifacts. Plain-directory homes remain protected unless `--move-home`
+  requests a same-filesystem rename into `/var/home`.
 - Reversible migration support for postmarketOS-family ARM64 laptops (#461):
   - Detect apk-managed package hosts via `/lib/apk/db/installed`.
   - Accept LUKS roots in preflight when `/boot` is on an unencrypted partition or ESP, and derive `rd.luks.name` / `root=` from the live device-mapper identity, `/etc/crypttab`, or `pmos_root_uuid=`, binding the UUID and mapper name to the volume that actually backs `/`. A LUKS root with no derivable `root=` is refused before any change.
