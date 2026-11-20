@@ -235,7 +235,7 @@ coverage:
 
 # Coverage with the regression floor CI enforces (see docs/testing.md).
 coverage-check:
-    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 26
+    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 68
 
 # Browsable HTML coverage report (target/llvm-cov/html/index.html).
 coverage-html:

@@ -58,7 +58,7 @@ jobs:
         run: |
           set -o pipefail
           cargo llvm-cov --workspace --all-features --summary-only \
-            --fail-under-lines 26 | tee cov.txt
+            --fail-under-lines 68 | tee cov.txt
           {
             echo '## Line coverage'
             echo '```'
