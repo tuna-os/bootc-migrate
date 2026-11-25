@@ -236,6 +236,36 @@ Interactive code splits into three layers:
    or render with `agg`.
 3. **Manual exploratory tests**: use Corral VMs (AGENTS.md) for UI tests.
 
+The driver's grid emulator ignores SGR styling, so a passing text-grid check
+proves *which screen was showing*, not colour, theme or branding. With
+`--receipt PATH` (plus `--scenario`, `--run-id`, `--attempt`, `--source-rev`;
+`tests/tui_receipt.py` must sit next to the driver) it writes a revision-bound
+JSON receipt: binary hash and source revision, harness/schema version,
+TERM/locale/geometry, state transitions, wait timings, a sanitized input trace
+(typed text is hashed, not stored), check outcomes, bounded first-failure
+evidence, and cleanup. Capabilities are reported separately and only `pass`
+when a check of that kind ran and passed:
+
+| capability | meaning |
+|------------|---------|
+| `text_grid` | reconstructed grid showed the expected state |
+| `interaction` | keys were sent and the expected transitions followed |
+| `backend_intent` | UI state correlated with a backend/file assertion |
+| `pixel` | independent terminal-raster assertion bound to the same run and state |
+
+Dry-run and mock runs are labelled and never set `qualifies_actual_migration`.
+A scenario that claims `pixel` fails unless raster evidence with renderer and
+font identity passes; VHS captures (`scripts/capture-screenshots.sh`) are
+documentation and never satisfy that claim. Required fresh-state checks use
+`TuiDriver.fresh_check`, which returns `settled=False` (and the receipt records
+`unobservable`) instead of reading a stale grid when the repaint/quiet
+criteria time out. `verify_receipt()` is the independent gate over a finished
+receipt. Not yet wired: `run-e2e.sh` does not upload `tui_receipt.py` or pass
+`--receipt`, no real terminal rasterizer exists yet (the tests use a
+test-only synthetic one), and backend-intent correlation is an API
+(`Receipt.check(..., "backend_intent", ...)`) the E2E stage still has to call.
+Run the fixtures with `just test-harness`.
+
 Run driver self-tests with:
 
 ```bash

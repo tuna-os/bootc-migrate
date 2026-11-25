@@ -387,3 +387,4 @@ commit msg:
 # Regression checks for E2E seed data and executable staging (no VM required).
 test-harness:
     python3 -m unittest discover -s tests -p 'test_harness_regressions.py' -v
+    python3 -m unittest discover -s tests -p 'test_tui_receipt.py' -v
