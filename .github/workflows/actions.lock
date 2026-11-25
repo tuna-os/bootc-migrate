@@ -112,7 +112,7 @@ dependencies:
         repo_id: 298565987
     'taiki-e/install-action@cargo-llvm-cov':
         ref: 'cargo-llvm-cov'
-        commit: 'sha1-5b56535d0239d0a46e7d74f64d83712fad4564d3'
+        commit: 'sha1-dfc065c7e0e98a962f5f09de95e522dfd01e88d6'
         owner_id: 43724913
         repo_id: 442947557
     'ublue-os/remove-unwanted-software@v9':
