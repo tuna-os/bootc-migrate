@@ -114,7 +114,7 @@ the pipeline; it is a mode that omits `seal` and pins `bootloader=keep`.
 `StandaloneBootloaderConfig` controller routes it. The command stages a
 reversible trial. It does not change the persistent firmware order in the first step.
 
-The executable counterpart is `crates/bootc-rebase/src/routing.rs::plan`.
+The executable counterpart is `plan()` in `crates/bootc-migrate-core/src/rebase_plan.rs`.
 `bootc-rebase --plan` prints the selected phases and bootloader policy
 without host changes. The planner is pure and has tests for all four backend
 pairs. Strategy execution remains behind protected paths until trait
