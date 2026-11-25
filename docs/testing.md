@@ -236,14 +236,21 @@ Interactive code splits into three layers:
    or render with `agg`.
 3. **Manual exploratory tests**: use Corral VMs (AGENTS.md) for UI tests.
 
-The driver's grid emulator ignores SGR styling, so a passing text-grid check
-proves *which screen was showing*, not colour, theme or branding. With
-`--receipt PATH` (plus `--scenario`, `--run-id`, `--attempt`, `--source-rev`;
-`tests/tui_receipt.py` must sit next to the driver) it writes a revision-bound
-JSON receipt: binary hash and source revision, harness/schema version,
-TERM/locale/geometry, state transitions, wait timings, a sanitized input trace
-(typed text is hashed, not stored), check outcomes, bounded first-failure
-evidence, and cleanup. Capabilities are reported separately and only `pass`
+The driver's grid emulator does not read SGR colour codes. A text-grid check
+that passes proves which screen the driver saw. It does not prove colour,
+theme or brand. With `--receipt PATH` the driver writes a receipt that is bound
+to one revision. Also give `--scenario`, `--run-id`, `--attempt` and
+`--source-rev`, and keep `tests/tui_receipt.py` next to the driver. The receipt
+holds these fields:
+
+- the binary hash and the source revision
+- the harness and schema version
+- TERM, locale and geometry
+- state transitions and wait timings
+- a sanitized input trace (the hash of typed text, not the text)
+- check outcomes, bounded first-failure evidence, and cleanup
+
+The receipt lists each capability separately. A capability gets the value `pass` only
 when a check of that kind ran and passed:
 
 | capability | meaning |
@@ -253,17 +260,23 @@ when a check of that kind ran and passed:
 | `backend_intent` | UI state correlated with a backend/file assertion |
 | `pixel` | independent terminal-raster assertion bound to the same run and state |
 
-Dry-run and mock runs are labelled and never set `qualifies_actual_migration`.
-A scenario that claims `pixel` fails unless raster evidence with renderer and
-font identity passes; VHS captures (`scripts/capture-screenshots.sh`) are
-documentation and never satisfy that claim. Required fresh-state checks use
-`TuiDriver.fresh_check`, which returns `settled=False` (and the receipt records
-`unobservable`) instead of reading a stale grid when the repaint/quiet
-criteria time out. `verify_receipt()` is the independent gate over a finished
-receipt. Not yet wired: `run-e2e.sh` does not upload `tui_receipt.py` or pass
-`--receipt`, no real terminal rasterizer exists yet (the tests use a
-test-only synthetic one), and backend-intent correlation is an API
-(`Receipt.check(..., "backend_intent", ...)`) the E2E stage still has to call.
+Dry-run and mock runs carry a label. They never set `qualifies_actual_migration`.
+A scenario that claims `pixel` fails unless raster evidence passes. The evidence
+must name the renderer and the font. VHS captures (`scripts/capture-screenshots.sh`)
+are documentation. They never satisfy that claim.
+
+Required fresh-state checks use `TuiDriver.fresh_check`. When the repaint or
+quiet criteria time out, it returns `settled=False` and the receipt records
+`unobservable`. It does not use a stale grid. `verify_receipt()` is the
+independent gate over a finished receipt.
+
+Three items are not yet connected:
+
+- `run-e2e.sh` does not upload `tui_receipt.py` and does not pass `--receipt`.
+- The project has no real terminal rasterizer yet. The tests use a synthetic one.
+- The E2E stage must still call the backend-intent API,
+  `Receipt.check(..., "backend_intent", ...)`.
+
 Run the fixtures with `just test-harness`.
 
 Run driver self-tests with:
