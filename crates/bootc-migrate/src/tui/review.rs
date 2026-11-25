@@ -183,15 +183,15 @@ fn build_review_summary(app: &App) -> Vec<Line<'static>> {
     )));
     if app.is_package_source() {
         lines.push(Line::from(Span::styled(
-            "  • Print package-host readiness and target hardware reports",
+            "  • Print package-host readiness, software and target hardware reports",
             Style::default().fg(TEXT),
         )));
         lines.push(Line::from(Span::styled(
-            "  • Preview only: PackageInstall is not implemented yet (#373)",
+            "  • Preview only: the wizard does not run PackageInstall (needs a green #380 cell)",
             Style::default().fg(AMBER),
         )));
         lines.push(Line::from(Span::styled(
-            "  • Package software comparison is tracked separately in #377",
+            "  • The software report lists packages the target image lacks (#377)",
             Style::default().fg(MUTED),
         )));
         return lines;

@@ -628,8 +628,8 @@ impl App {
             &self.detected_os,
         );
         if self.is_package_source() {
-            // PackageInstall is still preview-only (#373). The wizard offers
-            // its target picker and readiness report, but never a live run.
+            // No package-source E2E cell is green on main (#380). The wizard
+            // offers its target picker and reports, but never a live run.
             self.opt_dry_run = true;
         }
         self.image_list_state.select(Some(0));
@@ -2021,8 +2021,8 @@ mod tests {
         app.image_list_state.select(Some(0));
         let review = draw_to_text(&mut app);
         assert!(review.contains("package-host readiness"));
-        assert!(review.contains("PackageInstall is not implemented yet"));
-        assert!(review.contains("software comparison is tracked separately"));
+        assert!(review.contains("the wizard does not run PackageInstall"));
+        assert!(review.contains("software report lists packages"));
         assert!(!review.contains("LIVE MIGRATION"));
     }
 

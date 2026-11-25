@@ -45,7 +45,7 @@ Source of truth for the table shape:
 | composefs → composefs | ImageSwap | **RED** (`main`); green once on a PR branch | `dakota -> utah` red on main 33891928677, green on PR 36215098705 — flaky, unproven |
 | ostree → ostree | OstreeDeploy | **PROVEN** | `bluefin ostree re-base` green on main 33891928677 (gating) |
 | composefs → ostree | OstreeInstall | **RED** | `dakota -> fedora-bootc` red on main 33891928677 *and* on PR 36215098705 — untriaged |
-| package → ostree | PackageInstall | **UNPROVEN, no implementation** | readiness and hardware reports exist, but #373 has not implemented the install and #380 has no cell |
+| package → ostree | PackageInstall | **UNPROVEN** | the install engine (#373), software report (#377), rollback entry (#374) and first-boot verification (#379) exist, but no #380 cell is green on `main` |
 
 What RED means for the two red routes: nobody triaged the failure, so
 this file makes no claim about *why*. The image-swap red does not prove
@@ -61,7 +61,7 @@ Route availability by frontend (mechanism fact, not a support claim):
 | ImageSwap | automatic fallback when already composefs | `-t … --target-backend composefs` | same wizard, swap path |
 | OstreeDeploy | no | `-t … --target-backend ostree` on ostree hosts | no |
 | OstreeInstall | no (`--target-backend` does not exist) | `-t … --target-backend ostree` on composefs hosts | no |
-| PackageInstall | no | package hosts get a read-only `--dry-run` readiness preview; live install refuses (#373) | OSTree-only target picker and read-only readiness preview |
+| PackageInstall | no | `rebase` runs the engine after the readiness and hardware gates pass; `--dry-run` previews it | OSTree-only target picker and read-only preview; never a live run |
 
 ## Package-based source hosts
 
@@ -87,8 +87,8 @@ A green UEFI/ext4 row does not promote btrfs, XFS, or BIOS.
 Package-host readiness now allows only UEFI, btrfs/XFS/ext4, and no LUKS/LVM.
 That gate does not claim support.
 PackageInstall alone cannot make a row PROVEN.
-The software report (#377), rollback entry (#374), guided commit (#378), and
-first-boot verification (#379) are not ready.
+The software report (#377), rollback entry (#374) and first-boot
+verification (#379) are implemented but unproven. Guided commit (#378) is open.
 
 ## Bootloader
 

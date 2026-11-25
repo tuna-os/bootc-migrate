@@ -421,16 +421,16 @@ fn render_package_preview(f: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            "  readiness and hardware reports. No system changes are made.",
+            "  readiness, software and hardware reports. No system changes are made.",
             Style::default().fg(TEXT),
         )),
         Line::raw(""),
         Line::from(Span::styled(
-            "  Live install (#373), software report (#377), rollback (#374), and",
+            "  The wizard stays read-only until a package-source E2E cell (#380) is",
             Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
-            "  guided commit (#378) are not implemented yet.",
+            "  green on main. To migrate, run bootc-rebase rebase without --dry-run.",
             Style::default().fg(MUTED),
         )),
         Line::raw(""),
