@@ -144,6 +144,9 @@ pub struct BootTransaction {
     pub rollback_entry: Option<String>,
     pub started_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
+    /// `commit --apply` ran: on a composefs host it promoted the target in
+    /// `BootOrder`; on a package host it reclaimed the old OS and its
+    /// "Previous system" entry.
     #[serde(default)]
     pub boot_order_promoted: bool,
     #[serde(default)]
@@ -286,7 +289,8 @@ pub fn classify_install(
 
 /// Classify a package-host transaction from its journal and observed state.
 ///
-/// * `Complete`: committed, and the journaled rollback (if any) is observed.
+/// * `Complete`: committed, and the journaled rollback is observed, or
+///   `commit --apply` has reclaimed it (`boot_order_promoted`).
 /// * `Failed`: staging failed and was reported; nothing left to drive.
 /// * `Resumable`: `Prepared` (the deployment's `/etc`, `/var` and labels are
 ///   done and the staging inputs are journaled) and the `/boot` snapshot
@@ -310,6 +314,8 @@ pub fn classify_package_install(
         && observed.state_present
         && (!staging.mirror || observed.mirror_present);
     match (txn.phase, staging.phase) {
+        // `commit --apply` reclaimed the package OS, rollback entry included.
+        (BootTxnPhase::Committed, _) if txn.boot_order_promoted => InstallClassification::Complete,
         (BootTxnPhase::Committed, RollbackStagingPhase::Failed) => InstallClassification::Failed,
         (BootTxnPhase::Committed, _) if staging_observed => InstallClassification::Complete,
         (BootTxnPhase::Committed, _) => InstallClassification::NeedsRepair,
@@ -694,6 +700,11 @@ mod tests {
                 "{phase:?}/{staging:?}/mirror={mirror}"
             );
         }
+
+        // After `commit --apply` the reclaimed rollback is no longer expected.
+        let mut reclaimed = package_txn(P::Committed, R::Mirrored, true);
+        reclaimed.boot_order_promoted = true;
+        assert_eq!(classify_package_install(&reclaimed, &lost), C::Complete);
 
         let mut no_deployment = package_txn(P::Prepared, R::Pending, true);
         no_deployment.deployment = None;

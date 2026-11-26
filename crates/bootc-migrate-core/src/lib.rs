@@ -62,6 +62,7 @@ pub mod ostree_install_txn;
 pub mod package_data;
 pub mod package_etc;
 pub mod package_host;
+pub mod package_install_commit;
 pub mod package_rollback;
 pub mod preflight;
 pub mod rebase_controller;
