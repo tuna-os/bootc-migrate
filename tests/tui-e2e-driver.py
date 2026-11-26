@@ -179,8 +179,18 @@ class Screen:
 class TuiDriver:
     """Spawn a TUI process on a pty and expect/send against its screen."""
 
-    def __init__(self, argv, transcript_path, record_path=None, snapshot_dir=None):
+    # Quiet period that makes a redraw burst "settled".
+    QUIET = 0.5
+
+    def __init__(self, argv, transcript_path, record_path=None, snapshot_dir=None,
+                 receipt=None, receipt_path=None):
         self.argv = argv
+        # Optional revision-bound evidence receipt (tests/tui_receipt.py).
+        self.receipt = receipt
+        self.receipt_path = receipt_path
+        self.eof = False
+        self.failed = False
+        self.last_settled = None
         self.transcript_path = transcript_path
         self.screen = Screen(COLS, ROWS)
         self.rows = ROWS
@@ -249,9 +259,11 @@ class TuiDriver:
             chunk = os.read(self.fd, 65536)
         except OSError as e:
             if e.errno == errno.EIO:  # pty closed: child exited
+                self.eof = True
                 return False
             raise
         if not chunk:
+            self.eof = True
             return False
         self.last_data = time.monotonic()
         if self.record_file:
@@ -283,12 +295,19 @@ class TuiDriver:
         last_heartbeat = start
         next_repaint = start + 1.0
         eof = False
+        polls = 0
         while True:
+            polls += 1
             result = check()
             if result is not None:
+                if self.receipt:
+                    self.receipt.wait(label, "matched", time.monotonic() - start, polls)
                 return result
             now = time.monotonic()
             if now >= deadline or eof:
+                if self.receipt:
+                    self.receipt.wait(label, "child_exit" if eof else "timeout",
+                                      now - start, polls)
                 return None
             if now - last_heartbeat >= 30:
                 log(f"still waiting for {label} ({int(deadline - now)}s left)")
@@ -320,14 +339,44 @@ class TuiDriver:
         driver wrong on slow guests. Presence-of-the-next-screen waits
         don't need this (the token can only come from a real frame);
         decisions that key off the CURRENT screen's state do."""
+        self._settle(timeout)
+        return check()  # best effort if the frame never settled
+
+    def _settle(self, timeout: float) -> bool:
+        """Force a repaint and wait for its redraw burst to arrive and go
+        quiet. True only if that was actually observed; the outcome is
+        kept in `last_settled` and the receipt."""
         start = time.monotonic()
         self.force_repaint()
         deadline = start + timeout
+        settled = False
+        reason = "timeout"
         while time.monotonic() < deadline:
-            self._drain(0.2)
-            if self.last_data > start and time.monotonic() - self.last_data >= 0.5:
-                return check()
-        return check()  # best effort at the deadline
+            if not self._drain(0.2):
+                reason = "child_exit"
+                break
+            if self.last_data > start and time.monotonic() - self.last_data >= self.QUIET:
+                settled = True
+                reason = "quiet"
+                break
+        self.last_settled = settled
+        if self.receipt:
+            self.receipt.wait("settle", reason, time.monotonic() - start)
+        return settled
+
+    def fresh_check(self, check, timeout: float = 8):
+        """Like synced_check, but for a REQUIRED fresh-state assertion:
+        returns (value, settled). When the repaint/quiet criteria are not
+        met the value is None — a stale best-effort grid never satisfies
+        the assertion."""
+        if not self._settle(timeout):
+            return None, False
+        return check(), True
+
+    def note_state(self, state_id: str) -> None:
+        """Record that `state_id` is on screen in the receipt."""
+        if self.receipt:
+            self.receipt.transition(state_id, self.screen.text())
 
     def row_containing(self, *substrs):
         """The first grid row containing every substring, or None."""
@@ -386,8 +435,10 @@ class TuiDriver:
         screenshot — the automated successor to the manual vhs capture
         in scripts/capture-screenshots.sh."""
         if not self.snapshot_dir:
+            self.note_state(label)
             return
         self.snapshot_count += 1
+        self.note_state(label)
         safe = re.sub(r"[^A-Za-z0-9_-]+", "-", label).strip("-")[:60]
         path = os.path.join(self.snapshot_dir, f"{self.snapshot_count:02d}-{safe}.txt")
         with open(path, "w", encoding="utf-8") as f:
@@ -425,7 +476,7 @@ class TuiDriver:
     # dropped a key typed 1s after a nudge (first tui-migrate cell run).
     WINCH_SETTLE = 2.5
 
-    def send(self, keys: str, label: str) -> None:
+    def send(self, keys: str, label: str, secret: bool = False) -> None:
         # Never type while a winsize nudge may still be mid-flight in the
         # TUI's event source — a key that races the resize gets dropped.
         settle = self.last_winch + self.WINCH_SETTLE - time.monotonic()
@@ -433,6 +484,8 @@ class TuiDriver:
             self._drain(settle)
             settle = self.last_winch + self.WINCH_SETTLE - time.monotonic()
         log(f"sending {keys!r} ({label})")
+        if self.receipt:
+            self.receipt.input(keys, label, secret=secret)
         os.write(self.fd, keys.encode())
         # Give the 50ms event loop a beat so key order is never a question.
         self._drain(0.2)
@@ -452,6 +505,7 @@ class TuiDriver:
 
     def save_transcript(self) -> None:
         self.snapshot("final-screen")
+        self.finish_receipt()
         if self.record_file:
             self.record_file.close()
             self.record_file = None
@@ -462,9 +516,32 @@ class TuiDriver:
             f.write(self.screen.text())
         log(f"final screen written to {self.transcript_path}")
 
+    def finish_receipt(self, ok: bool = True) -> None:
+        if not self.receipt or not self.receipt_path:
+            return
+        ok = ok and not self.failed
+        if ok:
+            # Reaching a flow's end means every verified wait/advance in
+            # it matched; the grid evidence is only text-state evidence.
+            r = self.receipt
+            r.check("driver-run", "interaction", "pass")
+            r.check("grid-states", "text_grid",
+                    "pass" if r.transitions else "not_run")
+        self.receipt.set_cleanup("ok" if ok else "failed",
+                                 "child reaped" if ok else "child killed after failure")
+        self.receipt.write(self.receipt_path)
+        log(f"receipt written to {self.receipt_path}")
+        self.receipt_path = None
+
     def fail(self, why: str) -> None:
         log(f"FAIL: {why}")
+        self.failed = True
+        if self.receipt:
+            self.receipt.check("driver-run", "interaction", "fail", detail=why)
+            self.receipt.record_failure(why, self.screen.text(),
+                                        "\n".join(r.rstrip() for r in self.screen.rows_text()))
         self.save_transcript()
+        self.finish_receipt(ok=False)
         print("---- final screen ----", flush=True)
         for row in self.screen.rows_text():
             trimmed = row.rstrip()
@@ -478,9 +555,34 @@ class TuiDriver:
         sys.exit(1)
 
 
+def make_receipt(args):
+    """Build the evidence receipt when --receipt is given. The driver only
+    ever claims text_grid + interaction: pixel and backend-intent
+    coverage stay not_run (and are never reported green) unless another
+    stage adds passing checks for them."""
+    if not args.receipt:
+        return None
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    import tui_receipt  # shipped next to this file
+
+    live = args.mode == "wizard" and not args.dry_run
+    return tui_receipt.Receipt(
+        scenario=args.scenario or args.mode,
+        run_id=args.run_id or str(int(time.time())),
+        attempt=args.attempt,
+        binary=args.binary,
+        source_revision=args.source_rev or None,
+        mode=tui_receipt.MODE_LIVE if live else tui_receipt.MODE_DRY_RUN,
+        claims=(tui_receipt.TEXT_GRID, tui_receipt.INTERACTION),
+        cols=COLS, rows=ROWS,
+        export_dir=args.receipt_evidence_dir or None)
+
+
 def make_driver(args, argv):
     return TuiDriver(argv, args.transcript,
-                     record_path=args.record, snapshot_dir=args.snapshot_dir)
+                     record_path=args.record, snapshot_dir=args.snapshot_dir,
+                     receipt=make_receipt(args), receipt_path=args.receipt or None)
 
 
 # The options screen's rows in cursor order — the "▶ " marker plus the
@@ -702,6 +804,16 @@ def main() -> None:
     parser.add_argument("--snapshot-dir", default="",
                         help="save a plain-text screenshot of each matched "
                              "screen into this directory")
+    parser.add_argument("--receipt", default="",
+                        help="write a revision-bound evidence receipt (JSON) here; "
+                             "needs tests/tui_receipt.py next to this file")
+    parser.add_argument("--receipt-evidence-dir", default="",
+                        help="export allowlisted, bounded failure evidence here")
+    parser.add_argument("--scenario", default="", help="scenario id for the receipt")
+    parser.add_argument("--run-id", default="", help="CI run id for the receipt")
+    parser.add_argument("--attempt", type=int, default=1, help="run attempt for the receipt")
+    parser.add_argument("--source-rev", default="",
+                        help="source revision the binary was built from")
     args = parser.parse_args()
 
     if args.mode in ("wizard", "wizard-expect-failure") and not args.target_image:

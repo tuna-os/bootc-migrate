@@ -17,6 +17,7 @@ TUI_PATHS = {
     "Cargo.toml",
     "Cargo.lock",
     "tests/tui-e2e-driver.py",
+    "tests/tui_receipt.py",
     "tests/run-e2e.sh",
     ".github/e2e-scenarios.yml",
     ".github/workflows/e2e-tests.yml",
