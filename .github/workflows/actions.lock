@@ -13,7 +13,7 @@ workflows:
     '.github/workflows/ci.yml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@stable'
-        - 'embarkstudios/cargo-deny-action@v2.1.1'
+        - 'embarkstudios/cargo-deny-action@v2.1.2'
         - 'extractions/setup-just@v4.0.0'
         - 'swatinem/rust-cache@v2.9.3'
         - 'taiki-e/install-action@cargo-llvm-cov'
@@ -83,9 +83,9 @@ dependencies:
         commit: 'sha1-39008827e6b4319a349e9a42dfc90579dd25f1ca'
         owner_id: 1940490
         repo_id: 260749683
-    'embarkstudios/cargo-deny-action@v2.1.1':
-        ref: 'v2.1.1'
-        commit: 'sha1-3c6349835b2b7b196a839186cb8b78e02f7b5f25'
+    'embarkstudios/cargo-deny-action@v2.1.2':
+        ref: 'v2.1.2'
+        commit: 'sha1-70f81531115945ba6eb6b941ec9d39d063438eb9'
         owner_id: 44887257
         repo_id: 228054692
     'extractions/setup-crate@0551596312d4008a6dfbc4d3c38fa20eaef46d2d':
