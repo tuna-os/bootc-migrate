@@ -3,7 +3,7 @@
 Thank you for your interest in `bootc-migrate`.
 
 > **Note:** this tool does an in-place migration of a real system.
-> Treat changes to the migration phases (`src/migration/`) with care.
+> Treat changes to the migration phases (`crates/bootc-migrate-core/src/migration/`) with care.
 > Run the end-to-end test suite before you merge changes.
 
 <!-- hive-contribute-plea: donated-compute appeal, keep in sync across repos -->

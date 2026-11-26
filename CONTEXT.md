@@ -83,10 +83,10 @@ migrator's path byte-compatible.
   composefs/composefs-oci crates directly, selected when the *target* is
   new-generation (the store format is defined by the bootc that reads it at
   boot).
-- **route / strategy** (`bootc-rebase::routing`) — the transition table:
+- **route / strategy** (`core::rebase_plan`) — the transition table:
   (source backend → target backend) → strategy (`CoreMigration`,
-  `OstreeDeploy`, `ImageSwap`) + implemented flag. First match wins; the CLI
-  refuses unimplemented routes.
+  `OstreeDeploy`, `ImageSwap`, `OstreeInstall`, `PackageInstall`) +
+  implemented flag. First match wins; the CLI refuses unimplemented routes.
 
 ## Core library tour (`bootc-migrate-core`)
 
