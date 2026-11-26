@@ -1297,6 +1297,11 @@ pub struct PackageInstallReport {
     /// Why `rollback_available` is false, verbatim.
     #[serde(default)]
     pub rollback_error: Option<String>,
+    /// What was carried from the package host's `/home`, `/var`, `/opt` and
+    /// `/usr/local`, with sizes and timings (#376). `None` when `/var` is a
+    /// dedicated filesystem the deployment mounts itself.
+    #[serde(default)]
+    pub package_data: Option<crate::package_data::PackageDataReport>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1893,7 +1898,11 @@ impl InstallConfig<'_> {
                 "/var: carrying the live tree into the stateroot"
             )
         );
-        let var_copied = copy_var_into_stateroot(self.source.stateroot_var())?;
+        let (var_copied, package_data_report) = if self.source == InstallSource::Package {
+            carry_package_data(self.source.stateroot_var(), &deploy_root)?
+        } else {
+            (copy_var_into_stateroot(self.source.stateroot_var())?, None)
+        };
         if var_copied {
             seed_var_from_target(self.target_image, self.source.stateroot_var());
         }
@@ -2130,6 +2139,7 @@ impl InstallConfig<'_> {
                 carried_etc_files: carried_etc,
                 rollback_available,
                 rollback_error,
+                package_data: package_data_report,
             })
             .expect("PackageInstallReport serializes")
         } else {
@@ -3166,6 +3176,66 @@ pub fn supplement_identity_from_usr_lib(deploy_root: &Path, out_etc: &Path) -> R
         }
     }
     Ok(supplemented)
+}
+
+/// Package-host data stage (#376): expose `/home` at `/var/home` without
+/// copying it, and carry only the allowlisted `/var/lib` trees, `/opt` and
+/// `/usr/local` instead of the whole live `/var` (which holds package-manager
+/// state the target image must own). Returns whether the stateroot `/var` was
+/// filled, as [`copy_var_into_stateroot`] does.
+fn carry_package_data(
+    stateroot_var: &str,
+    deploy_root: &Path,
+) -> Result<(bool, Option<crate::package_data::PackageDataReport>)> {
+    use crate::package_data::{detect_home_layout, stage};
+    let separate_var = crate::migration::var_layout::detect_separate_var()?;
+    if let Some(var) = separate_var {
+        println!(
+            "[var] /var is a dedicated filesystem (UUID={}); the merged /etc/fstab mounts it, \
+             nothing to copy",
+            var.uuid
+        );
+        return Ok((false, None));
+    }
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let fstab = fs::read_to_string("/etc/fstab").unwrap_or_default();
+    let home = detect_home_layout(&mountinfo, &fstab);
+    let ships_docker = ["usr/bin/docker", "usr/sbin/dockerd", "usr/bin/dockerd"]
+        .iter()
+        .any(|p| deploy_root.join(p).exists());
+    let report = stage(
+        Path::new("/"),
+        Path::new(stateroot_var),
+        deploy_root,
+        &home,
+        ships_docker,
+    )
+    .context("carrying package-host data into the OSTree stateroot")?;
+    // The mountpoint for the no-copy /home must exist in the stateroot /var.
+    fs::create_dir_all(Path::new(stateroot_var).join("home"))
+        .context("creating the /var/home mountpoint")?;
+    println!(
+        "[home] {} -> {} ({}): not copied",
+        report.home.source, report.home.destination, report.home.layout
+    );
+    for tree in &report.trees {
+        println!(
+            "[var] carried {} -> {} ({} files, {} MB, {} ms)",
+            tree.source,
+            tree.destination,
+            tree.files,
+            tree.bytes / (1024 * 1024),
+            tree.elapsed_ms
+        );
+    }
+    println!(
+        "[var] package data carried: {} files, {} MB in {} ms; binaries under /opt and \
+         /usr/local were built for the old OS and may not run on the new base",
+        report.total_files,
+        report.total_bytes / (1024 * 1024),
+        report.elapsed_ms
+    );
+    Ok((true, Some(report)))
 }
 
 /// Copy the live `/var` into `stateroot_var` unless `/var` is a dedicated
