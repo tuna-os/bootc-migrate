@@ -120,7 +120,7 @@ validation named in that issue's own scope never shipped.
 | composefs → composefs image swap (`Strategy::ImageSwap`) | implemented; cross-family swaps apply policy after finalization and preserve first-boot repair | one ordinary non-gating cell runs; dedicated cross-family image-swap coverage remains | #66, #259 |
 | Cross-family migration on the `bootc switch` routes (`cross_family`) | implemented for `OstreeDeploy` and `ImageSwap`; target defaults, identity remap and first-boot repair are covered | five non-gating cells cover refusal, staged `/etc` and booted identity; community images remain unvalidated | #256, #259, #261 |
 | First-boot repair (`firstboot_repair`, L3) | implemented on the `CoreMigration` and `OstreeInstall` routes; each class and the unit are table-tested on fixture roots | the `CoreMigration` cells break a canary tree after staging and assert the ownership repair after the reboot; the `flatpak` and `selinux-label` classes run in no cell, and `selinux-label` gets input only when the verify probe reports that class | #309 |
-| package → ostree (`PackageInstall`) | source detection, route planning, package-host readiness and hardware reports implemented; TUI exposes an OSTree-only read-only preview | install, `/etc` classification, data carry, rollback, software report, commit, first-boot verification and every E2E cell remain open; no package-host source is supported | #370–#381 |
+| package → ostree (`PackageInstall`) | source detection, route planning, readiness, hardware and software reports, install, `/etc` classification, data carry, rollback and first-boot verification implemented; TUI exposes an OSTree-only read-only preview | guided commit (#378) and every E2E cell remain open; no package-host source is supported | #370–#381 |
 | `NativeStore` (`composefs-native`) | behind a feature flag, off by default | default path still pins a legacy-CLI builder | #13 |
 | TUI composefs-host route step (#312) | implemented: background scan, dual-capable route choice, honest notes, bootc-rebase execution | covered by state-machine tests only; tui-migrate cell runs on an ostree host and does not exercise the composefs-host screens or launch bootc-rebase | #312 |
 | Package-managed source → OSTree (`Strategy::PackageInstall`) | harness support is implemented: checksum-pinned Fedora Cloud, synthesized Workstation, and Ubuntu Cloud disks, cloud-init SSH, package fixtures and Previous system assertions | the three #380 cells are exploratory until the package route and its readiness/report/bootloader pieces (#373–#379) land; the Fedora Cloud cell must be promoted to gating after its first green run on `main` | #373–#380 |
@@ -338,34 +338,33 @@ still advisable before treating firmware-specific behavior as universal.
 data untouched, stashes/restores DE state, swaps DE-scoped flatpaks on
 request; non-experts can read what will happen before it happens.
 
-### M6 — Package-host onboarding — **detection and readiness only**
+### M6 — Package-host onboarding — **implemented, unproven**
 
 [#370](https://github.com/tuna-os/bootc-migrate/issues/370) extends the engine
 to regular rpm-, dpkg-, and pacman-managed installs. We use this order because
 package hosts have varied disk layouts and lack an OSTree factory `/etc`.
 Detection alone does not prove that a side-by-side install is safe.
 
-The two read-only pieces have landed:
+Landed, with no green E2E cell on `main` yet:
 
 - #371 detects `Backend::Package`, plans `PackageInstall`, and defaults its
   target backend to OSTree.
 - #372 reports boot mode, filesystems, LUKS/LVM, btrfs subvolumes, `/boot`,
   `/home`, free space, active package managers, SELinux, and target hardware.
+- #373 is the install engine; #374 the old-system rollback and undo.
+- #375 classifies package-database `/etc`; #376 carries home and data.
+- #377 is the software report; #379 is first-boot verification.
 
-Mutation and completion remain open. Tracked work includes:
+Open:
 
-- #373: install engine.
-- #374: old-system rollback and undo.
-- #375: package-database `/etc` classification.
-- #376: home and data carry.
-- #377: software report.
-- #378: guided commit.
-- #379: first-boot verification.
-- #380: package-source E2E cells.
+- #378: guided commit (PR #466).
+- #380: package-source E2E cells. Until the first is green on `main`, no
+  source in the [support matrix](docs/support-matrix.md#package-based-source-hosts)
+  is supported.
 
-#381 records that boundary and adds evidence rows. It adds an OSTree-only
-**dry-run** entry to the TUI. Live confirmation and software reports need #373
-and #377.
+#381 records that boundary. The TUI offers an OSTree-only **dry-run** entry,
+which prints the readiness, software and hardware reports. A live TUI
+confirmation waits for a green #380 cell.
 
 **Exit criteria (not yet met):**
 
@@ -425,7 +424,7 @@ graph TD
   M1 --> M5A["M5 #68 DE stash/restore — detection+wiring landed, cross-DE E2E cell deferred"]
   M1 --> M5B["M5 #15 etc-drift report + TUI + Phase 4 wiring — done, TUI unit-tested + tui-migrate E2E cell gating"]
   M1 --> M5C["M5 #31 boot-entry audit + cleanup/branding — planner tested, NVRAM path needs a UEFI VM"]
-  M1 --> M6["M6 #370 package hosts — detection + readiness landed; install, reports, rollback and E2E open"]
+  M1 --> M6["M6 #370 package hosts — install, reports and rollback landed; commit and E2E open"]
 ```
 
 ## Risks & standing mitigations
